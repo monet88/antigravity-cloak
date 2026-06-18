@@ -19,6 +19,10 @@ func TestHandlePluginCallRegisterDeclaresRouterAndExecutor(t *testing.T) {
 		t.Fatalf("ok = %#v, want true", envelope["ok"])
 	}
 	result := envelope["result"].(map[string]any)
+	metadata := result["metadata"].(map[string]any)
+	if metadata["GitHubRepository"] != pluginRepository {
+		t.Fatalf("GitHubRepository = %#v, want %q", metadata["GitHubRepository"], pluginRepository)
+	}
 	capabilities := result["capabilities"].(map[string]any)
 	if capabilities["model_router"] != true {
 		t.Fatalf("model_router = %#v, want true", capabilities["model_router"])

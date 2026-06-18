@@ -51,8 +51,9 @@ import (
 const abiVersion = 1
 
 const (
-	pluginName    = "antigravity-coding-filter"
-	pluginVersion = "0.1.0"
+	pluginName       = "antigravity-coding-filter"
+	pluginVersion    = "0.1.0"
+	pluginRepository = "https://github.com/jellyfish-p/cpa-plugin-antigravity-coding-filter"
 )
 
 func main() {}
@@ -167,7 +168,7 @@ func registrationResponse() any {
 			Name:             pluginName,
 			Version:          pluginVersion,
 			Author:           "local",
-			GitHubRepository: "",
+			GitHubRepository: pluginRepository,
 			Logo:             "",
 			ConfigFields:     []pluginapi.ConfigField{},
 		},
