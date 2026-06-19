@@ -12,6 +12,25 @@ The plugin blocks a request when its JSON body contains any of these signals:
 
 Keyword matching is case-insensitive and only scans `system`. Mentions in user prompts, `messages`, or other fields do not block by themselves.
 
+## Keyword Configuration
+
+The built-in keyword preset is enabled by default. You can disable it and provide your own keywords in the plugin config:
+
+```yaml
+plugins:
+  configs:
+    antigravity-coding-filter:
+      enabled: true
+      priority: 1
+      use_default_keywords: false
+      custom_keywords:
+        - Cursor
+        - Windsurf
+        - JetBrains AI
+```
+
+`custom_keywords` also accepts a comma- or newline-delimited string for simpler one-line config. Blank entries and duplicates are ignored.
+
 ## Build
 
 CLIProxyAPI dynamic plugins require CGO. Confirm `CGO_ENABLED=1` before building.
@@ -35,6 +54,8 @@ plugins:
     antigravity-coding-filter:
       enabled: true
       priority: 1
+      use_default_keywords: true
+      custom_keywords: []
 ```
 
 CLIProxyAPI searches `plugins/<GOOS>/<GOARCH>-<variant>`, then `plugins/<GOOS>/<GOARCH>`, then `plugins`.

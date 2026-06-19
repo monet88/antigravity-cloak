@@ -42,10 +42,12 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
+	"gopkg.in/yaml.v3"
 )
 
 const abiVersion = 1
@@ -126,8 +128,10 @@ type executorStreamChunk struct {
 
 func handlePluginCall(method string, request []byte) ([]byte, int) {
 	switch method {
-	case pluginabi.MethodPluginRegister, pluginabi.MethodPluginReconfigure:
-		return mustEnvelope(registrationResponse()), 0
+	case pluginabi.MethodPluginRegister:
+		return handlePluginLifecycle(request), 0
+	case pluginabi.MethodPluginReconfigure:
+		return handlePluginLifecycle(request), 0
 	case pluginabi.MethodModelRoute:
 		return handleModelRoute(request), 0
 	case pluginabi.MethodExecutorExecute, pluginabi.MethodExecutorCountTokens:
@@ -151,6 +155,17 @@ func handlePluginCall(method string, request []byte) ([]byte, int) {
 	}
 }
 
+func handlePluginLifecycle(request []byte) []byte {
+	if len(request) > 0 {
+		cfg, err := filterConfigFromLifecycleRequest(request)
+		if err != nil {
+			return mustErrorEnvelope("invalid_config", err.Error())
+		}
+		applyFilterConfig(cfg)
+	}
+	return mustEnvelope(registrationResponse())
+}
+
 func registrationResponse() any {
 	return struct {
 		SchemaVersion uint32             `json:"schema_version"`
@@ -170,7 +185,7 @@ func registrationResponse() any {
 			Author:           "local",
 			GitHubRepository: pluginRepository,
 			Logo:             "",
-			ConfigFields:     []pluginapi.ConfigField{},
+			ConfigFields:     configFields(),
 		},
 		Capabilities: struct {
 			ModelRouter           bool                         `json:"model_router"`
@@ -184,6 +199,21 @@ func registrationResponse() any {
 			ExecutorModelScope:    pluginapi.ExecutorModelScopeBoth,
 			ExecutorInputFormats:  []string{"chat-completions", "responses", "anthropic", "gemini"},
 			ExecutorOutputFormats: []string{"chat-completions", "responses", "anthropic", "gemini"},
+		},
+	}
+}
+
+func configFields() []pluginapi.ConfigField {
+	return []pluginapi.ConfigField{
+		{
+			Name:        "use_default_keywords",
+			Type:        pluginapi.ConfigFieldTypeBoolean,
+			Description: "Enable the built-in coding client keyword preset: OpenCode, Codex, Claude Code.",
+		},
+		{
+			Name:        "custom_keywords",
+			Type:        pluginapi.ConfigFieldTypeArray,
+			Description: "Additional case-insensitive keywords to block when they appear in the system field.",
 		},
 	}
 }
@@ -255,6 +285,133 @@ var defaultCodingKeywords = []string{
 	"claude code",
 }
 
+type filterConfig struct {
+	UseDefaultKeywords bool
+	CustomKeywords     []string
+}
+
+var (
+	filterConfigMu      sync.RWMutex
+	currentFilterConfig = defaultFilterConfig()
+)
+
+func defaultFilterConfig() filterConfig {
+	return filterConfig{UseDefaultKeywords: true}
+}
+
+func applyFilterConfig(cfg filterConfig) {
+	filterConfigMu.Lock()
+	defer filterConfigMu.Unlock()
+
+	currentFilterConfig = filterConfig{
+		UseDefaultKeywords: cfg.UseDefaultKeywords,
+		CustomKeywords:     append([]string(nil), normalizeKeywords(cfg.CustomKeywords)...),
+	}
+}
+
+func activeFilterConfig() filterConfig {
+	filterConfigMu.RLock()
+	defer filterConfigMu.RUnlock()
+
+	return filterConfig{
+		UseDefaultKeywords: currentFilterConfig.UseDefaultKeywords,
+		CustomKeywords:     append([]string(nil), currentFilterConfig.CustomKeywords...),
+	}
+}
+
+type lifecycleRequest struct {
+	ConfigYAML []byte `json:"config_yaml"`
+}
+
+func filterConfigFromLifecycleRequest(request []byte) (filterConfig, error) {
+	var req lifecycleRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return filterConfig{}, fmt.Errorf("decode lifecycle request: %w", err)
+	}
+	return parseFilterConfigYAML(req.ConfigYAML)
+}
+
+func parseFilterConfigYAML(raw []byte) (filterConfig, error) {
+	cfg := defaultFilterConfig()
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return cfg, nil
+	}
+
+	var values map[string]any
+	if err := yaml.Unmarshal(raw, &values); err != nil {
+		return filterConfig{}, fmt.Errorf("decode config yaml: %w", err)
+	}
+	if value, exists := values["use_default_keywords"]; exists {
+		boolValue, ok := value.(bool)
+		if !ok {
+			return filterConfig{}, fmt.Errorf("use_default_keywords must be a boolean")
+		}
+		cfg.UseDefaultKeywords = boolValue
+	}
+	if value, exists := values["custom_keywords"]; exists {
+		keywords, err := parseCustomKeywords(value)
+		if err != nil {
+			return filterConfig{}, err
+		}
+		cfg.CustomKeywords = keywords
+	}
+	return cfg, nil
+}
+
+func parseCustomKeywords(value any) ([]string, error) {
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		return splitKeywordString(typed), nil
+	case []any:
+		keywords := make([]string, 0, len(typed))
+		for _, item := range typed {
+			text, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("custom_keywords entries must be strings")
+			}
+			keywords = append(keywords, text)
+		}
+		return keywords, nil
+	default:
+		return nil, fmt.Errorf("custom_keywords must be an array or string")
+	}
+}
+
+func splitKeywordString(value string) []string {
+	fields := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r'
+	})
+	return fields
+}
+
+func effectiveKeywords(cfg filterConfig) []string {
+	keywords := make([]string, 0, len(defaultCodingKeywords)+len(cfg.CustomKeywords))
+	if cfg.UseDefaultKeywords {
+		keywords = append(keywords, defaultCodingKeywords...)
+	}
+	keywords = append(keywords, cfg.CustomKeywords...)
+	return normalizeKeywords(keywords)
+}
+
+func normalizeKeywords(keywords []string) []string {
+	seen := make(map[string]struct{}, len(keywords))
+	out := make([]string, 0, len(keywords))
+	for _, keyword := range keywords {
+		normalized := strings.ToLower(strings.TrimSpace(keyword))
+		if normalized == "" {
+			continue
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	return out
+}
+
 type filterDecision struct {
 	Blocked bool
 	Signal  string
@@ -266,11 +423,12 @@ func classifyRequest(body []byte) filterDecision {
 	if err := json.Unmarshal(body, &root); err != nil {
 		return filterDecision{}
 	}
-	return classifyJSON(root)
+	return classifyJSON(root, activeFilterConfig())
 }
 
-func classifyJSON(root any) filterDecision {
+func classifyJSON(root any, cfg filterConfig) filterDecision {
 	var decision filterDecision
+	keywords := effectiveKeywords(cfg)
 	walkJSON(root, func(path []string, value any) bool {
 		key := ""
 		if len(path) > 0 {
@@ -293,7 +451,7 @@ func classifyJSON(root any) filterDecision {
 
 		if key == "system" {
 			text := strings.ToLower(collectText(value))
-			for _, keyword := range defaultCodingKeywords {
+			for _, keyword := range keywords {
 				if strings.Contains(text, keyword) {
 					decision = filterDecision{Blocked: true, Signal: "system.keyword", Detail: keyword}
 					return false
