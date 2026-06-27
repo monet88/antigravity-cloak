@@ -5,6 +5,7 @@
 - [x] Task 2: Tool Name Mapping Tables and Reverse Maps
       Task 2: complete (commits 9b663f0..9bf70b6, review clean)
 - [x] Task 3: Client Detection Logic
-      Task 3: complete (commits 9bf70b6..d4eca2e, review clean)
-- [ ] Task 4: Cloak Request Payload
+      Task 3: complete (commits 9bf70b6..06ad888, review clean)
+- [x] Task 4: Cloak Request Payload
+      Task 4: complete (commits 06ad888..1178e11, review clean)
 - [ ] Task 5: Response and Stream Chunk Interception (Structured Uncloak)
