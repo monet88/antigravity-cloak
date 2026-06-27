@@ -147,9 +147,11 @@ func registrationResponse() any {
 		SchemaVersion uint32             `json:"schema_version"`
 		Metadata      pluginapi.Metadata `json:"metadata"`
 		Capabilities  struct {
-			ModelRouter        bool `json:"model_router"`
-			Executor           bool `json:"executor"`
-			RequestInterceptor bool `json:"request_interceptor"`
+			ModelRouter            bool `json:"model_router"`
+			Executor               bool `json:"executor"`
+			RequestInterceptor     bool `json:"request_interceptor"`
+			ResponseInterceptor    bool `json:"response_interceptor"`
+			StreamChunkInterceptor bool `json:"stream_chunk_interceptor"`
 		} `json:"capabilities"`
 	}{
 		SchemaVersion: pluginabi.SchemaVersion,
@@ -162,11 +164,15 @@ func registrationResponse() any {
 			ConfigFields:     configFields(),
 		},
 		Capabilities: struct {
-			ModelRouter        bool `json:"model_router"`
-			Executor           bool `json:"executor"`
-			RequestInterceptor bool `json:"request_interceptor"`
+			ModelRouter            bool `json:"model_router"`
+			Executor               bool `json:"executor"`
+			RequestInterceptor     bool `json:"request_interceptor"`
+			ResponseInterceptor    bool `json:"response_interceptor"`
+			StreamChunkInterceptor bool `json:"stream_chunk_interceptor"`
 		}{
-			RequestInterceptor: true,
+			RequestInterceptor:     true,
+			ResponseInterceptor:    true,
+			StreamChunkInterceptor: true,
 		},
 	}
 }
@@ -182,6 +188,11 @@ func configFields() []pluginapi.ConfigField {
 			Name:        "custom_mappings",
 			Type:        pluginapi.ConfigFieldTypeObject,
 			Description: "Additional case-insensitive system-field rewrite mappings, for example Cursor: Antigravity.",
+		},
+		{
+			Name:        "tool_mappings",
+			Type:        pluginapi.ConfigFieldTypeObject,
+			Description: "Custom tool name mappings per client. Keys: client name (claude_code, codex). Values: map of original_tool_name → antigravity_target_name. Overrides defaults for matching keys.",
 		},
 	}
 }
@@ -234,9 +245,49 @@ type rewriteMapping struct {
 	Replacement string
 }
 
+var defaultCloakTables = map[string]map[string]string{
+	"claude_code": {
+		"bash": "run_command", "edit": "replace_file_content", "read": "view_file",
+		"write": "write_to_file", "grep": "grep_search", "glob": "list_dir",
+		"agent": "invoke_subagent", "askUserQuestion": "ask_question",
+		"toolSearch": "search_web", "skill": "call_mcp_tool", "workflow": "schedule",
+	},
+	"codex": {
+		"shell_command": "run_command", "apply_patch": "multi_replace_file_content",
+		"request_user_input": "ask_question", "view_image": "generate_image",
+		"update_plan": "manage_task", "tool_search": "search_web",
+		"get_goal": "schedule",
+		"create_goal": "send_message",
+		"update_goal": "define_subagent",
+		"list_mcp_resources": "list_resources",
+		"list_mcp_resource_templates": "list_permissions",
+		"read_mcp_resource": "read_resource",
+	},
+}
+
+func copyToolMappings(m map[string]map[string]string) map[string]map[string]string {
+	if m == nil {
+		return nil
+	}
+	res := make(map[string]map[string]string, len(m))
+	for k, v := range m {
+		if v == nil {
+			res[k] = nil
+			continue
+		}
+		inner := make(map[string]string, len(v))
+		for ik, iv := range v {
+			inner[ik] = iv
+		}
+		res[k] = inner
+	}
+	return res
+}
+
 type filterConfig struct {
 	UseDefaultKeywords bool
 	CustomMappings     []rewriteMapping
+	ToolMappings       map[string]map[string]string // client → {orig_tool: antigravity_tool}
 }
 
 var (
@@ -245,7 +296,10 @@ var (
 )
 
 func defaultFilterConfig() filterConfig {
-	return filterConfig{UseDefaultKeywords: true}
+	return filterConfig{
+		UseDefaultKeywords: true,
+		ToolMappings:       copyToolMappings(defaultCloakTables),
+	}
 }
 
 func applyFilterConfig(cfg filterConfig) {
@@ -255,6 +309,7 @@ func applyFilterConfig(cfg filterConfig) {
 	currentFilterConfig = filterConfig{
 		UseDefaultKeywords: cfg.UseDefaultKeywords,
 		CustomMappings:     append([]rewriteMapping(nil), normalizeMappings(cfg.CustomMappings)...),
+		ToolMappings:       copyToolMappings(cfg.ToolMappings),
 	}
 }
 
@@ -265,6 +320,7 @@ func activeFilterConfig() filterConfig {
 	return filterConfig{
 		UseDefaultKeywords: currentFilterConfig.UseDefaultKeywords,
 		CustomMappings:     append([]rewriteMapping(nil), currentFilterConfig.CustomMappings...),
+		ToolMappings:       copyToolMappings(currentFilterConfig.ToolMappings),
 	}
 }
 
@@ -304,7 +360,56 @@ func parseFilterConfigYAML(raw []byte) (filterConfig, error) {
 		}
 		cfg.CustomMappings = mappings
 	}
+	if value, exists := values["tool_mappings"]; exists {
+		parsedMappings, err := parseToolMappings(value)
+		if err != nil {
+			return filterConfig{}, err
+		}
+		if cfg.ToolMappings == nil {
+			cfg.ToolMappings = make(map[string]map[string]string)
+		}
+		for client, mappings := range parsedMappings {
+			if cfg.ToolMappings[client] == nil {
+				cfg.ToolMappings[client] = make(map[string]string)
+			}
+			for orig, target := range mappings {
+				cfg.ToolMappings[client][orig] = target
+			}
+		}
+	}
 	return cfg, nil
+}
+
+func parseToolMappings(value any) (map[string]map[string]string, error) {
+	typed, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("tool_mappings must be an object")
+	}
+	result := make(map[string]map[string]string)
+	for client, clientVal := range typed {
+		clientMap, err := parseStringMap(clientVal)
+		if err != nil {
+			return nil, fmt.Errorf("client %q: %w", client, err)
+		}
+		result[client] = clientMap
+	}
+	return result, nil
+}
+
+func parseStringMap(value any) (map[string]string, error) {
+	typed, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("must be an object")
+	}
+	res := make(map[string]string)
+	for k, v := range typed {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("value for key %q must be a string", k)
+		}
+		res[k] = s
+	}
+	return res, nil
 }
 
 func parseCustomMappings(value any) ([]rewriteMapping, error) {

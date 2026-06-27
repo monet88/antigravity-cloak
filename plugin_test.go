@@ -33,12 +33,41 @@ func TestHandlePluginCallRegisterDeclaresRequestInterceptor(t *testing.T) {
 	if capabilities["request_interceptor"] != true {
 		t.Fatalf("request_interceptor = %#v, want true", capabilities["request_interceptor"])
 	}
+	if capabilities["response_interceptor"] != true {
+		t.Fatalf("response_interceptor = %#v, want true", capabilities["response_interceptor"])
+	}
+	if capabilities["stream_chunk_interceptor"] != true {
+		t.Fatalf("stream_chunk_interceptor = %#v, want true", capabilities["stream_chunk_interceptor"])
+	}
 	fields := result["metadata"].(map[string]any)["ConfigFields"].([]any)
 	if !hasConfigField(fields, "use_default_keywords", "boolean") {
 		t.Fatalf("ConfigFields = %#v, want boolean use_default_keywords", fields)
 	}
 	if !hasConfigField(fields, "custom_mappings", "object") {
 		t.Fatalf("ConfigFields = %#v, want object custom_mappings", fields)
+	}
+	if !hasConfigField(fields, "tool_mappings", "object") {
+		t.Fatalf("ConfigFields = %#v, want object tool_mappings", fields)
+	}
+}
+
+func TestReconfigureWithToolMappingsOverride(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
+tool_mappings:
+  claude_code:
+    bash: run_command
+    my_custom_tool: ask_permission
+  codex:
+    shell_command: run_command
+`)))
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; body=%s", code, raw)
+	}
+	cfg := activeFilterConfig()
+	// Verify ToolMappings parsed correctly
+	if cfg.ToolMappings["claude_code"]["my_custom_tool"] != "ask_permission" {
+		t.Fatalf("expected custom tool mapping")
 	}
 }
 
