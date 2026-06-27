@@ -108,3 +108,28 @@ func containsSystemText(t *testing.T, body []byte, want string) bool {
 	})
 	return found
 }
+
+func TestUncloakTablesInitialization(t *testing.T) {
+	if len(defaultUncloakTables) == 0 {
+		t.Fatal("uncloak tables not initialized")
+	}
+	// Claude Code
+	if defaultUncloakTables["claude_code"]["run_command"] != "bash" {
+		t.Fatal("expected bash")
+	}
+	// Codex
+	if defaultUncloakTables["codex"]["run_command"] != "shell_command" {
+		t.Fatal("expected shell_command")
+	}
+	// Verify no key collision within a client's cloak table
+	for client, cloaks := range defaultCloakTables {
+		seen := make(map[string]bool)
+		for _, target := range cloaks {
+			if seen[target] {
+				t.Fatalf("client %s has duplicate target %s", client, target)
+			}
+			seen[target] = true
+		}
+	}
+}
+

@@ -265,6 +265,20 @@ var defaultCloakTables = map[string]map[string]string{
 	},
 }
 
+var defaultUncloakTables map[string]map[string]string
+
+func init() {
+	defaultUncloakTables = make(map[string]map[string]string)
+	for client, cloaks := range defaultCloakTables {
+		uncloaks := make(map[string]string)
+		for orig, mapped := range cloaks {
+			uncloaks[mapped] = orig
+		}
+		defaultUncloakTables[client] = uncloaks
+	}
+}
+
+
 func copyToolMappings(m map[string]map[string]string) map[string]map[string]string {
 	if m == nil {
 		return nil
