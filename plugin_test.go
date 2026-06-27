@@ -289,3 +289,259 @@ func mustUnmarshalJSON(t *testing.T, raw []byte, out any) {
 		t.Fatalf("unmarshal %s: %v", raw, err)
 	}
 }
+
+func TestResponseInterceptReversesClaudeCodeCloak(t *testing.T) {
+	// Build a request body with Claude Code tools
+	reqBody := `{"tools":[{"type":"function","function":{"name":"bash"}},{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"edit"}}],"messages":[]}`
+	// Build a response body with cloaked tool call
+	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
+
+	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
+	raw, code := handlePluginCall("response.intercept_after", request)
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+
+	// Parse response → verify tool_calls[].function.name == "bash" (uncloaked)
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+
+	var resp map[string]any
+	mustUnmarshalJSON(t, decoded, &resp)
+
+	choices := resp["choices"].([]any)
+	choice := choices[0].(map[string]any)
+	message := choice["message"].(map[string]any)
+	toolCalls := message["tool_calls"].([]any)
+	toolCall := toolCalls[0].(map[string]any)
+	fn := toolCall["function"].(map[string]any)
+	name := fn["name"].(string)
+
+	if name != "bash" {
+		t.Fatalf("expected tool call function name to be 'bash', got %q", name)
+	}
+}
+
+func TestResponseInterceptReversesCodexCloak(t *testing.T) {
+	reqBody := `{"tools":[{"type":"function","function":{"name":"shell_command"}}],"messages":[]}`
+	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
+
+	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
+	raw, code := handlePluginCall("response.intercept_after", request)
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+
+	var resp map[string]any
+	mustUnmarshalJSON(t, decoded, &resp)
+
+	choices := resp["choices"].([]any)
+	choice := choices[0].(map[string]any)
+	message := choice["message"].(map[string]any)
+	toolCalls := message["tool_calls"].([]any)
+	toolCall := toolCalls[0].(map[string]any)
+	fn := toolCall["function"].(map[string]any)
+	name := fn["name"].(string)
+
+	if name != "shell_command" {
+		t.Fatalf("expected tool call function name to be 'shell_command', got %q", name)
+	}
+}
+
+func TestResponseInterceptDoesNotCorruptProse(t *testing.T) {
+	// Verify that "run_command" appearing in assistant text is NOT replaced
+	reqBody := `{"tools":[{"type":"function","function":{"name":"bash"}},{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"edit"}}],"messages":[]}`
+	respBody := `{"choices":[{"message":{"content":"You can use run_command to execute..."}}]}`
+
+	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
+	raw, code := handlePluginCall("response.intercept_after", request)
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+
+	// Should be no-op because it didn't change anything, so Body should be empty
+	if envelope.Result.Body != "" {
+		decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+		if err != nil {
+			t.Fatalf("decode base64: %v", err)
+		}
+		t.Fatalf("expected no changes (empty Body), but got: %s", string(decoded))
+	}
+}
+
+func TestStreamChunkInterceptReversesCloak(t *testing.T) {
+	reqBody := `{"tools":[{"type":"function","function":{"name":"bash"}},{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"edit"}}],"messages":[]}`
+	chunkBody := `data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command"}}]}}]}`
+
+	request := streamChunkInterceptRequestJSON(t, reqBody, chunkBody, "openai")
+	raw, code := handlePluginCall("response.intercept_stream_chunk", request)
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+
+	chunkStr := string(decoded)
+	if !strings.HasPrefix(chunkStr, "data: ") {
+		t.Fatalf("expected stream chunk to start with 'data: ', got %q", chunkStr)
+	}
+	dataJSON := strings.TrimPrefix(chunkStr, "data: ")
+	var resp map[string]any
+	mustUnmarshalJSON(t, []byte(dataJSON), &resp)
+
+	choices := resp["choices"].([]any)
+	choice := choices[0].(map[string]any)
+	delta := choice["delta"].(map[string]any)
+	toolCalls := delta["tool_calls"].([]any)
+	toolCall := toolCalls[0].(map[string]any)
+	fn := toolCall["function"].(map[string]any)
+	name := fn["name"].(string)
+
+	if name != "bash" {
+		t.Fatalf("expected delta tool call function name to be 'bash', got %q", name)
+	}
+}
+
+func TestResponseInterceptPassesThroughAntigravity(t *testing.T) {
+	reqBody := `{"tools":[{"type":"function","function":{"name":"ask_permission"}}],"messages":[]}`
+	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
+
+	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
+	raw, code := handlePluginCall("response.intercept_after", request)
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+
+	if envelope.Result.Body != "" {
+		t.Fatalf("expected empty Body for passthrough (Antigravity tools present in request), got: %s", envelope.Result.Body)
+	}
+}
+
+func TestResponseInterceptAnthropicFormat(t *testing.T) {
+	reqBody := `{"tools":[{"name":"bash"},{"name":"read"},{"name":"edit"}],"messages":[]}`
+	respBody := `{"content":[{"type":"tool_use","id":"tu1","name":"run_command","input":{}}]}`
+
+	request := responseInterceptRequestJSON(t, reqBody, respBody, "anthropic")
+	raw, code := handlePluginCall("response.intercept_after", request)
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+
+	var resp map[string]any
+	mustUnmarshalJSON(t, decoded, &resp)
+
+	content := resp["content"].([]any)
+	block := content[0].(map[string]any)
+	name := block["name"].(string)
+
+	if name != "bash" {
+		t.Fatalf("expected tool_use name to be 'bash', got %q", name)
+	}
+}
+
+func responseInterceptRequestJSON(t *testing.T, reqBody, respBody, sourceFormat string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"SourceFormat": sourceFormat,
+		"RequestBody":  []byte(reqBody),
+		"Body":         []byte(respBody),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return raw
+}
+
+func streamChunkInterceptRequestJSON(t *testing.T, reqBody, chunkBody, sourceFormat string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"SourceFormat": sourceFormat,
+		"RequestBody":  []byte(reqBody),
+		"Body":         []byte(chunkBody),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return raw
+}

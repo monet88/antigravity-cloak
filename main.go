@@ -126,6 +126,10 @@ func handlePluginCall(method string, request []byte) ([]byte, int) {
 		return handleRequestInterceptBefore(request), 0
 	case pluginabi.MethodRequestInterceptAfter:
 		return mustEnvelope(pluginapi.RequestInterceptResponse{}), 0
+	case pluginabi.MethodResponseInterceptAfter:
+		return handleResponseIntercept(request), 0
+	case pluginabi.MethodResponseInterceptStreamChunk:
+		return handleStreamChunkIntercept(request), 0
 	default:
 		return mustErrorEnvelope("unknown_method", fmt.Sprintf("unknown method %q", method)), 0
 	}
@@ -209,6 +213,183 @@ func handleRequestInterceptBefore(request []byte) []byte {
 	}
 	return mustEnvelope(pluginapi.RequestInterceptResponse{Body: body})
 }
+
+func handleResponseIntercept(request []byte) []byte {
+	var req pluginapi.ResponseInterceptRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return mustErrorEnvelope("invalid_request", err.Error())
+	}
+
+	uncloakTable := buildUncloakTable(req.RequestBody, req.SourceFormat)
+	if uncloakTable == nil {
+		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+	}
+
+	modified, changed := uncloakResponseBody(req.Body, uncloakTable, req.SourceFormat)
+	if !changed {
+		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+	}
+	return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
+}
+
+func handleStreamChunkIntercept(request []byte) []byte {
+	var req pluginapi.StreamChunkInterceptRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return mustErrorEnvelope("invalid_request", err.Error())
+	}
+
+	uncloakTable := buildUncloakTable(req.RequestBody, req.SourceFormat)
+	if uncloakTable == nil {
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+	}
+
+	modified, changed := uncloakStreamChunk(req.Body, uncloakTable, req.SourceFormat)
+	if !changed {
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+	}
+	return mustEnvelope(pluginapi.StreamChunkInterceptResponse{Body: modified})
+}
+
+func buildUncloakTable(requestBody []byte, sourceFormat string) map[string]string {
+	var reqRoot map[string]any
+	if err := json.Unmarshal(requestBody, &reqRoot); err != nil {
+		return nil
+	}
+	toolNames := extractToolNames(reqRoot, sourceFormat)
+	client := detectClient(toolNames)
+	if client == "" || client == "antigravity" {
+		return nil
+	}
+	return effectiveUncloakTable(client)
+}
+
+func effectiveUncloakTable(client string) map[string]string {
+	cloakTable := activeFilterConfig().ToolMappings[client]
+	if cloakTable == nil {
+		return nil
+	}
+	uncloak := make(map[string]string, len(cloakTable))
+	for orig, target := range cloakTable {
+		uncloak[target] = orig
+	}
+	return uncloak
+}
+
+func uncloakResponseBody(body []byte, uncloakTable map[string]string, sourceFormat string) ([]byte, bool) {
+	var root any
+	if err := json.Unmarshal(body, &root); err != nil {
+		return nil, false
+	}
+
+	changed := uncloakJSONNode(root, uncloakTable, sourceFormat)
+	if !changed {
+		return nil, false
+	}
+	raw, err := json.Marshal(root)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+func uncloakStreamChunk(body []byte, uncloakTable map[string]string, sourceFormat string) ([]byte, bool) {
+	lines := strings.Split(string(body), "\n")
+	changed := false
+	for i, line := range lines {
+		trimmedLine := strings.TrimRight(line, "\r")
+		suffix := line[len(trimmedLine):]
+
+		if !strings.HasPrefix(trimmedLine, "data: ") {
+			continue
+		}
+
+		dataJSON := strings.TrimPrefix(trimmedLine, "data: ")
+		var root any
+		if err := json.Unmarshal([]byte(dataJSON), &root); err != nil {
+			continue
+		}
+
+		if uncloakJSONNode(root, uncloakTable, sourceFormat) {
+			newJSON, err := json.Marshal(root)
+			if err == nil {
+				lines[i] = "data: " + string(newJSON) + suffix
+				changed = true
+			}
+		}
+	}
+
+	if !changed {
+		return nil, false
+	}
+	return []byte(strings.Join(lines, "\n")), true
+}
+
+func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat string) bool {
+	changed := false
+
+	switch typed := node.(type) {
+	case map[string]any:
+		if sourceFormat == "openai" {
+			if msg, ok := typed["message"].(map[string]any); ok {
+				if toolCalls, ok := msg["tool_calls"].([]any); ok {
+					for _, tcRaw := range toolCalls {
+						if tc, ok := tcRaw.(map[string]any); ok {
+							if fn, ok := tc["function"].(map[string]any); ok {
+								if name, ok := fn["name"].(string); ok {
+									if orig, exists := uncloakTable[name]; exists {
+										fn["name"] = orig
+										changed = true
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			if delta, ok := typed["delta"].(map[string]any); ok {
+				if toolCalls, ok := delta["tool_calls"].([]any); ok {
+					for _, tcRaw := range toolCalls {
+						if tc, ok := tcRaw.(map[string]any); ok {
+							if fn, ok := tc["function"].(map[string]any); ok {
+								if name, ok := fn["name"].(string); ok {
+									if orig, exists := uncloakTable[name]; exists {
+										fn["name"] = orig
+										changed = true
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		} else if sourceFormat == "anthropic" {
+			if typeVal, ok := typed["type"].(string); ok && typeVal == "tool_use" {
+				if name, ok := typed["name"].(string); ok {
+					if orig, exists := uncloakTable[name]; exists {
+						typed["name"] = orig
+						changed = true
+					}
+				}
+			}
+		}
+
+		for _, v := range typed {
+			if childChanged := uncloakJSONNode(v, uncloakTable, sourceFormat); childChanged {
+				changed = true
+			}
+		}
+
+	case []any:
+		for _, v := range typed {
+			if childChanged := uncloakJSONNode(v, uncloakTable, sourceFormat); childChanged {
+				changed = true
+			}
+		}
+	}
+
+	return changed
+}
+
 
 func mustEnvelope(result any) []byte {
 	raw, err := json.Marshal(pluginabi.Envelope{OK: true, Result: mustRawMessage(result)})
