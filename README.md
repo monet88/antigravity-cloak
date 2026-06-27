@@ -46,6 +46,24 @@ plugins:
 
 `custom_mappings` also accepts a comma- or newline-delimited `from: to` string for simpler one-line config. Blank entries and duplicate source names are ignored.
 
+### Tool Name Cloaking Configuration
+
+You can also override or extend the default tool name mapping tables for specific coding clients via `tool_mappings`. Keys represent the client names (`claude_code` or `codex`), and values are mapping pairs of `original_tool_name: antigravity_target_name`:
+
+```yaml
+plugins:
+  configs:
+    antigravity-coding-filter:
+      enabled: true
+      priority: 1
+      tool_mappings:
+        claude_code:
+          bash: run_command
+          my_custom_tool: ask_permission
+        codex:
+          shell_command: run_command
+```
+
 ## Build
 
 CLIProxyAPI dynamic plugins require CGO. Confirm `CGO_ENABLED=1` before building.
@@ -71,6 +89,7 @@ plugins:
       priority: 1
       use_default_keywords: true
       custom_mappings: {}
+      tool_mappings: {}
 ```
 
 CLIProxyAPI searches `plugins/<GOOS>/<GOARCH>-<variant>`, then `plugins/<GOOS>/<GOARCH>`, then `plugins`.
