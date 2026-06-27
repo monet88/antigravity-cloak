@@ -133,3 +133,83 @@ func TestUncloakTablesInitialization(t *testing.T) {
 	}
 }
 
+func TestDetectClient(t *testing.T) {
+	tests := []struct {
+		name       string
+		toolNames  []string
+		wantClient string
+	}{
+		{"claude code by askUserQuestion", []string{"bash", "askUserQuestion", "read"}, "claude_code"},
+		{"claude code by signature trio", []string{"bash", "edit", "read", "write"}, "claude_code"},
+		{"codex by shell_command", []string{"shell_command", "apply_patch"}, "codex"},
+		{"codex by apply_patch only", []string{"apply_patch", "request_user_input"}, "codex"},
+		{"antigravity by ask_permission", []string{"ask_permission", "run_command"}, "antigravity"},
+		{"antigravity by invoke_subagent", []string{"invoke_subagent", "view_file"}, "antigravity"},
+		{"unknown tools", []string{"custom_tool", "another_tool"}, ""},
+		{"empty list", []string{}, ""},
+		// Edge case: Antigravity tools mixed with Claude-like names → Antigravity wins
+		{"antigravity mixed with claude-like", []string{"bash", "ask_permission"}, "antigravity"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detectClient(tt.toolNames)
+			if got != tt.wantClient {
+				t.Fatalf("detectClient(%v) = %q, want %q", tt.toolNames, got, tt.wantClient)
+			}
+		})
+	}
+}
+
+func TestExtractToolNames(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		sourceFormat string
+		wantLen      int // minimum expected tool names
+	}{
+		{
+			name:         "openai tools array",
+			body:         `{"tools":[{"type":"function","function":{"name":"bash"}},{"type":"function","function":{"name":"read"}}]}`,
+			sourceFormat: "openai",
+			wantLen:      2,
+		},
+		{
+			name:         "anthropic tools array",
+			body:         `{"tools":[{"name":"bash","description":"run shell"},{"name":"read","description":"read file"}]}`,
+			sourceFormat: "anthropic",
+			wantLen:      2,
+		},
+		{
+			name:         "openai fallback to message history tool_calls",
+			body:         `{"messages":[{"role":"assistant","tool_calls":[{"function":{"name":"bash"}}]}]}`,
+			sourceFormat: "openai",
+			wantLen:      1,
+		},
+		{
+			name:         "anthropic fallback to message history tool_use",
+			body:         `{"messages":[{"role":"assistant","content":[{"type":"tool_use","name":"bash"}]}]}`,
+			sourceFormat: "anthropic",
+			wantLen:      1,
+		},
+		{
+			name:         "empty tools and no history",
+			body:         `{"messages":[{"role":"user","content":"hello"}]}`,
+			sourceFormat: "openai",
+			wantLen:      0,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var parsed map[string]any
+			if err := json.Unmarshal([]byte(tt.body), &parsed); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			names := extractToolNames(parsed, tt.sourceFormat)
+			if len(names) < tt.wantLen {
+				t.Fatalf("extractToolNames got %d names %v, want >= %d", len(names), names, tt.wantLen)
+			}
+		})
+	}
+}
+
+

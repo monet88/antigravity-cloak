@@ -676,3 +676,99 @@ func collectText(value any) string {
 	collect(value)
 	return strings.Join(parts, "\n")
 }
+
+func extractToolNames(body map[string]any, sourceFormat string) []string {
+	var names []string
+
+	// Check tools array first
+	if toolsRaw, ok := body["tools"].([]any); ok {
+		for _, tRaw := range toolsRaw {
+			if tMap, ok := tRaw.(map[string]any); ok {
+				if sourceFormat == "openai" {
+					if fn, ok := tMap["function"].(map[string]any); ok {
+						if name, ok := fn["name"].(string); ok {
+							names = append(names, name)
+						}
+					}
+				} else if sourceFormat == "anthropic" {
+					if name, ok := tMap["name"].(string); ok {
+						names = append(names, name)
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback to history when tools[] is empty or absent
+	if len(names) == 0 {
+		if msgsRaw, ok := body["messages"].([]any); ok {
+			for _, mRaw := range msgsRaw {
+				if msg, ok := mRaw.(map[string]any); ok {
+					if sourceFormat == "openai" {
+						if calls, ok := msg["tool_calls"].([]any); ok {
+							for _, cRaw := range calls {
+								if call, ok := cRaw.(map[string]any); ok {
+									if fn, ok := call["function"].(map[string]any); ok {
+										if name, ok := fn["name"].(string); ok {
+											names = append(names, name)
+										}
+									}
+								}
+							}
+						}
+					} else if sourceFormat == "anthropic" {
+						if contents, ok := msg["content"].([]any); ok {
+							for _, cntRaw := range contents {
+								if cnt, ok := cntRaw.(map[string]any); ok {
+									if cnt["type"] == "tool_use" {
+										if name, ok := cnt["name"].(string); ok {
+											names = append(names, name)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return names
+}
+
+func detectClient(toolNames []string) string {
+	hasClaude := false
+	hasCodex := false
+	hasAntigravity := false
+
+	claudeSigs := map[string]bool{"bash": true, "edit": true, "read": true}
+	seenClaudeSigs := make(map[string]bool)
+
+	for _, n := range toolNames {
+		if n == "askUserQuestion" {
+			hasClaude = true
+		}
+		if claudeSigs[n] {
+			seenClaudeSigs[n] = true
+		}
+		if n == "shell_command" || n == "apply_patch" {
+			hasCodex = true
+		}
+		if n == "ask_permission" || n == "invoke_subagent" {
+			hasAntigravity = true
+		}
+	}
+
+	// Antigravity detection takes priority — skip cloaking entirely
+	if hasAntigravity {
+		return "antigravity"
+	}
+	if hasClaude || len(seenClaudeSigs) >= 3 {
+		return "claude_code"
+	}
+	if hasCodex {
+		return "codex"
+	}
+	return ""
+}
+
