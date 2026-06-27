@@ -203,7 +203,7 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		return mustErrorEnvelope("invalid_request", fmt.Sprintf("decode request.intercept_before request: %v", err))
 	}
 
-	body, rewritten := rewriteRequestBody(req.Body)
+	body, rewritten := rewriteRequestBody(req.Body, req.SourceFormat)
 	if !rewritten {
 		return mustEnvelope(pluginapi.RequestInterceptResponse{})
 	}
@@ -511,21 +511,247 @@ func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
 	return out
 }
 
-func rewriteRequestBody(body []byte) ([]byte, bool) {
+func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
 	var root any
 	if err := json.Unmarshal(body, &root); err != nil {
 		return nil, false
 	}
-	rewritten, changed := rewriteSystemFields(root, effectiveMappings(activeFilterConfig()))
+
+	rootMap, ok := root.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+
+	changed := false
+
+	// 1. Existing brand text replace on "system" key
+	mappings := effectiveMappings(activeFilterConfig())
+	rewritten, sysChanged := rewriteSystemFields(rootMap, mappings)
+	rootMap = rewritten.(map[string]any)
+	changed = changed || sysChanged
+
+	// 2. Tool cloaking
+	toolNames := extractToolNames(rootMap, sourceFormat)
+	client := detectClient(toolNames)
+	if client != "" && client != "antigravity" {
+		cloakTable := effectiveCloakTable(client)
+		if len(cloakTable) > 0 {
+			toolCloaked := cloakToolNames(rootMap, cloakTable, sourceFormat)
+			changed = changed || toolCloaked
+		}
+	}
+
+	// 3. Brand replace in tools[].description / tools[].function.description
+	descChanged := rewriteToolDescriptions(rootMap, mappings, sourceFormat)
+	changed = changed || descChanged
+
+	// 4. Brand replace in messages[].content where role == "system"
+	sysMsgChanged := rewriteSystemMessages(rootMap, mappings)
+	changed = changed || sysMsgChanged
+
 	if !changed {
 		return nil, false
 	}
-	raw, err := json.Marshal(rewritten)
+	raw, err := json.Marshal(rootMap)
 	if err != nil {
 		return nil, false
 	}
 	return raw, true
 }
+
+func effectiveCloakTable(client string) map[string]string {
+	return activeFilterConfig().ToolMappings[client]
+}
+
+func cloakToolNames(body map[string]any, cloakTable map[string]string, sourceFormat string) bool {
+	changed := false
+
+	// Cloak tools[] array
+	if toolsRaw, ok := body["tools"].([]any); ok {
+		for _, tRaw := range toolsRaw {
+			tMap, ok := tRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if sourceFormat == "openai" {
+				fn, ok := tMap["function"].(map[string]any)
+				if !ok {
+					continue
+				}
+				if name, ok := fn["name"].(string); ok {
+					if target, exists := cloakTable[name]; exists {
+						fn["name"] = target
+						changed = true
+					}
+				}
+			} else if sourceFormat == "anthropic" {
+				if name, ok := tMap["name"].(string); ok {
+					if target, exists := cloakTable[name]; exists {
+						tMap["name"] = target
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	// Cloak tool refs in messages[]
+	if msgsRaw, ok := body["messages"].([]any); ok {
+		for _, mRaw := range msgsRaw {
+			msg, ok := mRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			if sourceFormat == "openai" {
+				// tool_calls[].function.name
+				if calls, ok := msg["tool_calls"].([]any); ok {
+					for _, cRaw := range calls {
+						call, ok := cRaw.(map[string]any)
+						if !ok {
+							continue
+						}
+						fn, ok := call["function"].(map[string]any)
+						if !ok {
+							continue
+						}
+						if name, ok := fn["name"].(string); ok {
+							if target, exists := cloakTable[name]; exists {
+								fn["name"] = target
+								changed = true
+							}
+						}
+					}
+				}
+				// tool result message: msg["name"]
+				if msg["role"] == "tool" {
+					if name, ok := msg["name"].(string); ok {
+						if target, exists := cloakTable[name]; exists {
+							msg["name"] = target
+							changed = true
+						}
+					}
+				}
+			} else if sourceFormat == "anthropic" {
+				// content blocks with type == "tool_use"
+				if contents, ok := msg["content"].([]any); ok {
+					for _, cntRaw := range contents {
+						cnt, ok := cntRaw.(map[string]any)
+						if !ok {
+							continue
+						}
+						if cnt["type"] == "tool_use" {
+							if name, ok := cnt["name"].(string); ok {
+								if target, exists := cloakTable[name]; exists {
+									cnt["name"] = target
+									changed = true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Cloak tool_choice (handle both string and object shapes)
+	if tc, ok := body["tool_choice"].(map[string]any); ok {
+		if sourceFormat == "openai" {
+			// {type: "function", function: {name: "..."}}
+			if fn, ok := tc["function"].(map[string]any); ok {
+				if name, ok := fn["name"].(string); ok {
+					if target, exists := cloakTable[name]; exists {
+						fn["name"] = target
+						changed = true
+					}
+				}
+			}
+		} else if sourceFormat == "anthropic" {
+			// {type: "tool", name: "..."}
+			if name, ok := tc["name"].(string); ok {
+				if target, exists := cloakTable[name]; exists {
+					tc["name"] = target
+					changed = true
+				}
+			}
+		}
+	}
+
+	return changed
+}
+
+func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, sourceFormat string) bool {
+	changed := false
+	toolsRaw, ok := root["tools"].([]any)
+	if !ok {
+		return false
+	}
+	for _, tRaw := range toolsRaw {
+		tMap, ok := tRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if sourceFormat == "openai" {
+			fn, ok := tMap["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if descVal, ok := fn["description"].(string); ok {
+				next := descVal
+				descChanged := false
+				for _, mapping := range mappings {
+					var replaced bool
+					next, replaced = replaceInsensitive(next, mapping.Match, mapping.Replacement)
+					descChanged = descChanged || replaced
+				}
+				if descChanged {
+					fn["description"] = next
+					changed = true
+				}
+			}
+		} else if sourceFormat == "anthropic" {
+			if descVal, ok := tMap["description"].(string); ok {
+				next := descVal
+				descChanged := false
+				for _, mapping := range mappings {
+					var replaced bool
+					next, replaced = replaceInsensitive(next, mapping.Match, mapping.Replacement)
+					descChanged = descChanged || replaced
+				}
+				if descChanged {
+					tMap["description"] = next
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
+}
+
+func rewriteSystemMessages(root map[string]any, mappings []rewriteMapping) bool {
+	changed := false
+	msgsRaw, ok := root["messages"].([]any)
+	if !ok {
+		return false
+	}
+	for _, mRaw := range msgsRaw {
+		msg, ok := mRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, ok := msg["role"].(string); ok && role == "system" {
+			if content, exists := msg["content"]; exists {
+				next, contentChanged := rewriteSystemValue(content, mappings)
+				if contentChanged {
+					msg["content"] = next
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
+}
+
 
 func rewriteSystemFields(value any, mappings []rewriteMapping) (any, bool) {
 	switch typed := value.(type) {
