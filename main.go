@@ -720,7 +720,7 @@ func extractToolNames(body map[string]any, sourceFormat string) []string {
 						if contents, ok := msg["content"].([]any); ok {
 							for _, cntRaw := range contents {
 								if cnt, ok := cntRaw.(map[string]any); ok {
-									if cnt["type"] == "tool_use" {
+									if typeVal, ok := cnt["type"].(string); ok && typeVal == "tool_use" {
 										if name, ok := cnt["name"].(string); ok {
 											names = append(names, name)
 										}
