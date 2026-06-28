@@ -20,3 +20,6 @@ worktrees/
 .vscode/
 .idea/
 *.log
+.superpowers/
+.codex/
+test/

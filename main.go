@@ -169,7 +169,7 @@ func registrationResponse() any {
 			Executor               bool `json:"executor"`
 			RequestInterceptor     bool `json:"request_interceptor"`
 			ResponseInterceptor    bool `json:"response_interceptor"`
-			StreamChunkInterceptor bool `json:"stream_chunk_interceptor"`
+			StreamChunkInterceptor bool `json:"response_stream_interceptor"`
 		} `json:"capabilities"`
 	}{
 		SchemaVersion: pluginabi.SchemaVersion,
@@ -186,7 +186,7 @@ func registrationResponse() any {
 			Executor               bool `json:"executor"`
 			RequestInterceptor     bool `json:"request_interceptor"`
 			ResponseInterceptor    bool `json:"response_interceptor"`
-			StreamChunkInterceptor bool `json:"stream_chunk_interceptor"`
+			StreamChunkInterceptor bool `json:"response_stream_interceptor"`
 		}{
 			RequestInterceptor:     true,
 			ResponseInterceptor:    true,
@@ -656,6 +656,7 @@ var defaultCloakTables = map[string]map[string]string{
 var defaultUncloakTables map[string]map[string]string
 
 func init() {
+	println("cpa-plugin-antigravity-coding-filter: init start")
 	defaultUncloakTables = make(map[string]map[string]string)
 	for client, cloaks := range defaultCloakTables {
 		uncloaks := make(map[string]string)
@@ -664,6 +665,7 @@ func init() {
 		}
 		defaultUncloakTables[client] = uncloaks
 	}
+	println("cpa-plugin-antigravity-coding-filter: init end")
 }
 
 
