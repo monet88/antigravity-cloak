@@ -411,7 +411,7 @@ func TestResponseInterceptDoesNotCorruptProse(t *testing.T) {
 
 func TestStreamChunkInterceptReversesCloak(t *testing.T) {
 	reqBody := `{"tools":[{"type":"function","function":{"name":"bash"}},{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"edit"}}],"messages":[]}`
-	chunkBody := `data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command"}}]}}]}`
+	chunkBody := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
 
 	request := streamChunkInterceptRequestJSON(t, reqBody, chunkBody, "openai")
 	raw, code := handlePluginCall("response.intercept_stream_chunk", request)

@@ -41,10 +41,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -264,10 +266,63 @@ func handleStreamChunkIntercept(request []byte) []byte {
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 	}
 
-	cached := activeFilterConfig().uncloakRegexCache[client]
-	modified, changed := uncloakStreamChunk(req.Body, cached)
+	cfg := activeFilterConfig()
+	cached := cfg.uncloakRegexCache[client]
+	if cached == nil || cached.re == nil {
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+	}
+
+	// ── SSE Event-Level Reassembly Buffer ──────────────────────────────
+	// TCP can split a network chunk at ANY byte boundary, including inside
+	// a tool name like "run_command" → Chunk1: "run_c", Chunk2: "ommand".
+	// Regex on each chunk alone would miss the match entirely.
+	//
+	// Solution: Buffer at the SSE EVENT level. SSE events are delimited by
+	// "\n\n". Incomplete events (no \n\n terminator) are buffered until the
+	// next chunk completes them. Regex only runs on complete events where
+	// tool names are guaranteed to be unfragmented.
+	streamKey := fnvHash(req.RequestBody)
+
+	// Retrieve and clear buffered tail from previous chunk
+	buffered := getAndClearStreamBuffer(streamKey)
+
+	// Combine buffered tail + current chunk
+	var combined []byte
+	if len(buffered) > 0 {
+		combined = make([]byte, len(buffered)+len(req.Body))
+		copy(combined, buffered)
+		copy(combined[len(buffered):], req.Body)
+	} else {
+		combined = req.Body
+	}
+
+	// Split into complete SSE events and incomplete tail
+	completeEvents, incompleteTail := splitSSEEvents(combined)
+
+	// Buffer the incomplete tail for next chunk
+	if len(incompleteTail) > 0 {
+		storeStreamBuffer(streamKey, incompleteTail)
+		debugLog("handleStreamChunkIntercept: buffered %d bytes (incomplete event)", len(incompleteTail))
+	}
+
+	if len(completeEvents) == 0 {
+		// No complete events — entire chunk is buffered.
+		// Return an SSE comment as harmless placeholder so the framework
+		// replaces the original chunk (preventing raw forwarding of the
+		// incomplete event that might contain a split tool name).
+		debugLog("handleStreamChunkIntercept: no complete events, sending SSE comment placeholder")
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{Body: sseCommentPlaceholder})
+	}
+
+	// Run regex replacement on complete events only
+	modified, changed := uncloakStreamChunk(completeEvents, cached)
 	debugLog("handleStreamChunkIntercept: changed=%t Body=%s", changed, string(modified))
 	if !changed {
+		modified = completeEvents
+	}
+
+	// If the result equals the original chunk, report no changes
+	if bytes.Equal(modified, req.Body) {
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 	}
 	return mustEnvelope(pluginapi.StreamChunkInterceptResponse{Body: modified})
@@ -328,9 +383,8 @@ func uncloakResponseBody(body []byte, uncloakTable map[string]string, sourceForm
 }
 
 // uncloakStreamChunk uses pre-compiled regex to replace tool names directly in
-// raw SSE bytes. This is fragment-safe: it works on partial JSON without needing
-// complete, parseable JSON objects, avoiding the classic SSE fragmentation issue
-// where a network chunk splits a JSON object across boundaries.
+// raw SSE bytes. Callers MUST pass complete SSE events (assembled by the event
+// reassembly buffer) to guarantee that tool names are never split across calls.
 func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool) {
 	if cached == nil || cached.re == nil {
 		return nil, false
@@ -367,6 +421,110 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 
 	buf.WriteString(bodyStr[lastEnd:])
 	return []byte(buf.String()), true
+}
+
+// ── SSE Event Reassembly Buffer ────────────────────────────────────────
+//
+// Handles the "Split-String Chunk" attack: TCP can split a network chunk
+// at any byte boundary, including inside a tool name:
+//   Chunk 1: data: {"name": "run_c
+//   Chunk 2: ommand", "input": {}}\n\n
+//
+// Without buffering, regex on each chunk misses the match entirely.
+//
+// Solution: SSE events are delimited by "\n\n". We buffer incomplete events
+// (those without a \n\n terminator) and only process/forward complete events
+// where all JSON content — including tool names — is guaranteed intact.
+//
+// When an entire chunk is buffered (no complete events), we return an SSE
+// comment (":\n") as a harmless placeholder. Per the SSE spec (W3C), lines
+// starting with ':' are comments ignored by EventSource parsers.
+
+var (
+	streamBufferMu sync.Mutex
+	streamBuffers   = make(map[uint64]streamBufferEntry)
+)
+
+type streamBufferEntry struct {
+	data      []byte
+	updatedAt time.Time
+}
+
+// sseCommentPlaceholder is returned when the entire chunk is buffered.
+// SSE spec: lines starting with ':' are comments, silently ignored by clients.
+var sseCommentPlaceholder = []byte(": buffered\n")
+
+// streamBufferTTL is the max age for a buffer entry before cleanup.
+// Covers normal streaming (typically < 30s) with generous margin.
+const streamBufferTTL = 60 * time.Second
+
+func fnvHash(data []byte) uint64 {
+	h := fnv.New64a()
+	h.Write(data)
+	return h.Sum64()
+}
+
+func getAndClearStreamBuffer(key uint64) []byte {
+	streamBufferMu.Lock()
+	defer streamBufferMu.Unlock()
+
+	// Opportunistic cleanup of stale entries
+	now := time.Now()
+	for k, entry := range streamBuffers {
+		if now.Sub(entry.updatedAt) > streamBufferTTL {
+			delete(streamBuffers, k)
+		}
+	}
+
+	entry, ok := streamBuffers[key]
+	if !ok {
+		return nil
+	}
+	delete(streamBuffers, key)
+	return entry.data
+}
+
+func storeStreamBuffer(key uint64, data []byte) {
+	streamBufferMu.Lock()
+	defer streamBufferMu.Unlock()
+
+	// Make a copy to avoid retaining references to large chunk slices
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	streamBuffers[key] = streamBufferEntry{
+		data:      buf,
+		updatedAt: time.Now(),
+	}
+}
+
+// splitSSEEvents splits combined bytes into complete SSE events and an
+// incomplete trailing tail. Complete events are those terminated by "\n\n".
+// The returned completeEvents includes the terminating "\n\n" sequences.
+func splitSSEEvents(data []byte) (completeEvents []byte, incompleteTail []byte) {
+	// Find the last event boundary (\n\n)
+	// Also check \r\n\r\n for Windows-style line endings
+	lastBoundary := -1
+	boundaryLen := 0
+
+	if idx := bytes.LastIndex(data, []byte("\n\n")); idx >= 0 {
+		lastBoundary = idx
+		boundaryLen = 2
+	}
+	if idx := bytes.LastIndex(data, []byte("\r\n\r\n")); idx >= 0 {
+		// Use whichever boundary is LATER (further into the data)
+		if idx > lastBoundary {
+			lastBoundary = idx
+			boundaryLen = 4
+		}
+	}
+
+	if lastBoundary < 0 {
+		// No complete event boundary found — everything is incomplete
+		return nil, data
+	}
+
+	splitAt := lastBoundary + boundaryLen
+	return data[:splitAt], data[splitAt:]
 }
 
 func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat string) bool {

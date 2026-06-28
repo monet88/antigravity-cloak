@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRewriteRequestReplacesDefaultSystemKeywords(t *testing.T) {
@@ -767,13 +769,12 @@ func TestStreamChunkPreservesDataFidelity(t *testing.T) {
 }
 
 func TestSSEFragmentedChunk(t *testing.T) {
-	// Regression: SSE chunks may arrive split across network boundaries.
-	// The old JSON-based approach would fail to parse partial JSON.
-	// The new regex approach works on raw bytes regardless of JSON completeness.
+	// Legacy test: regex still works on incomplete JSON within a complete SSE event.
+	// This verifies the regex layer, not the reassembly buffer.
 	cached := buildTestUncloakPattern(map[string]string{"run_command": "bash"})
 
-	// Simulate a fragmented chunk: JSON is incomplete (no closing brackets)
-	fragment := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command"`)
+	// A complete SSE event (has \n\n) but with incomplete JSON (no closing brackets)
+	fragment := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"\n\n")
 
 	result, changed := uncloakStreamChunk(fragment, cached)
 	if !changed {
@@ -783,10 +784,194 @@ func TestSSEFragmentedChunk(t *testing.T) {
 	if !strings.Contains(resultStr, `"name":"bash"`) {
 		t.Fatalf("tool name not uncloaked in fragment: %s", resultStr)
 	}
-	// Verify the rest of the fragment is preserved exactly
 	if !strings.HasPrefix(resultStr, `data: {"choices"`) {
 		t.Fatalf("fragment prefix corrupted: %s", resultStr)
 	}
+}
+
+func TestSplitSSEEvents(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		wantComplete   string
+		wantIncomplete string
+	}{
+		{
+			name:           "single complete event",
+			input:          "data: {\"name\":\"bash\"}\n\n",
+			wantComplete:   "data: {\"name\":\"bash\"}\n\n",
+			wantIncomplete: "",
+		},
+		{
+			name:           "complete + incomplete",
+			input:          "data: {\"id\":1}\n\ndata: {\"name\": \"run_c",
+			wantComplete:   "data: {\"id\":1}\n\n",
+			wantIncomplete: "data: {\"name\": \"run_c",
+		},
+		{
+			name:           "no boundary - all incomplete",
+			input:          "data: {\"name\": \"run_c",
+			wantComplete:   "",
+			wantIncomplete: "data: {\"name\": \"run_c",
+		},
+		{
+			name:           "multiple complete events",
+			input:          "data: {\"a\":1}\n\ndata: {\"b\":2}\n\n",
+			wantComplete:   "data: {\"a\":1}\n\ndata: {\"b\":2}\n\n",
+			wantIncomplete: "",
+		},
+		{
+			name:           "windows line endings",
+			input:          "data: {\"a\":1}\r\n\r\ndata: {\"name\": \"run_c",
+			wantComplete:   "data: {\"a\":1}\r\n\r\n",
+			wantIncomplete: "data: {\"name\": \"run_c",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			complete, incomplete := splitSSEEvents([]byte(tt.input))
+			if string(complete) != tt.wantComplete {
+				t.Fatalf("complete = %q, want %q", string(complete), tt.wantComplete)
+			}
+			if string(incomplete) != tt.wantIncomplete {
+				t.Fatalf("incomplete = %q, want %q", string(incomplete), tt.wantIncomplete)
+			}
+		})
+	}
+}
+
+func TestSSESplitStringChunk(t *testing.T) {
+	// THE critical test: tool name "run_command" is split across two TCP chunks.
+	// Without event reassembly, regex misses the match on both chunks.
+	// With reassembly, the incomplete event from chunk 1 is buffered and
+	// combined with chunk 2 to form a complete event before regex runs.
+	cached := buildTestUncloakPattern(map[string]string{"run_command": "bash"})
+
+	// Chunk 1: incomplete event — tool name cut at "run_c"
+	chunk1 := []byte(`data: {"type": "tool_use", "id": "123", "name": "run_c`)
+
+	// Simulate handleStreamChunkIntercept logic for chunk 1
+	streamKey := fnvHash([]byte("test-request-body"))
+
+	// Clear any existing buffer
+	getAndClearStreamBuffer(streamKey)
+
+	complete1, incomplete1 := splitSSEEvents(chunk1)
+	if len(complete1) != 0 {
+		t.Fatal("chunk1 should have no complete events")
+	}
+	if string(incomplete1) != string(chunk1) {
+		t.Fatal("chunk1 should be entirely buffered")
+	}
+	storeStreamBuffer(streamKey, incomplete1)
+
+	// Chunk 2: completes the event
+	chunk2 := []byte("ommand\", \"input\": {}}\n\n")
+
+	buffered := getAndClearStreamBuffer(streamKey)
+	if buffered == nil {
+		t.Fatal("expected buffered data from chunk 1")
+	}
+
+	// Combine buffered + chunk2
+	combined := make([]byte, len(buffered)+len(chunk2))
+	copy(combined, buffered)
+	copy(combined[len(buffered):], chunk2)
+
+	complete2, incomplete2 := splitSSEEvents(combined)
+	if len(incomplete2) != 0 {
+		t.Fatalf("expected no incomplete tail, got %q", string(incomplete2))
+	}
+
+	// Regex on complete event
+	result, changed := uncloakStreamChunk(complete2, cached)
+	if !changed {
+		t.Fatal("expected uncloakStreamChunk to match the reassembled tool name")
+	}
+
+	resultStr := string(result)
+	if !strings.Contains(resultStr, `"name": "bash"`) && !strings.Contains(resultStr, `"name":"bash"`) {
+		t.Fatalf("tool name not uncloaked after reassembly: %s", resultStr)
+	}
+	if strings.Contains(resultStr, "run_command") {
+		t.Fatalf("cloaked name 'run_command' leaked through: %s", resultStr)
+	}
+}
+
+func TestSSEMultipleEventsWithTrailingFragment(t *testing.T) {
+	// Chunk contains 2 complete events + 1 incomplete trailing event.
+	// The complete events should be processed, the incomplete should be buffered.
+	cached := buildTestUncloakPattern(map[string]string{"run_command": "bash"})
+
+	chunk := []byte("data: {\"name\":\"run_command\"}\n\ndata: {\"id\":2}\n\ndata: {\"name\":\"run_c")
+
+	complete, incomplete := splitSSEEvents(chunk)
+
+	// 2 complete events
+	if !bytes.Contains(complete, []byte("run_command")) {
+		t.Fatal("complete events should contain run_command (before uncloak)")
+	}
+
+	// Uncloak complete events
+	result, changed := uncloakStreamChunk(complete, cached)
+	if !changed {
+		t.Fatal("expected uncloak on complete events")
+	}
+	if !strings.Contains(string(result), `"name":"bash"`) {
+		t.Fatalf("tool name not uncloaked in complete events: %s", string(result))
+	}
+
+	// Incomplete tail should be buffered (not processed)
+	if string(incomplete) != `data: {"name":"run_c` {
+		t.Fatalf("unexpected incomplete tail: %q", string(incomplete))
+	}
+}
+
+func TestSSENoBufferNeeded(t *testing.T) {
+	// Complete event in a single chunk — no buffering needed.
+	chunk := []byte("data: {\"name\":\"run_command\",\"input\":{}}\n\n")
+	complete, incomplete := splitSSEEvents(chunk)
+
+	if string(complete) != string(chunk) {
+		t.Fatalf("complete should equal entire chunk")
+	}
+	if len(incomplete) != 0 {
+		t.Fatalf("expected no incomplete tail, got %q", string(incomplete))
+	}
+}
+
+func TestStreamBufferTTLCleanup(t *testing.T) {
+	// Verify that stale buffer entries are cleaned up.
+	streamBufferMu.Lock()
+	streamBuffers[999] = streamBufferEntry{
+		data:      []byte("stale-data"),
+		updatedAt: time.Now().Add(-2 * streamBufferTTL), // expired
+	}
+	streamBuffers[1000] = streamBufferEntry{
+		data:      []byte("fresh-data"),
+		updatedAt: time.Now(), // fresh
+	}
+	streamBufferMu.Unlock()
+
+	// getAndClearStreamBuffer triggers opportunistic cleanup
+	_ = getAndClearStreamBuffer(888) // non-existent key, just triggers cleanup
+
+	streamBufferMu.Lock()
+	_, staleExists := streamBuffers[999]
+	_, freshExists := streamBuffers[1000]
+	streamBufferMu.Unlock()
+
+	if staleExists {
+		t.Fatal("stale buffer entry should have been cleaned up")
+	}
+	if !freshExists {
+		t.Fatal("fresh buffer entry should NOT have been cleaned up")
+	}
+
+	// Cleanup
+	streamBufferMu.Lock()
+	delete(streamBuffers, 1000)
+	streamBufferMu.Unlock()
 }
 
 // buildTestCloakPatterns creates a cachedCloakPatterns for testing,
