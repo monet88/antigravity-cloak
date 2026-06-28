@@ -336,7 +336,7 @@ func TestResponseInterceptReversesClaudeCodeCloak(t *testing.T) {
 }
 
 func TestResponseInterceptReversesCodexCloak(t *testing.T) {
-	reqBody := `{"tools":[{"type":"function","function":{"name":"shell_command"}}],"messages":[]}`
+	reqBody := `{"tools":[{"type":"function","function":{"name":"shell_command"}},{"type":"function","function":{"name":"apply_patch"}}],"messages":[]}`
 	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
 
 	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
