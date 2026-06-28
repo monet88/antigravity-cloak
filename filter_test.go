@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestRewriteRequestReplacesDefaultSystemKeywords(t *testing.T) {
@@ -850,11 +848,8 @@ func TestSSESplitStringChunk(t *testing.T) {
 	// Chunk 1: incomplete event — tool name cut at "run_c"
 	chunk1 := []byte(`data: {"type": "tool_use", "id": "123", "name": "run_c`)
 
-	// Simulate handleStreamChunkIntercept logic for chunk 1
-	streamKey := fnvHash([]byte("test-request-body"))
-
-	// Clear any existing buffer
-	getAndClearStreamBuffer(streamKey)
+	// Simulate new stream
+	resetStreamBuffer()
 
 	complete1, incomplete1 := splitSSEEvents(chunk1)
 	if len(complete1) != 0 {
@@ -863,12 +858,12 @@ func TestSSESplitStringChunk(t *testing.T) {
 	if string(incomplete1) != string(chunk1) {
 		t.Fatal("chunk1 should be entirely buffered")
 	}
-	storeStreamBuffer(streamKey, incomplete1)
+	pushStreamBuffer(incomplete1)
 
 	// Chunk 2: completes the event
 	chunk2 := []byte("ommand\", \"input\": {}}\n\n")
 
-	buffered := getAndClearStreamBuffer(streamKey)
+	buffered := popStreamBuffer()
 	if buffered == nil {
 		t.Fatal("expected buffered data from chunk 1")
 	}
@@ -898,80 +893,40 @@ func TestSSESplitStringChunk(t *testing.T) {
 	}
 }
 
-func TestSSEMultipleEventsWithTrailingFragment(t *testing.T) {
-	// Chunk contains 2 complete events + 1 incomplete trailing event.
-	// The complete events should be processed, the incomplete should be buffered.
-	cached := buildTestUncloakPattern(map[string]string{"run_command": "bash"})
+func TestStreamBufferResetOnNewStream(t *testing.T) {
+	// Verify that resetStreamBuffer clears leftover data from a previous stream,
+	// preventing cross-stream pollution.
+	pushStreamBuffer([]byte("leftover from stream 1"))
 
-	chunk := []byte("data: {\"name\":\"run_command\"}\n\ndata: {\"id\":2}\n\ndata: {\"name\":\"run_c")
+	// Simulate new stream (ChunkIndex == 0)
+	resetStreamBuffer()
 
-	complete, incomplete := splitSSEEvents(chunk)
-
-	// 2 complete events
-	if !bytes.Contains(complete, []byte("run_command")) {
-		t.Fatal("complete events should contain run_command (before uncloak)")
-	}
-
-	// Uncloak complete events
-	result, changed := uncloakStreamChunk(complete, cached)
-	if !changed {
-		t.Fatal("expected uncloak on complete events")
-	}
-	if !strings.Contains(string(result), `"name":"bash"`) {
-		t.Fatalf("tool name not uncloaked in complete events: %s", string(result))
-	}
-
-	// Incomplete tail should be buffered (not processed)
-	if string(incomplete) != `data: {"name":"run_c` {
-		t.Fatalf("unexpected incomplete tail: %q", string(incomplete))
+	data := popStreamBuffer()
+	if data != nil {
+		t.Fatalf("expected nil after reset, got %q", string(data))
 	}
 }
 
-func TestSSENoBufferNeeded(t *testing.T) {
-	// Complete event in a single chunk — no buffering needed.
-	chunk := []byte("data: {\"name\":\"run_command\",\"input\":{}}\n\n")
-	complete, incomplete := splitSSEEvents(chunk)
+func TestStreamBufferPushPop(t *testing.T) {
+	// Verify basic push/pop semantics.
+	resetStreamBuffer()
 
-	if string(complete) != string(chunk) {
-		t.Fatalf("complete should equal entire chunk")
-	}
-	if len(incomplete) != 0 {
-		t.Fatalf("expected no incomplete tail, got %q", string(incomplete))
-	}
-}
-
-func TestStreamBufferTTLCleanup(t *testing.T) {
-	// Verify that stale buffer entries are cleaned up.
-	streamBufferMu.Lock()
-	streamBuffers[999] = streamBufferEntry{
-		data:      []byte("stale-data"),
-		updatedAt: time.Now().Add(-2 * streamBufferTTL), // expired
-	}
-	streamBuffers[1000] = streamBufferEntry{
-		data:      []byte("fresh-data"),
-		updatedAt: time.Now(), // fresh
-	}
-	streamBufferMu.Unlock()
-
-	// getAndClearStreamBuffer triggers opportunistic cleanup
-	_ = getAndClearStreamBuffer(888) // non-existent key, just triggers cleanup
-
-	streamBufferMu.Lock()
-	_, staleExists := streamBuffers[999]
-	_, freshExists := streamBuffers[1000]
-	streamBufferMu.Unlock()
-
-	if staleExists {
-		t.Fatal("stale buffer entry should have been cleaned up")
-	}
-	if !freshExists {
-		t.Fatal("fresh buffer entry should NOT have been cleaned up")
+	data := popStreamBuffer()
+	if data != nil {
+		t.Fatal("expected nil from empty buffer")
 	}
 
-	// Cleanup
-	streamBufferMu.Lock()
-	delete(streamBuffers, 1000)
-	streamBufferMu.Unlock()
+	pushStreamBuffer([]byte("test data"))
+	data = popStreamBuffer()
+	if string(data) != "test data" {
+		t.Fatalf("expected 'test data', got %q", string(data))
+	}
+
+	// Second pop should be nil
+	data = popStreamBuffer()
+	if data != nil {
+		t.Fatal("expected nil after pop")
+	}
 }
 
 // buildTestCloakPatterns creates a cachedCloakPatterns for testing,

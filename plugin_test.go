@@ -539,6 +539,7 @@ func streamChunkInterceptRequestJSON(t *testing.T, reqBody, chunkBody, sourceFor
 		"SourceFormat": sourceFormat,
 		"RequestBody":  []byte(reqBody),
 		"Body":         []byte(chunkBody),
+		"ChunkIndex":   0,
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)

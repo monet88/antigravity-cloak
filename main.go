@@ -41,12 +41,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"os"
 	"regexp"
 	"strings"
 	"sync"
-	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -259,7 +257,7 @@ func handleStreamChunkIntercept(request []byte) []byte {
 		return mustErrorEnvelope("invalid_request", err.Error())
 	}
 
-	debugLog("handleStreamChunkIntercept: SourceFormat=%s RequestBody=%s Body=%s", req.SourceFormat, string(req.RequestBody), string(req.Body))
+	debugLog("handleStreamChunkIntercept: SourceFormat=%s ChunkIndex=%d Body=%s", req.SourceFormat, req.ChunkIndex, string(req.Body))
 	_, client := buildUncloakTable(req.RequestBody, req.SourceFormat)
 	debugLog("handleStreamChunkIntercept: client=%s", client)
 	if client == "" {
@@ -281,10 +279,17 @@ func handleStreamChunkIntercept(request []byte) []byte {
 	// "\n\n". Incomplete events (no \n\n terminator) are buffered until the
 	// next chunk completes them. Regex only runs on complete events where
 	// tool names are guaranteed to be unfragmented.
-	streamKey := fnvHash(req.RequestBody)
+	//
+	// Stream identity: ChunkIndex (provided by the SDK, monotonic per-stream).
+	// ChunkIndex == 0 means new stream → reset buffer. No content-based hashing.
+
+	// Reset buffer on new stream
+	if req.ChunkIndex == 0 {
+		resetStreamBuffer()
+	}
 
 	// Retrieve and clear buffered tail from previous chunk
-	buffered := getAndClearStreamBuffer(streamKey)
+	buffered := popStreamBuffer()
 
 	// Combine buffered tail + current chunk
 	var combined []byte
@@ -301,17 +306,16 @@ func handleStreamChunkIntercept(request []byte) []byte {
 
 	// Buffer the incomplete tail for next chunk
 	if len(incompleteTail) > 0 {
-		storeStreamBuffer(streamKey, incompleteTail)
+		pushStreamBuffer(incompleteTail)
 		debugLog("handleStreamChunkIntercept: buffered %d bytes (incomplete event)", len(incompleteTail))
 	}
 
 	if len(completeEvents) == 0 {
 		// No complete events — entire chunk is buffered.
-		// Return an SSE comment as harmless placeholder so the framework
-		// replaces the original chunk (preventing raw forwarding of the
-		// incomplete event that might contain a split tool name).
-		debugLog("handleStreamChunkIntercept: no complete events, sending SSE comment placeholder")
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{Body: sseCommentPlaceholder})
+		// Use DropChunk to suppress this chunk entirely. The buffered bytes
+		// will be prepended to the next chunk and delivered then.
+		debugLog("handleStreamChunkIntercept: no complete events, dropping chunk")
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{DropChunk: true})
 	}
 
 	// Run regex replacement on complete events only
@@ -436,65 +440,40 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 // (those without a \n\n terminator) and only process/forward complete events
 // where all JSON content — including tool names — is guaranteed intact.
 //
-// When an entire chunk is buffered (no complete events), we return an SSE
-// comment (":\n") as a harmless placeholder. Per the SSE spec (W3C), lines
-// starting with ':' are comments ignored by EventSource parsers.
+// Stream identity uses ChunkIndex from the SDK (monotonic per-stream).
+// ChunkIndex == 0 signals a new stream → buffer is reset. This avoids the
+// architectural anti-pattern of using content hashing as a stream identifier
+// (which would cause cross-stream pollution with identical requests).
+//
+// A single buffer slot is sufficient because the framework dispatches
+// stream chunks to plugins sequentially within each stream.
 
 var (
-	streamBufferMu sync.Mutex
-	streamBuffers   = make(map[uint64]streamBufferEntry)
+	streamBufMu sync.Mutex
+	streamBuf   []byte // single-slot buffer for the active stream's incomplete tail
 )
 
-type streamBufferEntry struct {
-	data      []byte
-	updatedAt time.Time
+func resetStreamBuffer() {
+	streamBufMu.Lock()
+	defer streamBufMu.Unlock()
+	streamBuf = nil
 }
 
-// sseCommentPlaceholder is returned when the entire chunk is buffered.
-// SSE spec: lines starting with ':' are comments, silently ignored by clients.
-var sseCommentPlaceholder = []byte(": buffered\n")
-
-// streamBufferTTL is the max age for a buffer entry before cleanup.
-// Covers normal streaming (typically < 30s) with generous margin.
-const streamBufferTTL = 60 * time.Second
-
-func fnvHash(data []byte) uint64 {
-	h := fnv.New64a()
-	h.Write(data)
-	return h.Sum64()
+func popStreamBuffer() []byte {
+	streamBufMu.Lock()
+	defer streamBufMu.Unlock()
+	data := streamBuf
+	streamBuf = nil
+	return data
 }
 
-func getAndClearStreamBuffer(key uint64) []byte {
-	streamBufferMu.Lock()
-	defer streamBufferMu.Unlock()
-
-	// Opportunistic cleanup of stale entries
-	now := time.Now()
-	for k, entry := range streamBuffers {
-		if now.Sub(entry.updatedAt) > streamBufferTTL {
-			delete(streamBuffers, k)
-		}
-	}
-
-	entry, ok := streamBuffers[key]
-	if !ok {
-		return nil
-	}
-	delete(streamBuffers, key)
-	return entry.data
-}
-
-func storeStreamBuffer(key uint64, data []byte) {
-	streamBufferMu.Lock()
-	defer streamBufferMu.Unlock()
-
-	// Make a copy to avoid retaining references to large chunk slices
+func pushStreamBuffer(data []byte) {
+	streamBufMu.Lock()
+	defer streamBufMu.Unlock()
+	// Copy to avoid retaining references to large chunk slices
 	buf := make([]byte, len(data))
 	copy(buf, data)
-	streamBuffers[key] = streamBufferEntry{
-		data:      buf,
-		updatedAt: time.Now(),
-	}
+	streamBuf = buf
 }
 
 // splitSSEEvents splits combined bytes into complete SSE events and an
