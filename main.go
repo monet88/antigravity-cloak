@@ -656,7 +656,6 @@ var defaultCloakTables = map[string]map[string]string{
 var defaultUncloakTables map[string]map[string]string
 
 func init() {
-	println("cpa-plugin-antigravity-coding-filter: init start")
 	defaultUncloakTables = make(map[string]map[string]string)
 	for client, cloaks := range defaultCloakTables {
 		uncloaks := make(map[string]string)
@@ -665,7 +664,6 @@ func init() {
 		}
 		defaultUncloakTables[client] = uncloaks
 	}
-	println("cpa-plugin-antigravity-coding-filter: init end")
 }
 
 
