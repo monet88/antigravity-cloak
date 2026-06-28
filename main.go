@@ -1152,13 +1152,15 @@ func detectClient(toolNames []string) string {
 	seenClaudeSigs := make(map[string]bool)
 
 	for _, n := range toolNames {
-		if n == "askUserQuestion" {
+		// Detect Claude Code via original askUserQuestion or any unique cloaked tool name
+		if n == "askUserQuestion" || n == "replace_file_content" || n == "view_file" || n == "write_to_file" || n == "grep_search" || n == "list_dir" {
 			hasClaude = true
 		}
 		if claudeSigs[n] {
 			seenClaudeSigs[n] = true
 		}
-		if n == "shell_command" || n == "apply_patch" {
+		// Detect Codex via original signatures or any unique cloaked tool name
+		if n == "shell_command" || n == "apply_patch" || n == "multi_replace_file_content" || n == "generate_image" || n == "manage_task" || n == "list_resources" || n == "list_permissions" || n == "read_resource" {
 			hasCodex = true
 		}
 		if n == "ask_permission" || n == "invoke_subagent" {
