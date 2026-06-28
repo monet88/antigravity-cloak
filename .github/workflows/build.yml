@@ -13,7 +13,7 @@ permissions:
   contents: write
 
 env:
-  PLUGIN_ID: antigravity-coding-filter
+  PLUGIN_ID: antigravity-cloak
 
 jobs:
   test:

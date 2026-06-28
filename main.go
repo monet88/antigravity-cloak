@@ -90,9 +90,9 @@ func debugLog(format string, args ...any) {
 const abiVersion = 1
 
 const (
-	pluginName       = "antigravity-coding-filter"
+	pluginName       = "antigravity-cloak"
 	pluginVersion    = "0.1.0"
-	pluginRepository = "https://github.com/jellyfish-p/cpa-plugin-antigravity-coding-filter"
+	pluginRepository = "https://github.com/monet88/antigravity-cloak"
 )
 
 func main() {}

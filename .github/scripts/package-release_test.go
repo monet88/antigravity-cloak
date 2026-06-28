@@ -12,7 +12,7 @@ func TestPackageLibraryWritesLibraryAsExecutableZipEntry(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	libraryPath := filepath.Join(dir, "antigravity-coding-filter.dll")
+	libraryPath := filepath.Join(dir, "antigravity-cloak.dll")
 	archivePath := filepath.Join(dir, "plugin.zip")
 	libraryData := []byte("compiled plugin bytes")
 
@@ -37,8 +37,8 @@ func TestPackageLibraryWritesLibraryAsExecutableZipEntry(t *testing.T) {
 	}
 
 	entry := reader.File[0]
-	if entry.Name != "antigravity-coding-filter.dll" {
-		t.Fatalf("entry name = %q, want antigravity-coding-filter.dll", entry.Name)
+	if entry.Name != "antigravity-cloak.dll" {
+		t.Fatalf("entry name = %q, want antigravity-cloak.dll", entry.Name)
 	}
 	if mode := entry.Mode().Perm(); mode != 0o755 {
 		t.Fatalf("entry mode = %o, want 755", mode)
