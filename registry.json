@@ -6,7 +6,7 @@
       "name": "Antigravity Cloak",
       "description": "CLIProxyAPI v7 dynamic plugin that rewrites non-Antigravity coding software signals to Antigravity, including tool-name cloaking with structured uncloak.",
       "author": "monet88",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "repository": "https://github.com/monet88/antigravity-cloak",
       "homepage": "https://github.com/monet88/antigravity-cloak",
       "license": "MIT",
