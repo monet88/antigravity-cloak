@@ -103,12 +103,12 @@ func TestRewriteRequestBodyCloaksClaudeCodeTools(t *testing.T) {
 	body := `{
 		"system":"You are Claude Code.",
 		"tools":[
-			{"type":"function","function":{"name":"bash","description":"Run Claude Code shell commands"}},
-			{"type":"function","function":{"name":"read","description":"Read files"}},
-			{"type":"function","function":{"name":"edit","description":"Edit files"}}
+			{"type":"function","function":{"name":"Bash","description":"Run Claude Code shell commands"}},
+			{"type":"function","function":{"name":"Read","description":"Read files"}},
+			{"type":"function","function":{"name":"Edit","description":"Edit files"}}
 		],
 		"messages":[],
-		"tool_choice":{"type":"function","function":{"name":"bash"}}
+		"tool_choice":{"type":"function","function":{"name":"Bash"}}
 	}`
 	got, rewritten := rewriteRequestBody([]byte(body), "openai")
 	if !rewritten {
@@ -180,13 +180,13 @@ func TestRewriteRequestBodyCloaksCodexTools(t *testing.T) {
 func TestRewriteRequestBodyCloaksToolRefsInMessageHistory(t *testing.T) {
 	body := `{
 		"tools":[
-			{"type":"function","function":{"name":"bash"}},
-			{"type":"function","function":{"name":"edit"}},
-			{"type":"function","function":{"name":"read"}}
+			{"type":"function","function":{"name":"Bash"}},
+			{"type":"function","function":{"name":"Edit"}},
+			{"type":"function","function":{"name":"Read"}}
 		],
 		"messages":[
-			{"role":"assistant","tool_calls":[{"id":"tc1","type":"function","function":{"name":"bash","arguments":"{}"}}]},
-			{"role":"tool","tool_call_id":"tc1","name":"bash","content":"output"}
+			{"role":"assistant","tool_calls":[{"id":"tc1","type":"function","function":{"name":"Bash","arguments":"{}"}}]},
+			{"role":"tool","tool_call_id":"tc1","name":"Bash","content":"output"}
 		]
 	}`
 	got, rewritten := rewriteRequestBody([]byte(body), "openai")
@@ -217,15 +217,15 @@ func TestRewriteRequestBodyHandlesToolChoiceShapes(t *testing.T) {
 	}{
 		{
 			name: "tool_choice as string (skip safely)",
-			body: `{"tools":[{"type":"function","function":{"name":"bash"}},{"type":"function","function":{"name":"edit"}},{"type":"function","function":{"name":"read"}}],"tool_choice":"auto","messages":[]}`,
+			body: `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Edit"}},{"type":"function","function":{"name":"Read"}}],"tool_choice":"auto","messages":[]}`,
 		},
 		{
 			name: "tool_choice as object with function.name",
-			body: `{"tools":[{"type":"function","function":{"name":"bash"}},{"type":"function","function":{"name":"edit"}},{"type":"function","function":{"name":"read"}}],"tool_choice":{"type":"function","function":{"name":"bash"}},"messages":[]}`,
+			body: `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Edit"}},{"type":"function","function":{"name":"Read"}}],"tool_choice":{"type":"function","function":{"name":"Bash"}},"messages":[]}`,
 		},
 		{
 			name: "anthropic tool_choice as object with name",
-			body: `{"tools":[{"name":"bash"},{"name":"edit"},{"name":"read"}],"tool_choice":{"type":"tool","name":"bash"},"messages":[]}`,
+			body: `{"tools":[{"name":"Bash"},{"name":"Edit"},{"name":"Read"}],"tool_choice":{"type":"tool","name":"Bash"},"messages":[]}`,
 		},
 	}
 	for _, tt := range tests {
@@ -332,12 +332,12 @@ func TestRewriteRequestBodyCloaksAnthropicFormat(t *testing.T) {
 	body := `{
 		"system":"You are Claude Code.",
 		"tools":[
-			{"name":"bash","description":"Run Claude Code shell"},
-			{"name":"read","description":"Read files"},
-			{"name":"edit","description":"Edit files"}
+			{"name":"Bash","description":"Run Claude Code shell"},
+			{"name":"Read","description":"Read files"},
+			{"name":"Edit","description":"Edit files"}
 		],
 		"messages":[
-			{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"bash","input":{}}]},
+			{"role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{}}]},
 			{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"output"}]}
 		]
 	}`
@@ -395,8 +395,8 @@ func TestUncloakTablesInitialization(t *testing.T) {
 		t.Fatal("uncloak tables not initialized")
 	}
 	// Claude Code
-	if defaultUncloakTables["claude_code"]["run_command"] != "bash" {
-		t.Fatal("expected bash")
+	if defaultUncloakTables["claude_code"]["run_command"] != "Bash" {
+		t.Fatal("expected Bash")
 	}
 	// Codex
 	if defaultUncloakTables["codex"]["run_command"] != "shell_command" {
@@ -420,8 +420,8 @@ func TestDetectClient(t *testing.T) {
 		toolNames  []string
 		wantClient string
 	}{
-		{"claude code by askUserQuestion", []string{"bash", "askUserQuestion", "read"}, "claude_code"},
-		{"claude code by signature trio", []string{"bash", "edit", "read", "write"}, "claude_code"},
+		{"claude code by askUserQuestion", []string{"Bash", "AskUserQuestion", "Read"}, "claude_code"},
+		{"claude code by signature trio", []string{"Bash", "Edit", "Read", "Write"}, "claude_code"},
 		{"codex by shell_command", []string{"shell_command", "apply_patch"}, "codex"},
 		{"codex by apply_patch only", []string{"apply_patch", "request_user_input"}, "codex"},
 		// detectClient only matches original (cloak table key) names; Antigravity
@@ -431,7 +431,7 @@ func TestDetectClient(t *testing.T) {
 		{"unknown tools", []string{"custom_tool", "another_tool"}, ""},
 		{"empty list", []string{}, ""},
 		// Only 1 original key match → below threshold of 2
-		{"single original match below threshold", []string{"bash", "ask_permission"}, ""},
+		{"single original match below threshold", []string{"Bash", "ask_permission"}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -590,8 +590,8 @@ func TestToolDescriptionReplacesToolNames(t *testing.T) {
 	// tool name references replaced (not just brand text).
 	body := `{
 		"tools":[
-			{"type":"function","function":{"name":"bash","description":"Use the bash tool to run commands"}},
-			{"type":"function","function":{"name":"read","description":"Use read to view files"}}
+			{"type":"function","function":{"name":"Bash","description":"Use the Bash tool to run commands"}},
+			{"type":"function","function":{"name":"Read","description":"Use Read to view files"}}
 		],
 		"messages":[]
 	}`
@@ -611,8 +611,8 @@ func TestToolDescriptionReplacesToolNames(t *testing.T) {
 	if !strings.Contains(desc0, "run_command") {
 		t.Fatalf("expected description to contain 'run_command', got %q", desc0)
 	}
-	if strings.Contains(desc0, "bash") {
-		t.Fatalf("expected 'bash' to be replaced in description, got %q", desc0)
+	if strings.Contains(desc0, "Bash") {
+		t.Fatalf("expected 'Bash' to be replaced in description, got %q", desc0)
 	}
 
 	t1 := tools[1].(map[string]any)["function"].(map[string]any)
@@ -625,11 +625,11 @@ func TestToolDescriptionReplacesToolNames(t *testing.T) {
 func TestSystemMessageReplacesToolNames(t *testing.T) {
 	body := `{
 		"tools":[
-			{"type":"function","function":{"name":"bash","description":"run shell"}},
-			{"type":"function","function":{"name":"read","description":"read file"}}
+			{"type":"function","function":{"name":"Bash","description":"run shell"}},
+			{"type":"function","function":{"name":"Read","description":"read file"}}
 		],
 		"messages":[
-			{"role":"system","content":"Use bash to execute commands. Call read to view files. The edit tool modifies content."}
+			{"role":"system","content":"Use Bash to execute commands. Call Read to view files. The Edit tool modifies content."}
 		]
 	}`
 	got, rewritten := rewriteRequestBody([]byte(body), "openai")
@@ -651,12 +651,11 @@ func TestSystemMessageReplacesToolNames(t *testing.T) {
 	if !strings.Contains(content, "view_file") {
 		t.Fatalf("expected system message to contain 'view_file', got %q", content)
 	}
-	// "read" in plain prose should NOT be present — only the tool-reference pattern "Call read" matched
-	if strings.Contains(content, "Use bash") {
-		t.Fatalf("expected 'bash' replaced in 'Use bash' context, got %q", content)
+	// Tool-reference contexts ("Use Bash", "Call Read", "The Edit tool") are replaced.
+	if strings.Contains(content, "Use Bash") {
+		t.Fatalf("expected 'Bash' replaced in 'Use Bash' context, got %q", content)
 	}
-	// Plain prose "read" outside a tool pattern should remain untouched
-	// (here all occurrences of "read" were in "Call read" context, so all replaced)
+	// Plain prose tool names outside a tool pattern remain untouched.
 }
 
 func TestBuildUncloakTableWithCloakedRequest(t *testing.T) {
@@ -686,11 +685,11 @@ func TestBuildUncloakTableWithCloakedRequest(t *testing.T) {
 	if client == "" {
 		t.Fatal("expected non-empty client name")
 	}
-	if uncloakTable["run_command"] != "bash" {
-		t.Fatalf("expected run_command → bash, got %q", uncloakTable["run_command"])
+	if uncloakTable["run_command"] != "Bash" {
+		t.Fatalf("expected run_command → Bash, got %q", uncloakTable["run_command"])
 	}
-	if uncloakTable["invoke_subagent"] != "agent" {
-		t.Fatalf("expected invoke_subagent → agent, got %q", uncloakTable["invoke_subagent"])
+	if uncloakTable["invoke_subagent"] != "Agent" {
+		t.Fatalf("expected invoke_subagent → Agent, got %q", uncloakTable["invoke_subagent"])
 	}
 }
 
@@ -1033,4 +1032,90 @@ func buildTestUncloakPattern(uncloakTable map[string]string) *cachedUncloakPatte
 	pattern := `"name"\s*:\s*"(` + strings.Join(targets, "|") + `)"`
 	re := regexp.MustCompile(pattern)
 	return &cachedUncloakPattern{re: re, lookup: uncloakTable}
+}
+
+func TestModelAllowsCloakEmptyPrefixesAllowsAll(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	// Default config has no model prefixes → cloak runs for every model.
+	if !modelAllowsCloak("grok-build-0.1", "grok-build-0.1") {
+		t.Fatal("empty prefixes should allow all models")
+	}
+	if !modelAllowsCloak("", "") {
+		t.Fatal("empty prefixes should allow even empty model names")
+	}
+}
+
+func TestModelAllowsCloakWithPrefixes(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	cfg := defaultFilterConfig()
+	cfg.ModelPrefixes = []string{"agy/"}
+	applyFilterConfig(cfg)
+
+	tests := []struct {
+		name           string
+		model          string
+		requestedModel string
+		want           bool
+	}{
+		{"upstream model matches", "agy/gemini-3-flash-agent", "", true},
+		{"requested model matches", "", "agy/gemini-3-flash", true},
+		{"either side matches", "gemini-3-flash", "agy/gemini-3-flash", true},
+		{"non-antigravity model", "grok-build-0.1", "grok-build-0.1", false},
+		{"both empty", "", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := modelAllowsCloak(tt.model, tt.requestedModel); got != tt.want {
+				t.Fatalf("modelAllowsCloak(%q,%q) = %t, want %t", tt.model, tt.requestedModel, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseModelPrefixes(t *testing.T) {
+	tests := []struct {
+		name    string
+		value   any
+		want    []string
+		wantErr bool
+	}{
+		{"array of strings", []any{"agy/", "antigravity/"}, []string{"agy/", "antigravity/"}, false},
+		{"comma separated string", "agy/, antigravity/", []string{"agy/", "antigravity/"}, false},
+		{"newline separated string", "agy/\nantigravity/", []string{"agy/", "antigravity/"}, false},
+		{"nil", nil, nil, false},
+		{"non-string entry", []any{"agy/", 5}, nil, true},
+		{"wrong type", 42, nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseModelPrefixes(tt.value)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil (result %v)", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestParseFilterConfigYAMLModelPrefixes(t *testing.T) {
+	cfg, err := parseFilterConfigYAML([]byte("model_prefixes:\n  - agy/\n  - antigravity/\n"))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(cfg.ModelPrefixes) != 2 || cfg.ModelPrefixes[0] != "agy/" || cfg.ModelPrefixes[1] != "antigravity/" {
+		t.Fatalf("ModelPrefixes = %v, want [agy/ antigravity/]", cfg.ModelPrefixes)
+	}
 }

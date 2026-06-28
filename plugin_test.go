@@ -302,7 +302,7 @@ func mustUnmarshalJSON(t *testing.T, raw []byte, out any) {
 
 func TestResponseInterceptReversesClaudeCodeCloak(t *testing.T) {
 	// Build a request body with Claude Code tools
-	reqBody := `{"tools":[{"type":"function","function":{"name":"bash"}},{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"edit"}}],"messages":[]}`
+	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
 	// Build a response body with cloaked tool call
 	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
 
@@ -340,8 +340,8 @@ func TestResponseInterceptReversesClaudeCodeCloak(t *testing.T) {
 	fn := toolCall["function"].(map[string]any)
 	name := fn["name"].(string)
 
-	if name != "bash" {
-		t.Fatalf("expected tool call function name to be 'bash', got %q", name)
+	if name != "Bash" {
+		t.Fatalf("expected tool call function name to be 'Bash', got %q", name)
 	}
 }
 
@@ -389,7 +389,7 @@ func TestResponseInterceptReversesCodexCloak(t *testing.T) {
 
 func TestResponseInterceptDoesNotCorruptProse(t *testing.T) {
 	// Verify that "run_command" appearing in assistant text is NOT replaced
-	reqBody := `{"tools":[{"type":"function","function":{"name":"bash"}},{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"edit"}}],"messages":[]}`
+	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
 	respBody := `{"choices":[{"message":{"content":"You can use run_command to execute..."}}]}`
 
 	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
@@ -420,7 +420,7 @@ func TestResponseInterceptDoesNotCorruptProse(t *testing.T) {
 }
 
 func TestStreamChunkInterceptReversesCloak(t *testing.T) {
-	reqBody := `{"tools":[{"type":"function","function":{"name":"bash"}},{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"edit"}}],"messages":[]}`
+	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
 	chunkBody := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
 
 	request := streamChunkInterceptRequestJSON(t, reqBody, chunkBody, "openai")
@@ -461,8 +461,8 @@ func TestStreamChunkInterceptReversesCloak(t *testing.T) {
 	fn := toolCall["function"].(map[string]any)
 	name := fn["name"].(string)
 
-	if name != "bash" {
-		t.Fatalf("expected delta tool call function name to be 'bash', got %q", name)
+	if name != "Bash" {
+		t.Fatalf("expected delta tool call function name to be 'Bash', got %q", name)
 	}
 }
 
@@ -493,7 +493,7 @@ func TestResponseInterceptPassesThroughAntigravity(t *testing.T) {
 }
 
 func TestResponseInterceptAnthropicFormat(t *testing.T) {
-	reqBody := `{"tools":[{"name":"bash"},{"name":"read"},{"name":"edit"}],"messages":[]}`
+	reqBody := `{"tools":[{"name":"Bash"},{"name":"Read"},{"name":"Edit"}],"messages":[]}`
 	respBody := `{"content":[{"type":"tool_use","id":"tu1","name":"run_command","input":{}}]}`
 
 	request := responseInterceptRequestJSON(t, reqBody, respBody, "anthropic")
@@ -525,8 +525,8 @@ func TestResponseInterceptAnthropicFormat(t *testing.T) {
 	block := content[0].(map[string]any)
 	name := block["name"].(string)
 
-	if name != "bash" {
-		t.Fatalf("expected tool_use name to be 'bash', got %q", name)
+	if name != "Bash" {
+		t.Fatalf("expected tool_use name to be 'Bash', got %q", name)
 	}
 }
 

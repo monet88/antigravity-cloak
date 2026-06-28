@@ -91,7 +91,7 @@ const abiVersion = 1
 
 const (
 	pluginName       = "antigravity-cloak"
-	pluginVersion    = "0.1.1"
+	pluginVersion    = "0.2.0"
 	pluginRepository = "https://github.com/monet88/antigravity-cloak"
 )
 
@@ -236,7 +236,54 @@ func configFields() []pluginapi.ConfigField {
 			Type:        pluginapi.ConfigFieldTypeObject,
 			Description: "Custom tool name mappings per client. Keys: client name (claude_code, codex). Values: map of original_tool_name → antigravity_target_name. Overrides defaults for matching keys.",
 		},
+		{
+			Name:        "model_prefixes",
+			Type:        pluginapi.ConfigFieldTypeArray,
+			Description: "Only cloak when the upstream/requested model starts with one of these prefixes, for example agy/. Leave empty to cloak for every model (matches all providers).",
+		},
 	}
+}
+
+// normalizeSourceFormat maps the SDK's source-format identifiers onto the two
+// branch families the interceptors understand. The proxy emits "claude" and
+// "antigravity" (both Anthropic-shaped) and "codex"/"openai-response" (both
+// OpenAI-shaped); collapse them so extractToolNames/cloak/uncloak hit the
+// correct branch instead of silently no-oping on an unrecognized string.
+func normalizeSourceFormat(sourceFormat string) string {
+	switch strings.ToLower(strings.TrimSpace(sourceFormat)) {
+	case "anthropic", "claude", "antigravity":
+		return "anthropic"
+	case "openai", "openai-response", "codex":
+		return "openai"
+	default:
+		return strings.ToLower(strings.TrimSpace(sourceFormat))
+	}
+}
+
+// modelAllowsCloak reports whether cloaking should run for the current model.
+// When ModelPrefixes is empty (the default), cloaking runs for every model so
+// behavior matches the upstream "cloak by client" design. When non-empty,
+// cloaking runs only if the upstream Model or the client RequestedModel starts
+// with one of the configured prefixes (e.g. "agy/"). Both handlers and the
+// stream path share this gate so request/response/stream stay consistent.
+func modelAllowsCloak(model, requestedModel string) bool {
+	prefixes := activeFilterConfig().ModelPrefixes
+	if len(prefixes) == 0 {
+		return true
+	}
+	candidates := [...]string{strings.TrimSpace(model), strings.TrimSpace(requestedModel)}
+	for _, prefix := range prefixes {
+		prefix = strings.TrimSpace(prefix)
+		if prefix == "" {
+			continue
+		}
+		for _, candidate := range candidates {
+			if candidate != "" && strings.HasPrefix(candidate, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func handleRequestInterceptBefore(request []byte) []byte {
@@ -245,8 +292,13 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		return mustErrorEnvelope("invalid_request", fmt.Sprintf("decode request.intercept_before request: %v", err))
 	}
 
-	debugLog("handleRequestInterceptBefore: SourceFormat=%s Body=%s", req.SourceFormat, string(req.Body))
-	body, rewritten := rewriteRequestBody(req.Body, req.SourceFormat)
+	format := normalizeSourceFormat(req.SourceFormat)
+	debugLog("handleRequestInterceptBefore: SourceFormat=%s (normalized=%s) ToFormat=%q Model=%q RequestedModel=%q Body=%s", req.SourceFormat, format, req.ToFormat, req.Model, req.RequestedModel, string(req.Body))
+	if !modelAllowsCloak(req.Model, req.RequestedModel) {
+		debugLog("handleRequestInterceptBefore: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
+		return mustEnvelope(pluginapi.RequestInterceptResponse{})
+	}
+	body, rewritten := rewriteRequestBody(req.Body, format)
 	debugLog("handleRequestInterceptBefore: rewritten=%t Body=%s", rewritten, string(body))
 	if !rewritten {
 		return mustEnvelope(pluginapi.RequestInterceptResponse{})
@@ -260,14 +312,19 @@ func handleResponseIntercept(request []byte) []byte {
 		return mustErrorEnvelope("invalid_request", err.Error())
 	}
 
-	debugLog("handleResponseIntercept: SourceFormat=%s RequestBody=%s Body=%s", req.SourceFormat, string(req.RequestBody), string(req.Body))
-	uncloakTable, _ := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), req.SourceFormat)
+	format := normalizeSourceFormat(req.SourceFormat)
+	debugLog("handleResponseIntercept: SourceFormat=%s (normalized=%s) RequestBody=%s Body=%s", req.SourceFormat, format, string(req.RequestBody), string(req.Body))
+	if !modelAllowsCloak(req.Model, req.RequestedModel) {
+		debugLog("handleResponseIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
+		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+	}
+	uncloakTable, _ := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
 	debugLog("handleResponseIntercept: uncloakTable=%v", uncloakTable)
 	if uncloakTable == nil {
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
 
-	modified, changed := uncloakResponseBody(req.Body, uncloakTable, req.SourceFormat)
+	modified, changed := uncloakResponseBody(req.Body, uncloakTable, format)
 	debugLog("handleResponseIntercept: changed=%t Body=%s", changed, string(modified))
 	if !changed {
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
@@ -281,8 +338,13 @@ func handleStreamChunkIntercept(request []byte) []byte {
 		return mustErrorEnvelope("invalid_request", err.Error())
 	}
 
-	debugLog("handleStreamChunkIntercept: SourceFormat=%s ChunkIndex=%d Body=%s", req.SourceFormat, req.ChunkIndex, string(req.Body))
-	_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), req.SourceFormat)
+	format := normalizeSourceFormat(req.SourceFormat)
+	debugLog("handleStreamChunkIntercept: SourceFormat=%s (normalized=%s) ChunkIndex=%d Body=%s", req.SourceFormat, format, req.ChunkIndex, string(req.Body))
+	if !modelAllowsCloak(req.Model, req.RequestedModel) {
+		debugLog("handleStreamChunkIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+	}
+	_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
 	debugLog("handleStreamChunkIntercept: client=%s", client)
 	if client == "" {
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
@@ -692,10 +754,10 @@ type rewriteMapping struct {
 
 var defaultCloakTables = map[string]map[string]string{
 	"claude_code": {
-		"bash": "run_command", "edit": "replace_file_content", "read": "view_file",
-		"write": "write_to_file", "grep": "grep_search", "glob": "list_dir",
-		"agent": "invoke_subagent", "askUserQuestion": "ask_question",
-		"toolSearch": "search_web", "skill": "call_mcp_tool", "workflow": "schedule",
+		"Bash": "run_command", "Edit": "replace_file_content", "Read": "view_file",
+		"Write": "write_to_file", "Grep": "grep_search", "Glob": "list_dir",
+		"Agent": "invoke_subagent", "AskUserQuestion": "ask_question",
+		"ToolSearch": "search_web", "Skill": "call_mcp_tool", "Workflow": "schedule",
 	},
 	"codex": {
 		"shell_command": "run_command", "apply_patch": "multi_replace_file_content",
@@ -746,6 +808,10 @@ type filterConfig struct {
 	UseDefaultKeywords bool
 	CustomMappings     []rewriteMapping
 	ToolMappings       map[string]map[string]string // client → {orig_tool: antigravity_tool}
+	// ModelPrefixes gates cloaking by model name. When non-empty, cloaking runs
+	// only if the request/response model starts with one of these prefixes.
+	// Empty means cloak for every model (legacy behavior, all providers).
+	ModelPrefixes []string
 
 	// Pre-compiled regex patterns, rebuilt on config change.
 	cloakRegexCache   map[string]*cachedCloakPatterns  // client → compiled cloak patterns
@@ -795,6 +861,7 @@ func applyFilterConfig(cfg filterConfig) {
 		UseDefaultKeywords: cfg.UseDefaultKeywords,
 		CustomMappings:     append([]rewriteMapping(nil), normalizeMappings(cfg.CustomMappings)...),
 		ToolMappings:       copyToolMappings(cfg.ToolMappings),
+		ModelPrefixes:      append([]string(nil), cfg.ModelPrefixes...),
 	}
 	rebuildCachedRegexes(&newCfg)
 	currentFilterConfig = newCfg
@@ -868,6 +935,7 @@ func activeFilterConfig() filterConfig {
 		UseDefaultKeywords: currentFilterConfig.UseDefaultKeywords,
 		CustomMappings:     append([]rewriteMapping(nil), currentFilterConfig.CustomMappings...),
 		ToolMappings:       copyToolMappings(currentFilterConfig.ToolMappings),
+		ModelPrefixes:      append([]string(nil), currentFilterConfig.ModelPrefixes...),
 		cloakRegexCache:    currentFilterConfig.cloakRegexCache,
 		uncloakRegexCache:  currentFilterConfig.uncloakRegexCache,
 	}
@@ -926,7 +994,47 @@ func parseFilterConfigYAML(raw []byte) (filterConfig, error) {
 			}
 		}
 	}
+	if value, exists := values["model_prefixes"]; exists {
+		prefixes, err := parseModelPrefixes(value)
+		if err != nil {
+			return filterConfig{}, err
+		}
+		cfg.ModelPrefixes = prefixes
+	}
 	return cfg, nil
+}
+
+// parseModelPrefixes accepts an array of strings, a comma/newline-separated
+// string, or a single string, and returns the trimmed, non-empty prefixes.
+func parseModelPrefixes(value any) ([]string, error) {
+	appendPrefix := func(out []string, raw string) []string {
+		for _, part := range strings.FieldsFunc(raw, func(r rune) bool {
+			return r == ',' || r == '\n' || r == '\r'
+		}) {
+			if trimmed := strings.TrimSpace(part); trimmed != "" {
+				out = append(out, trimmed)
+			}
+		}
+		return out
+	}
+	var prefixes []string
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		prefixes = appendPrefix(prefixes, typed)
+	case []any:
+		for _, item := range typed {
+			str, ok := item.(string)
+			if !ok {
+				return nil, fmt.Errorf("model_prefixes entries must be strings")
+			}
+			prefixes = appendPrefix(prefixes, str)
+		}
+	default:
+		return nil, fmt.Errorf("model_prefixes must be an array or string")
+	}
+	return prefixes, nil
 }
 
 func parseToolMappings(value any) (map[string]map[string]string, error) {
@@ -1472,7 +1580,15 @@ func isUnambiguousToolName(name string) bool {
 	if strings.Contains(name, "_") {
 		return true
 	}
-	for _, r := range name {
+	// camelCase / multi-word names (an uppercase rune AFTER the first one) are
+	// distinctive enough to replace anywhere in prose, e.g. "AskUserQuestion",
+	// "ToolSearch". Single capitalized words like "Read", "Edit", "Bash" collide
+	// with ordinary English prose, so treat them as ambiguous and only replace
+	// them inside explicit tool-reference contexts (e.g. "use Bash", "the Read tool").
+	for i, r := range name {
+		if i == 0 {
+			continue
+		}
 		if r >= 'A' && r <= 'Z' {
 			return true
 		}
