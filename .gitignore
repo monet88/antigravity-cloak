@@ -23,3 +23,4 @@ worktrees/
 .superpowers/
 .codex/
 test/
+.ref/
