@@ -1,4 +1,4 @@
-module cpa-plugin-antigravity-coding-filter
+module github.com/monet88/antigravity-cloak
 
 go 1.26.0
 
