@@ -38,8 +38,12 @@ extern void cliproxy_plugin_shutdown(void);
 import "C"
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"unsafe"
@@ -48,6 +52,40 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
 )
+
+// Debug logging is opt-in. It writes full request/response bodies (which can
+// contain user prompts and tool outputs) so it must never run for normal
+// production traffic. Set CPA_FILTER_DEBUG to any non-empty value to enable it.
+// The log file is opened lazily once and reused under a mutex to avoid the
+// per-call open/close cost on hot streaming paths.
+var (
+	debugLogOnce    sync.Once
+	debugLogMu      sync.Mutex
+	debugLogFile    *os.File
+	debugLogEnabled bool
+)
+
+func debugLog(format string, args ...any) {
+	debugLogOnce.Do(func() {
+		if os.Getenv("CPA_FILTER_DEBUG") == "" {
+			return
+		}
+		f, err := os.OpenFile("logs/cpa-filter-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if err != nil {
+			f, err = os.OpenFile("cpa-filter-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		}
+		if err == nil {
+			debugLogFile = f
+			debugLogEnabled = true
+		}
+	})
+	if !debugLogEnabled || debugLogFile == nil {
+		return
+	}
+	debugLogMu.Lock()
+	fmt.Fprintf(debugLogFile, "[DEBUG] "+format+"\n", args...)
+	debugLogMu.Unlock()
+}
 
 const abiVersion = 1
 
@@ -126,6 +164,10 @@ func handlePluginCall(method string, request []byte) ([]byte, int) {
 		return handleRequestInterceptBefore(request), 0
 	case pluginabi.MethodRequestInterceptAfter:
 		return mustEnvelope(pluginapi.RequestInterceptResponse{}), 0
+	case pluginabi.MethodResponseInterceptAfter:
+		return handleResponseIntercept(request), 0
+	case pluginabi.MethodResponseInterceptStreamChunk:
+		return handleStreamChunkIntercept(request), 0
 	default:
 		return mustErrorEnvelope("unknown_method", fmt.Sprintf("unknown method %q", method)), 0
 	}
@@ -147,9 +189,11 @@ func registrationResponse() any {
 		SchemaVersion uint32             `json:"schema_version"`
 		Metadata      pluginapi.Metadata `json:"metadata"`
 		Capabilities  struct {
-			ModelRouter        bool `json:"model_router"`
-			Executor           bool `json:"executor"`
-			RequestInterceptor bool `json:"request_interceptor"`
+			ModelRouter            bool `json:"model_router"`
+			Executor               bool `json:"executor"`
+			RequestInterceptor     bool `json:"request_interceptor"`
+			ResponseInterceptor    bool `json:"response_interceptor"`
+			StreamChunkInterceptor bool `json:"response_stream_interceptor"`
 		} `json:"capabilities"`
 	}{
 		SchemaVersion: pluginabi.SchemaVersion,
@@ -162,11 +206,15 @@ func registrationResponse() any {
 			ConfigFields:     configFields(),
 		},
 		Capabilities: struct {
-			ModelRouter        bool `json:"model_router"`
-			Executor           bool `json:"executor"`
-			RequestInterceptor bool `json:"request_interceptor"`
+			ModelRouter            bool `json:"model_router"`
+			Executor               bool `json:"executor"`
+			RequestInterceptor     bool `json:"request_interceptor"`
+			ResponseInterceptor    bool `json:"response_interceptor"`
+			StreamChunkInterceptor bool `json:"response_stream_interceptor"`
 		}{
-			RequestInterceptor: true,
+			RequestInterceptor:     true,
+			ResponseInterceptor:    true,
+			StreamChunkInterceptor: true,
 		},
 	}
 }
@@ -183,6 +231,11 @@ func configFields() []pluginapi.ConfigField {
 			Type:        pluginapi.ConfigFieldTypeObject,
 			Description: "Additional case-insensitive system-field rewrite mappings, for example Cursor: Antigravity.",
 		},
+		{
+			Name:        "tool_mappings",
+			Type:        pluginapi.ConfigFieldTypeObject,
+			Description: "Custom tool name mappings per client. Keys: client name (claude_code, codex). Values: map of original_tool_name → antigravity_target_name. Overrides defaults for matching keys.",
+		},
 	}
 }
 
@@ -192,11 +245,389 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		return mustErrorEnvelope("invalid_request", fmt.Sprintf("decode request.intercept_before request: %v", err))
 	}
 
-	body, rewritten := rewriteRequestBody(req.Body)
+	debugLog("handleRequestInterceptBefore: SourceFormat=%s Body=%s", req.SourceFormat, string(req.Body))
+	body, rewritten := rewriteRequestBody(req.Body, req.SourceFormat)
+	debugLog("handleRequestInterceptBefore: rewritten=%t Body=%s", rewritten, string(body))
 	if !rewritten {
 		return mustEnvelope(pluginapi.RequestInterceptResponse{})
 	}
 	return mustEnvelope(pluginapi.RequestInterceptResponse{Body: body})
+}
+
+func handleResponseIntercept(request []byte) []byte {
+	var req pluginapi.ResponseInterceptRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return mustErrorEnvelope("invalid_request", err.Error())
+	}
+
+	debugLog("handleResponseIntercept: SourceFormat=%s RequestBody=%s Body=%s", req.SourceFormat, string(req.RequestBody), string(req.Body))
+	uncloakTable, _ := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), req.SourceFormat)
+	debugLog("handleResponseIntercept: uncloakTable=%v", uncloakTable)
+	if uncloakTable == nil {
+		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+	}
+
+	modified, changed := uncloakResponseBody(req.Body, uncloakTable, req.SourceFormat)
+	debugLog("handleResponseIntercept: changed=%t Body=%s", changed, string(modified))
+	if !changed {
+		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+	}
+	return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
+}
+
+func handleStreamChunkIntercept(request []byte) []byte {
+	var req pluginapi.StreamChunkInterceptRequest
+	if err := json.Unmarshal(request, &req); err != nil {
+		return mustErrorEnvelope("invalid_request", err.Error())
+	}
+
+	debugLog("handleStreamChunkIntercept: SourceFormat=%s ChunkIndex=%d Body=%s", req.SourceFormat, req.ChunkIndex, string(req.Body))
+	_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), req.SourceFormat)
+	debugLog("handleStreamChunkIntercept: client=%s", client)
+	if client == "" {
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+	}
+
+	cfg := activeFilterConfig()
+	cached := cfg.uncloakRegexCache[client]
+	if cached == nil || cached.re == nil {
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+	}
+
+	// ── SSE Event-Level Reassembly Buffer ──────────────────────────────
+	// TCP can split a network chunk at ANY byte boundary, including inside
+	// a tool name like "run_command" → Chunk1: "run_c", Chunk2: "ommand".
+	// Regex on each chunk alone would miss the match entirely.
+	//
+	// Solution: Buffer at the SSE EVENT level. SSE events are delimited by
+	// "\n\n". Incomplete events (no \n\n terminator) are buffered until the
+	// next chunk completes them. Regex only runs on complete events where
+	// tool names are guaranteed to be unfragmented.
+	//
+	// Stream identity: the SDK exposes no per-stream ID on this request, so we
+	// derive a stable key from the (per-stream constant) request body. Each
+	// concurrent stream therefore owns its own buffer slot, preventing the
+	// cross-stream corruption a single shared slot would cause. ChunkIndex == 0
+	// marks a new stream → reset that key's slot.
+	key := streamBufferKey(&req)
+
+	// Reset buffer on new stream
+	if req.ChunkIndex == 0 {
+		resetStreamBuffer(key)
+	}
+
+	// Retrieve and clear buffered tail from previous chunk
+	buffered := popStreamBuffer(key)
+
+	// Combine buffered tail + current chunk
+	var combined []byte
+	if len(buffered) > 0 {
+		combined = make([]byte, len(buffered)+len(req.Body))
+		copy(combined, buffered)
+		copy(combined[len(buffered):], req.Body)
+	} else {
+		combined = req.Body
+	}
+
+	// Split into complete SSE events and incomplete tail
+	completeEvents, incompleteTail := splitSSEEvents(combined)
+
+	// Buffer the incomplete tail for next chunk
+	if len(incompleteTail) > 0 {
+		pushStreamBuffer(key, incompleteTail)
+		debugLog("handleStreamChunkIntercept: buffered %d bytes (incomplete event)", len(incompleteTail))
+	}
+
+	if len(completeEvents) == 0 {
+		// No complete events — entire chunk is buffered.
+		// Use DropChunk to suppress this chunk entirely. The buffered bytes
+		// will be prepended to the next chunk and delivered then.
+		debugLog("handleStreamChunkIntercept: no complete events, dropping chunk")
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{DropChunk: true})
+	}
+
+	// Run regex replacement on complete events only
+	modified, changed := uncloakStreamChunk(completeEvents, cached)
+	debugLog("handleStreamChunkIntercept: changed=%t Body=%s", changed, string(modified))
+	if !changed {
+		modified = completeEvents
+	}
+
+	// If the result equals the original chunk, report no changes
+	if bytes.Equal(modified, req.Body) {
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+	}
+	return mustEnvelope(pluginapi.StreamChunkInterceptResponse{Body: modified})
+}
+
+func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]string, string) {
+	var reqRoot map[string]any
+	if err := safeUnmarshal(requestBody, &reqRoot); err != nil {
+		debugLog("buildUncloakTable: unmarshal err=%v", err)
+		return nil, ""
+	}
+	toolNames := extractToolNames(reqRoot, sourceFormat)
+
+	// Try detecting from original (uncloaked) tool names first
+	client := detectClient(toolNames)
+	debugLog("buildUncloakTable: toolNames=%v client=%s", toolNames, client)
+	if client != "" {
+		return effectiveUncloakTable(client), client
+	}
+
+	// Request body may already be cloaked — detect from cloak targets
+	cloakedClient := detectCloakedClient(toolNames)
+	debugLog("buildUncloakTable: cloakedClient=%s", cloakedClient)
+	if cloakedClient != "" {
+		return effectiveUncloakTable(cloakedClient), cloakedClient
+	}
+
+	return nil, ""
+}
+
+// detectionRequestBody returns the body used for client detection. The host
+// runs this plugin's request.intercept_before first, so RequestBody is already
+// cloaked by the time response/stream interceptors fire. OriginalRequest holds
+// the raw client body with original tool names, which the reliable detectClient
+// path keys on; fall back to RequestBody when OriginalRequest is unavailable.
+func detectionRequestBody(originalRequest, requestBody []byte) []byte {
+	if len(originalRequest) > 0 {
+		return originalRequest
+	}
+	return requestBody
+}
+
+func effectiveUncloakTable(client string) map[string]string {
+	cloakTable := activeFilterConfig().ToolMappings[client]
+	if cloakTable == nil {
+		return nil
+	}
+	uncloak := make(map[string]string, len(cloakTable))
+	for orig, target := range cloakTable {
+		uncloak[target] = orig
+	}
+	return uncloak
+}
+
+func uncloakResponseBody(body []byte, uncloakTable map[string]string, sourceFormat string) ([]byte, bool) {
+	var root any
+	if err := safeUnmarshal(body, &root); err != nil {
+		return nil, false
+	}
+
+	changed := uncloakJSONNode(root, uncloakTable, sourceFormat)
+	if !changed {
+		return nil, false
+	}
+	raw, err := safeMarshal(root)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+// uncloakStreamChunk uses pre-compiled regex to replace tool names directly in
+// raw SSE bytes. Callers MUST pass complete SSE events (assembled by the event
+// reassembly buffer) to guarantee that tool names are never split across calls.
+func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool) {
+	if cached == nil || cached.re == nil {
+		return nil, false
+	}
+
+	// Find all matches of "name":"<target_tool_name>" and replace with originals.
+	// Uses FindAllSubmatchIndex to extract the tool name capture group and look
+	// it up in the uncloak table for precise replacement.
+	bodyStr := string(body)
+	matches := cached.re.FindAllStringSubmatchIndex(bodyStr, -1)
+	if len(matches) == 0 {
+		return nil, false
+	}
+
+	var buf strings.Builder
+	buf.Grow(len(bodyStr))
+	lastEnd := 0
+	changed := false
+
+	for _, loc := range matches {
+		// FindAllStringSubmatchIndex returns 2*(1+groups) ints; guard the
+		// capture-group slice indices before slicing to avoid a panic on any
+		// unexpected match shape (e.g. an optional group that did not match).
+		if len(loc) < 4 || loc[2] < 0 || loc[3] < 0 {
+			continue
+		}
+		// loc[2]:loc[3] is capture group 1 (the tool name)
+		toolName := bodyStr[loc[2]:loc[3]]
+		if orig, ok := cached.lookup[toolName]; ok {
+			buf.WriteString(bodyStr[lastEnd:loc[2]])
+			buf.WriteString(orig)
+			lastEnd = loc[3]
+			changed = true
+		}
+	}
+
+	if !changed {
+		return nil, false
+	}
+
+	buf.WriteString(bodyStr[lastEnd:])
+	return []byte(buf.String()), true
+}
+
+// ── SSE Event Reassembly Buffer ────────────────────────────────────────
+//
+// Handles the "Split-String Chunk" attack: TCP can split a network chunk
+// at any byte boundary, including inside a tool name:
+//   Chunk 1: data: {"name": "run_c
+//   Chunk 2: ommand", "input": {}}\n\n
+//
+// Without buffering, regex on each chunk misses the match entirely.
+//
+// Solution: SSE events are delimited by "\n\n". We buffer incomplete events
+// (those without a \n\n terminator) and only process/forward complete events
+// where all JSON content — including tool names — is guaranteed intact.
+//
+// The host runs each client request in its own goroutine, so multiple streams
+// can call the interceptor concurrently. A single shared slot would let one
+// stream pop, reset, or overwrite another stream's incomplete tail. We instead
+// key the buffers by a per-stream identifier so concurrent streams stay
+// isolated. ChunkIndex == 0 signals a new stream → that key's slot is reset.
+
+var (
+	streamBufMu sync.Mutex
+	streamBufs  = make(map[uint64][]byte) // per-stream incomplete tails
+)
+
+// streamBufferKey derives a stable per-stream key. The SDK exposes no stream
+// ID on StreamChunkInterceptRequest, but the request body is constant for the
+// lifetime of a single stream, so an FNV-1a hash of it (preferring the raw
+// client body) uniquely identifies the stream across its chunks.
+func streamBufferKey(req *pluginapi.StreamChunkInterceptRequest) uint64 {
+	src := req.OriginalRequest
+	if len(src) == 0 {
+		src = req.RequestBody
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(src)
+	return h.Sum64()
+}
+
+func resetStreamBuffer(key uint64) {
+	streamBufMu.Lock()
+	defer streamBufMu.Unlock()
+	delete(streamBufs, key)
+}
+
+func popStreamBuffer(key uint64) []byte {
+	streamBufMu.Lock()
+	defer streamBufMu.Unlock()
+	data := streamBufs[key]
+	delete(streamBufs, key)
+	return data
+}
+
+func pushStreamBuffer(key uint64, data []byte) {
+	streamBufMu.Lock()
+	defer streamBufMu.Unlock()
+	// Copy to avoid retaining references to large chunk slices
+	buf := make([]byte, len(data))
+	copy(buf, data)
+	streamBufs[key] = buf
+}
+
+// splitSSEEvents splits combined bytes into complete SSE events and an
+// incomplete trailing tail. Complete events are those terminated by "\n\n".
+// The returned completeEvents includes the terminating "\n\n" sequences.
+func splitSSEEvents(data []byte) (completeEvents []byte, incompleteTail []byte) {
+	// Find the last event boundary (\n\n)
+	// Also check \r\n\r\n for Windows-style line endings
+	lastBoundary := -1
+	boundaryLen := 0
+
+	if idx := bytes.LastIndex(data, []byte("\n\n")); idx >= 0 {
+		lastBoundary = idx
+		boundaryLen = 2
+	}
+	if idx := bytes.LastIndex(data, []byte("\r\n\r\n")); idx >= 0 {
+		// Use whichever boundary is LATER (further into the data)
+		if idx > lastBoundary {
+			lastBoundary = idx
+			boundaryLen = 4
+		}
+	}
+
+	if lastBoundary < 0 {
+		// No complete event boundary found — everything is incomplete
+		return nil, data
+	}
+
+	splitAt := lastBoundary + boundaryLen
+	return data[:splitAt], data[splitAt:]
+}
+
+func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat string) bool {
+	changed := false
+
+	switch typed := node.(type) {
+	case map[string]any:
+		if sourceFormat == "openai" {
+			if msg, ok := typed["message"].(map[string]any); ok {
+				if toolCalls, ok := msg["tool_calls"].([]any); ok {
+					for _, tcRaw := range toolCalls {
+						if tc, ok := tcRaw.(map[string]any); ok {
+							if fn, ok := tc["function"].(map[string]any); ok {
+								if name, ok := fn["name"].(string); ok {
+									if orig, exists := uncloakTable[name]; exists {
+										fn["name"] = orig
+										changed = true
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+			if delta, ok := typed["delta"].(map[string]any); ok {
+				if toolCalls, ok := delta["tool_calls"].([]any); ok {
+					for _, tcRaw := range toolCalls {
+						if tc, ok := tcRaw.(map[string]any); ok {
+							if fn, ok := tc["function"].(map[string]any); ok {
+								if name, ok := fn["name"].(string); ok {
+									if orig, exists := uncloakTable[name]; exists {
+										fn["name"] = orig
+										changed = true
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		} else if sourceFormat == "anthropic" {
+			if typeVal, ok := typed["type"].(string); ok && typeVal == "tool_use" {
+				if name, ok := typed["name"].(string); ok {
+					if orig, exists := uncloakTable[name]; exists {
+						typed["name"] = orig
+						changed = true
+					}
+				}
+			}
+		}
+
+		for _, v := range typed {
+			if childChanged := uncloakJSONNode(v, uncloakTable, sourceFormat); childChanged {
+				changed = true
+			}
+		}
+
+	case []any:
+		for _, v := range typed {
+			if childChanged := uncloakJSONNode(v, uncloakTable, sourceFormat); childChanged {
+				changed = true
+			}
+		}
+	}
+
+	return changed
 }
 
 func mustEnvelope(result any) []byte {
@@ -223,6 +654,31 @@ func mustRawMessage(value any) json.RawMessage {
 	return raw
 }
 
+// safeUnmarshal decodes JSON preserving number precision by using json.Number
+// instead of float64 for all numeric values.
+func safeUnmarshal(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
+
+// safeMarshal encodes JSON without escaping HTML characters (<, >, &) to their
+// unicode equivalents (\u003c, \u003e, \u0026), preserving raw text fidelity.
+func safeMarshal(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	// json.Encoder.Encode appends a trailing newline; strip it.
+	b := buf.Bytes()
+	if len(b) > 0 && b[len(b)-1] == '\n' {
+		b = b[:len(b)-1]
+	}
+	return b, nil
+}
+
 var defaultRewriteMappings = []rewriteMapping{
 	{Match: "opencode", Replacement: "Antigravity"},
 	{Match: "codex", Replacement: "Antigravity"},
@@ -234,9 +690,87 @@ type rewriteMapping struct {
 	Replacement string
 }
 
+var defaultCloakTables = map[string]map[string]string{
+	"claude_code": {
+		"bash": "run_command", "edit": "replace_file_content", "read": "view_file",
+		"write": "write_to_file", "grep": "grep_search", "glob": "list_dir",
+		"agent": "invoke_subagent", "askUserQuestion": "ask_question",
+		"toolSearch": "search_web", "skill": "call_mcp_tool", "workflow": "schedule",
+	},
+	"codex": {
+		"shell_command": "run_command", "apply_patch": "multi_replace_file_content",
+		"request_user_input": "ask_question", "view_image": "generate_image",
+		"update_plan": "manage_task", "tool_search": "search_web",
+		"get_goal":                    "schedule",
+		"create_goal":                 "send_message",
+		"update_goal":                 "define_subagent",
+		"list_mcp_resources":          "list_resources",
+		"list_mcp_resource_templates": "list_permissions",
+		"read_mcp_resource":           "read_resource",
+	},
+}
+
+var defaultUncloakTables map[string]map[string]string
+
+func init() {
+	defaultUncloakTables = make(map[string]map[string]string)
+	for client, cloaks := range defaultCloakTables {
+		uncloaks := make(map[string]string)
+		for orig, mapped := range cloaks {
+			uncloaks[mapped] = orig
+		}
+		defaultUncloakTables[client] = uncloaks
+	}
+}
+
+func copyToolMappings(m map[string]map[string]string) map[string]map[string]string {
+	if m == nil {
+		return nil
+	}
+	res := make(map[string]map[string]string, len(m))
+	for k, v := range m {
+		if v == nil {
+			res[k] = nil
+			continue
+		}
+		inner := make(map[string]string, len(v))
+		for ik, iv := range v {
+			inner[ik] = iv
+		}
+		res[k] = inner
+	}
+	return res
+}
+
 type filterConfig struct {
 	UseDefaultKeywords bool
 	CustomMappings     []rewriteMapping
+	ToolMappings       map[string]map[string]string // client → {orig_tool: antigravity_tool}
+
+	// Pre-compiled regex patterns, rebuilt on config change.
+	cloakRegexCache   map[string]*cachedCloakPatterns  // client → compiled cloak patterns
+	uncloakRegexCache map[string]*cachedUncloakPattern // client → compiled uncloak pattern
+}
+
+// cachedCloakPatterns holds pre-compiled regexes for tool name replacement
+// in descriptions and system messages (request cloaking path).
+type cachedCloakPatterns struct {
+	cloakTable     map[string]string     // orig → target (for Tier 1 quoted replacement)
+	safeRe         *regexp.Regexp        // Tier 2: word-boundary for unambiguous names
+	safeLookup     map[string]string     // match → replacement for safe names
+	ambiguousRules []cachedAmbiguousRule // Tier 3: pattern-based for short words
+}
+
+type cachedAmbiguousRule struct {
+	patterns []*regexp.Regexp
+	target   string
+}
+
+// cachedUncloakPattern holds a pre-compiled regex for stream chunk uncloaking.
+// Pattern matches: "name"\s*:\s*"(target1|target2|...)" in raw bytes.
+type cachedUncloakPattern struct {
+	re     *regexp.Regexp
+	lookup map[string]string // matched target → original name
 }
 
 var (
@@ -245,16 +779,84 @@ var (
 )
 
 func defaultFilterConfig() filterConfig {
-	return filterConfig{UseDefaultKeywords: true}
+	cfg := filterConfig{
+		UseDefaultKeywords: true,
+		ToolMappings:       copyToolMappings(defaultCloakTables),
+	}
+	rebuildCachedRegexes(&cfg)
+	return cfg
 }
 
 func applyFilterConfig(cfg filterConfig) {
 	filterConfigMu.Lock()
 	defer filterConfigMu.Unlock()
 
-	currentFilterConfig = filterConfig{
+	newCfg := filterConfig{
 		UseDefaultKeywords: cfg.UseDefaultKeywords,
 		CustomMappings:     append([]rewriteMapping(nil), normalizeMappings(cfg.CustomMappings)...),
+		ToolMappings:       copyToolMappings(cfg.ToolMappings),
+	}
+	rebuildCachedRegexes(&newCfg)
+	currentFilterConfig = newCfg
+}
+
+// rebuildCachedRegexes pre-compiles all regex patterns from the current
+// ToolMappings. Called once on config change, not on every request.
+func rebuildCachedRegexes(cfg *filterConfig) {
+	cfg.cloakRegexCache = make(map[string]*cachedCloakPatterns, len(cfg.ToolMappings))
+	cfg.uncloakRegexCache = make(map[string]*cachedUncloakPattern, len(cfg.ToolMappings))
+
+	for client, cloakTable := range cfg.ToolMappings {
+		// Build cloak patterns (for request path: tool name replacement in text)
+		cp := &cachedCloakPatterns{
+			cloakTable: cloakTable,
+			safeLookup: make(map[string]string),
+		}
+		var safeParts []string
+		for orig, target := range cloakTable {
+			if isUnambiguousToolName(orig) {
+				safeParts = append(safeParts, regexp.QuoteMeta(orig))
+				cp.safeLookup[orig] = target
+			} else {
+				qOrig := regexp.QuoteMeta(orig)
+				var patterns []*regexp.Regexp
+				for _, p := range []string{
+					`(?i)(the\s+)` + qOrig + `(\s+(?:tool|function|command)\b)`,
+					`(?i)((?:use|call|run|invoke|with)\s+)` + qOrig + `(\b)`,
+				} {
+					if re, err := regexp.Compile(p); err == nil {
+						patterns = append(patterns, re)
+					}
+				}
+				cp.ambiguousRules = append(cp.ambiguousRules, cachedAmbiguousRule{
+					patterns: patterns,
+					target:   target,
+				})
+			}
+		}
+		if len(safeParts) > 0 {
+			pattern := `\b(` + strings.Join(safeParts, "|") + `)\b`
+			cp.safeRe, _ = regexp.Compile(pattern)
+		}
+		cfg.cloakRegexCache[client] = cp
+
+		// Build uncloak pattern (for stream path: regex-based tool name restore)
+		targets := make([]string, 0, len(cloakTable))
+		lookup := make(map[string]string, len(cloakTable))
+		for orig, target := range cloakTable {
+			targets = append(targets, regexp.QuoteMeta(target))
+			lookup[target] = orig
+		}
+		if len(targets) > 0 {
+			// Match "name" : "<target>" with flexible whitespace
+			pattern := `"name"\s*:\s*"(` + strings.Join(targets, "|") + `)"`
+			if re, err := regexp.Compile(pattern); err == nil {
+				cfg.uncloakRegexCache[client] = &cachedUncloakPattern{
+					re:     re,
+					lookup: lookup,
+				}
+			}
+		}
 	}
 }
 
@@ -265,6 +867,9 @@ func activeFilterConfig() filterConfig {
 	return filterConfig{
 		UseDefaultKeywords: currentFilterConfig.UseDefaultKeywords,
 		CustomMappings:     append([]rewriteMapping(nil), currentFilterConfig.CustomMappings...),
+		ToolMappings:       copyToolMappings(currentFilterConfig.ToolMappings),
+		cloakRegexCache:    currentFilterConfig.cloakRegexCache,
+		uncloakRegexCache:  currentFilterConfig.uncloakRegexCache,
 	}
 }
 
@@ -304,7 +909,68 @@ func parseFilterConfigYAML(raw []byte) (filterConfig, error) {
 		}
 		cfg.CustomMappings = mappings
 	}
+	if value, exists := values["tool_mappings"]; exists {
+		parsedMappings, err := parseToolMappings(value)
+		if err != nil {
+			return filterConfig{}, err
+		}
+		if cfg.ToolMappings == nil {
+			cfg.ToolMappings = make(map[string]map[string]string)
+		}
+		for client, mappings := range parsedMappings {
+			if cfg.ToolMappings[client] == nil {
+				cfg.ToolMappings[client] = make(map[string]string)
+			}
+			for orig, target := range mappings {
+				cfg.ToolMappings[client][orig] = target
+			}
+		}
+	}
 	return cfg, nil
+}
+
+func parseToolMappings(value any) (map[string]map[string]string, error) {
+	typed, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("tool_mappings must be an object")
+	}
+	result := make(map[string]map[string]string)
+	for client, clientVal := range typed {
+		clientMap, err := parseStringMap(clientVal)
+		if err != nil {
+			return nil, fmt.Errorf("client %q: %w", client, err)
+		}
+		// Normalize client keys to lowercase so user config such as
+		// "Claude_Code" or "Codex" matches the lowercase keys used by the
+		// detection logic and default tables.
+		// Merge rather than overwrite so multiple case variants of the same
+		// client (e.g. "Claude_Code" and "claude_code") combine deterministically.
+		normalized := strings.ToLower(client)
+		if result[normalized] == nil {
+			result[normalized] = clientMap
+			continue
+		}
+		for orig, target := range clientMap {
+			result[normalized][orig] = target
+		}
+	}
+	return result, nil
+}
+
+func parseStringMap(value any) (map[string]string, error) {
+	typed, ok := value.(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("must be an object")
+	}
+	res := make(map[string]string)
+	for k, v := range typed {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("value for key %q must be a string", k)
+		}
+		res[k] = s
+	}
+	return res, nil
 }
 
 func parseCustomMappings(value any) ([]rewriteMapping, error) {
@@ -392,20 +1058,262 @@ func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
 	return out
 }
 
-func rewriteRequestBody(body []byte) ([]byte, bool) {
+func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
 	var root any
-	if err := json.Unmarshal(body, &root); err != nil {
+	if err := safeUnmarshal(body, &root); err != nil {
 		return nil, false
 	}
-	rewritten, changed := rewriteSystemFields(root, effectiveMappings(activeFilterConfig()))
+
+	rootMap, ok := root.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+
+	changed := false
+
+	// 1. Existing brand text replace on "system" key
+	cfg := activeFilterConfig()
+	mappings := effectiveMappings(cfg)
+	rewritten, sysChanged := rewriteSystemFields(rootMap, mappings)
+	rootMap = rewritten.(map[string]any)
+	changed = changed || sysChanged
+
+	// 2. Tool cloaking
+	toolNames := extractToolNames(rootMap, sourceFormat)
+	client := detectClient(toolNames)
+	var cachedCloak *cachedCloakPatterns
+	if client != "" {
+		cloakTable := effectiveCloakTable(client)
+		if len(cloakTable) > 0 {
+			toolCloaked := cloakToolNames(rootMap, cloakTable, sourceFormat)
+			changed = changed || toolCloaked
+		}
+		cachedCloak = cfg.cloakRegexCache[client]
+	}
+
+	// 3. Brand replace + tool name replace in tools[].description
+	descChanged := rewriteToolDescriptions(rootMap, mappings, cachedCloak, sourceFormat)
+	changed = changed || descChanged
+
+	// 4. Brand replace + tool name replace in messages[].content where role == "system"
+	sysMsgChanged := rewriteSystemMessages(rootMap, mappings, cachedCloak)
+	changed = changed || sysMsgChanged
+
 	if !changed {
 		return nil, false
 	}
-	raw, err := json.Marshal(rewritten)
+	raw, err := safeMarshal(rootMap)
 	if err != nil {
 		return nil, false
 	}
 	return raw, true
+}
+
+func effectiveCloakTable(client string) map[string]string {
+	return activeFilterConfig().ToolMappings[client]
+}
+
+func cloakToolNames(body map[string]any, cloakTable map[string]string, sourceFormat string) bool {
+	changed := false
+
+	// Cloak tools[] array
+	if toolsRaw, ok := body["tools"].([]any); ok {
+		for _, tRaw := range toolsRaw {
+			tMap, ok := tRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if sourceFormat == "openai" {
+				fn, ok := tMap["function"].(map[string]any)
+				if !ok {
+					continue
+				}
+				if name, ok := fn["name"].(string); ok {
+					if target, exists := cloakTable[name]; exists {
+						fn["name"] = target
+						changed = true
+					}
+				}
+			} else if sourceFormat == "anthropic" {
+				if name, ok := tMap["name"].(string); ok {
+					if target, exists := cloakTable[name]; exists {
+						tMap["name"] = target
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	// Cloak tool refs in messages[]
+	if msgsRaw, ok := body["messages"].([]any); ok {
+		for _, mRaw := range msgsRaw {
+			msg, ok := mRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+
+			if sourceFormat == "openai" {
+				// tool_calls[].function.name
+				if calls, ok := msg["tool_calls"].([]any); ok {
+					for _, cRaw := range calls {
+						call, ok := cRaw.(map[string]any)
+						if !ok {
+							continue
+						}
+						fn, ok := call["function"].(map[string]any)
+						if !ok {
+							continue
+						}
+						if name, ok := fn["name"].(string); ok {
+							if target, exists := cloakTable[name]; exists {
+								fn["name"] = target
+								changed = true
+							}
+						}
+					}
+				}
+				// tool result message: msg["name"]
+				if msg["role"] == "tool" {
+					if name, ok := msg["name"].(string); ok {
+						if target, exists := cloakTable[name]; exists {
+							msg["name"] = target
+							changed = true
+						}
+					}
+				}
+			} else if sourceFormat == "anthropic" {
+				// content blocks with type == "tool_use"
+				if contents, ok := msg["content"].([]any); ok {
+					for _, cntRaw := range contents {
+						cnt, ok := cntRaw.(map[string]any)
+						if !ok {
+							continue
+						}
+						if cnt["type"] == "tool_use" {
+							if name, ok := cnt["name"].(string); ok {
+								if target, exists := cloakTable[name]; exists {
+									cnt["name"] = target
+									changed = true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Cloak tool_choice (handle both string and object shapes)
+	if tc, ok := body["tool_choice"].(map[string]any); ok {
+		if sourceFormat == "openai" {
+			// {type: "function", function: {name: "..."}}
+			if fn, ok := tc["function"].(map[string]any); ok {
+				if name, ok := fn["name"].(string); ok {
+					if target, exists := cloakTable[name]; exists {
+						fn["name"] = target
+						changed = true
+					}
+				}
+			}
+		} else if sourceFormat == "anthropic" {
+			// {type: "tool", name: "..."}
+			if name, ok := tc["name"].(string); ok {
+				if target, exists := cloakTable[name]; exists {
+					tc["name"] = target
+					changed = true
+				}
+			}
+		}
+	}
+
+	return changed
+}
+
+func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, cached *cachedCloakPatterns, sourceFormat string) bool {
+	changed := false
+	toolsRaw, ok := root["tools"].([]any)
+	if !ok {
+		return false
+	}
+	for _, tRaw := range toolsRaw {
+		tMap, ok := tRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if sourceFormat == "openai" {
+			fn, ok := tMap["function"].(map[string]any)
+			if !ok {
+				continue
+			}
+			if rewriteDescriptionField(fn, "description", mappings, cached) {
+				changed = true
+			}
+		} else if sourceFormat == "anthropic" {
+			if rewriteDescriptionField(tMap, "description", mappings, cached) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+// rewriteDescriptionField applies brand replacements and tool-name cloaking to
+// the string description stored at obj[key], writing back only when something
+// changed. It reports whether the field was modified.
+func rewriteDescriptionField(obj map[string]any, key string, mappings []rewriteMapping, cached *cachedCloakPatterns) bool {
+	descVal, ok := obj[key].(string)
+	if !ok {
+		return false
+	}
+	next := descVal
+	descChanged := false
+	for _, mapping := range mappings {
+		var replaced bool
+		next, replaced = replaceInsensitive(next, mapping.Match, mapping.Replacement)
+		descChanged = descChanged || replaced
+	}
+	if cached != nil {
+		var toolReplaced bool
+		next, toolReplaced = replaceToolNamesInText(next, cached)
+		descChanged = descChanged || toolReplaced
+	}
+	if descChanged {
+		obj[key] = next
+	}
+	return descChanged
+}
+
+func rewriteSystemMessages(root map[string]any, mappings []rewriteMapping, cached *cachedCloakPatterns) bool {
+	changed := false
+	msgsRaw, ok := root["messages"].([]any)
+	if !ok {
+		return false
+	}
+	for _, mRaw := range msgsRaw {
+		msg, ok := mRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, ok := msg["role"].(string); ok && role == "system" {
+			if content, exists := msg["content"]; exists {
+				next, contentChanged := rewriteSystemValue(content, mappings)
+				if contentChanged {
+					msg["content"] = next
+					changed = true
+				}
+				if cached != nil {
+					current := msg["content"]
+					toolNext, toolChanged := replaceToolNamesInValue(current, cached)
+					if toolChanged {
+						msg["content"] = toolNext
+						changed = true
+					}
+				}
+			}
+		}
+	}
+	return changed
 }
 
 func rewriteSystemFields(value any, mappings []rewriteMapping) (any, bool) {
@@ -506,6 +1414,101 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 	return builder.String(), true
 }
 
+// replaceToolNamesInText uses pre-compiled regex patterns from cachedCloakPatterns.
+// Patterns are compiled once on config change (rebuildCachedRegexes), not per call.
+func replaceToolNamesInText(text string, cached *cachedCloakPatterns) (string, bool) {
+	if cached == nil || len(cached.cloakTable) == 0 {
+		return text, false
+	}
+
+	result := text
+	changed := false
+
+	// Tier 1: Quoted replacement for ALL names — backticks and double-quotes
+	// are strong signals of a tool name reference regardless of word length.
+	for orig, target := range cached.cloakTable {
+		for _, q := range []string{"`", `"`} {
+			old := q + orig + q
+			repl := q + target + q
+			if strings.Contains(result, old) {
+				result = strings.ReplaceAll(result, old, repl)
+				changed = true
+			}
+		}
+	}
+
+	// Tier 2: Word-boundary replacement for unambiguous names (pre-compiled)
+	if cached.safeRe != nil {
+		newResult := cached.safeRe.ReplaceAllStringFunc(result, func(match string) string {
+			if target, ok := cached.safeLookup[match]; ok {
+				return target
+			}
+			return match
+		})
+		if newResult != result {
+			result = newResult
+			changed = true
+		}
+	}
+
+	// Tier 3: Pattern-based replacement for ambiguous names (pre-compiled)
+	for _, rule := range cached.ambiguousRules {
+		for _, re := range rule.patterns {
+			newResult := re.ReplaceAllString(result, "${1}"+rule.target+"${2}")
+			if newResult != result {
+				result = newResult
+				changed = true
+			}
+		}
+	}
+
+	return result, changed
+}
+
+// isUnambiguousToolName returns true if a tool name is specific enough for
+// safe word-boundary replacement. Names with underscores or camelCase are
+// identifiers, not common English words.
+func isUnambiguousToolName(name string) bool {
+	if strings.Contains(name, "_") {
+		return true
+	}
+	for _, r := range name {
+		if r >= 'A' && r <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+func replaceToolNamesInValue(value any, cached *cachedCloakPatterns) (any, bool) {
+	switch typed := value.(type) {
+	case string:
+		return replaceToolNamesInText(typed, cached)
+	case map[string]any:
+		changed := false
+		for key, child := range typed {
+			next, childChanged := replaceToolNamesInValue(child, cached)
+			if childChanged {
+				typed[key] = next
+				changed = true
+			}
+		}
+		return typed, changed
+	case []any:
+		changed := false
+		for i, child := range typed {
+			next, childChanged := replaceToolNamesInValue(child, cached)
+			if childChanged {
+				typed[i] = next
+				changed = true
+			}
+		}
+		return typed, changed
+	default:
+		return value, false
+	}
+}
+
 func walkJSON(value any, visit func(path []string, value any) bool) {
 	var walk func(path []string, current any) bool
 	walk = func(path []string, current any) bool {
@@ -556,4 +1559,134 @@ func collectText(value any) string {
 	}
 	collect(value)
 	return strings.Join(parts, "\n")
+}
+
+func extractToolNames(body map[string]any, sourceFormat string) []string {
+	var names []string
+
+	// Check tools array first
+	if toolsRaw, ok := body["tools"].([]any); ok {
+		for _, tRaw := range toolsRaw {
+			if tMap, ok := tRaw.(map[string]any); ok {
+				if sourceFormat == "openai" {
+					if fn, ok := tMap["function"].(map[string]any); ok {
+						if name, ok := fn["name"].(string); ok {
+							names = append(names, name)
+						}
+					}
+				} else if sourceFormat == "anthropic" {
+					if name, ok := tMap["name"].(string); ok {
+						names = append(names, name)
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback to history when tools[] is empty or absent
+	if len(names) == 0 {
+		if msgsRaw, ok := body["messages"].([]any); ok {
+			for _, mRaw := range msgsRaw {
+				if msg, ok := mRaw.(map[string]any); ok {
+					if sourceFormat == "openai" {
+						if calls, ok := msg["tool_calls"].([]any); ok {
+							for _, cRaw := range calls {
+								if call, ok := cRaw.(map[string]any); ok {
+									if fn, ok := call["function"].(map[string]any); ok {
+										if name, ok := fn["name"].(string); ok {
+											names = append(names, name)
+										}
+									}
+								}
+							}
+						}
+					} else if sourceFormat == "anthropic" {
+						if contents, ok := msg["content"].([]any); ok {
+							for _, cntRaw := range contents {
+								if cnt, ok := cntRaw.(map[string]any); ok {
+									if typeVal, ok := cnt["type"].(string); ok && typeVal == "tool_use" {
+										if name, ok := cnt["name"].(string); ok {
+											names = append(names, name)
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return names
+}
+
+// detectClient identifies the client from ORIGINAL (uncloaked) tool names.
+// It is data-driven: it checks cloak table keys (source tool names) against
+// the provided tool name list. The client with the most key matches wins.
+func detectClient(toolNames []string) string {
+	cfg := activeFilterConfig()
+	nameSet := make(map[string]bool, len(toolNames))
+	for _, n := range toolNames {
+		nameSet[n] = true
+	}
+
+	bestClient := ""
+	bestCount := 0
+	for client, cloakTable := range cfg.ToolMappings {
+		count := 0
+		for orig := range cloakTable {
+			if nameSet[orig] {
+				count++
+			}
+		}
+		if count > bestCount {
+			bestCount = count
+			bestClient = client
+		}
+	}
+
+	if bestCount >= 2 {
+		return bestClient
+	}
+	return ""
+}
+
+// detectCloakedClient identifies which client's cloaking was applied by
+// checking cloak TARGET names against the provided tool names.
+// If exactly one client's targets match at >=80%, that client was cloaked.
+// If multiple clients match (native Antigravity has all targets), returns "".
+func detectCloakedClient(toolNames []string) string {
+	cfg := activeFilterConfig()
+	nameSet := make(map[string]bool, len(toolNames))
+	for _, n := range toolNames {
+		nameSet[n] = true
+	}
+
+	type clientMatch struct {
+		client string
+		hits   int
+	}
+	var matches []clientMatch
+	for client, cloakTable := range cfg.ToolMappings {
+		if len(cloakTable) == 0 {
+			continue
+		}
+		hits := 0
+		for _, target := range cloakTable {
+			if nameSet[target] {
+				hits++
+			}
+		}
+		// 80% threshold: most of the client's cloak targets are present
+		if hits*5 >= len(cloakTable)*4 {
+			matches = append(matches, clientMatch{client, hits})
+		}
+	}
+
+	// Exactly one client's cloak targets match → that client was cloaked
+	// Multiple matches → likely native Antigravity (superset of all cloak targets)
+	if len(matches) == 1 {
+		return matches[0].client
+	}
+	return ""
 }
