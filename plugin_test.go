@@ -36,8 +36,8 @@ func TestHandlePluginCallRegisterDeclaresRequestInterceptor(t *testing.T) {
 	if capabilities["response_interceptor"] != true {
 		t.Fatalf("response_interceptor = %#v, want true", capabilities["response_interceptor"])
 	}
-	if capabilities["stream_chunk_interceptor"] != true {
-		t.Fatalf("stream_chunk_interceptor = %#v, want true", capabilities["stream_chunk_interceptor"])
+	if capabilities["response_stream_interceptor"] != true {
+		t.Fatalf("response_stream_interceptor = %#v, want true", capabilities["response_stream_interceptor"])
 	}
 	fields := result["metadata"].(map[string]any)["ConfigFields"].([]any)
 	if !hasConfigField(fields, "use_default_keywords", "boolean") {
