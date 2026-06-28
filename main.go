@@ -41,6 +41,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"regexp"
 	"strings"
@@ -52,15 +53,38 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// Debug logging is opt-in. It writes full request/response bodies (which can
+// contain user prompts and tool outputs) so it must never run for normal
+// production traffic. Set CPA_FILTER_DEBUG to any non-empty value to enable it.
+// The log file is opened lazily once and reused under a mutex to avoid the
+// per-call open/close cost on hot streaming paths.
+var (
+	debugLogOnce    sync.Once
+	debugLogMu      sync.Mutex
+	debugLogFile    *os.File
+	debugLogEnabled bool
+)
+
 func debugLog(format string, args ...any) {
-	f, err := os.OpenFile("logs/cpa-filter-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		f, err = os.OpenFile("cpa-filter-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	debugLogOnce.Do(func() {
+		if os.Getenv("CPA_FILTER_DEBUG") == "" {
+			return
+		}
+		f, err := os.OpenFile("logs/cpa-filter-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		if err != nil {
+			f, err = os.OpenFile("cpa-filter-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+		}
+		if err == nil {
+			debugLogFile = f
+			debugLogEnabled = true
+		}
+	})
+	if !debugLogEnabled || debugLogFile == nil {
+		return
 	}
-	if err == nil {
-		defer f.Close()
-		fmt.Fprintf(f, "[DEBUG] "+format+"\n", args...)
-	}
+	debugLogMu.Lock()
+	fmt.Fprintf(debugLogFile, "[DEBUG] "+format+"\n", args...)
+	debugLogMu.Unlock()
 }
 
 const abiVersion = 1
@@ -237,7 +261,7 @@ func handleResponseIntercept(request []byte) []byte {
 	}
 
 	debugLog("handleResponseIntercept: SourceFormat=%s RequestBody=%s Body=%s", req.SourceFormat, string(req.RequestBody), string(req.Body))
-	uncloakTable, _ := buildUncloakTable(req.RequestBody, req.SourceFormat)
+	uncloakTable, _ := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), req.SourceFormat)
 	debugLog("handleResponseIntercept: uncloakTable=%v", uncloakTable)
 	if uncloakTable == nil {
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
@@ -258,7 +282,7 @@ func handleStreamChunkIntercept(request []byte) []byte {
 	}
 
 	debugLog("handleStreamChunkIntercept: SourceFormat=%s ChunkIndex=%d Body=%s", req.SourceFormat, req.ChunkIndex, string(req.Body))
-	_, client := buildUncloakTable(req.RequestBody, req.SourceFormat)
+	_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), req.SourceFormat)
 	debugLog("handleStreamChunkIntercept: client=%s", client)
 	if client == "" {
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
@@ -280,16 +304,20 @@ func handleStreamChunkIntercept(request []byte) []byte {
 	// next chunk completes them. Regex only runs on complete events where
 	// tool names are guaranteed to be unfragmented.
 	//
-	// Stream identity: ChunkIndex (provided by the SDK, monotonic per-stream).
-	// ChunkIndex == 0 means new stream → reset buffer. No content-based hashing.
+	// Stream identity: the SDK exposes no per-stream ID on this request, so we
+	// derive a stable key from the (per-stream constant) request body. Each
+	// concurrent stream therefore owns its own buffer slot, preventing the
+	// cross-stream corruption a single shared slot would cause. ChunkIndex == 0
+	// marks a new stream → reset that key's slot.
+	key := streamBufferKey(&req)
 
 	// Reset buffer on new stream
 	if req.ChunkIndex == 0 {
-		resetStreamBuffer()
+		resetStreamBuffer(key)
 	}
 
 	// Retrieve and clear buffered tail from previous chunk
-	buffered := popStreamBuffer()
+	buffered := popStreamBuffer(key)
 
 	// Combine buffered tail + current chunk
 	var combined []byte
@@ -306,7 +334,7 @@ func handleStreamChunkIntercept(request []byte) []byte {
 
 	// Buffer the incomplete tail for next chunk
 	if len(incompleteTail) > 0 {
-		pushStreamBuffer(incompleteTail)
+		pushStreamBuffer(key, incompleteTail)
 		debugLog("handleStreamChunkIntercept: buffered %d bytes (incomplete event)", len(incompleteTail))
 	}
 
@@ -355,6 +383,18 @@ func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]stri
 	}
 
 	return nil, ""
+}
+
+// detectionRequestBody returns the body used for client detection. The host
+// runs this plugin's request.intercept_before first, so RequestBody is already
+// cloaked by the time response/stream interceptors fire. OriginalRequest holds
+// the raw client body with original tool names, which the reliable detectClient
+// path keys on; fall back to RequestBody when OriginalRequest is unavailable.
+func detectionRequestBody(originalRequest, requestBody []byte) []byte {
+	if len(originalRequest) > 0 {
+		return originalRequest
+	}
+	return requestBody
 }
 
 func effectiveUncloakTable(client string) map[string]string {
@@ -409,6 +449,12 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 	changed := false
 
 	for _, loc := range matches {
+		// FindAllStringSubmatchIndex returns 2*(1+groups) ints; guard the
+		// capture-group slice indices before slicing to avoid a panic on any
+		// unexpected match shape (e.g. an optional group that did not match).
+		if len(loc) < 4 || loc[2] < 0 || loc[3] < 0 {
+			continue
+		}
 		// loc[2]:loc[3] is capture group 1 (the tool name)
 		toolName := bodyStr[loc[2]:loc[3]]
 		if orig, ok := cached.lookup[toolName]; ok {
@@ -440,40 +486,52 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 // (those without a \n\n terminator) and only process/forward complete events
 // where all JSON content — including tool names — is guaranteed intact.
 //
-// Stream identity uses ChunkIndex from the SDK (monotonic per-stream).
-// ChunkIndex == 0 signals a new stream → buffer is reset. This avoids the
-// architectural anti-pattern of using content hashing as a stream identifier
-// (which would cause cross-stream pollution with identical requests).
-//
-// A single buffer slot is sufficient because the framework dispatches
-// stream chunks to plugins sequentially within each stream.
+// The host runs each client request in its own goroutine, so multiple streams
+// can call the interceptor concurrently. A single shared slot would let one
+// stream pop, reset, or overwrite another stream's incomplete tail. We instead
+// key the buffers by a per-stream identifier so concurrent streams stay
+// isolated. ChunkIndex == 0 signals a new stream → that key's slot is reset.
 
 var (
 	streamBufMu sync.Mutex
-	streamBuf   []byte // single-slot buffer for the active stream's incomplete tail
+	streamBufs  = make(map[uint64][]byte) // per-stream incomplete tails
 )
 
-func resetStreamBuffer() {
-	streamBufMu.Lock()
-	defer streamBufMu.Unlock()
-	streamBuf = nil
+// streamBufferKey derives a stable per-stream key. The SDK exposes no stream
+// ID on StreamChunkInterceptRequest, but the request body is constant for the
+// lifetime of a single stream, so an FNV-1a hash of it (preferring the raw
+// client body) uniquely identifies the stream across its chunks.
+func streamBufferKey(req *pluginapi.StreamChunkInterceptRequest) uint64 {
+	src := req.OriginalRequest
+	if len(src) == 0 {
+		src = req.RequestBody
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(src)
+	return h.Sum64()
 }
 
-func popStreamBuffer() []byte {
+func resetStreamBuffer(key uint64) {
 	streamBufMu.Lock()
 	defer streamBufMu.Unlock()
-	data := streamBuf
-	streamBuf = nil
+	delete(streamBufs, key)
+}
+
+func popStreamBuffer(key uint64) []byte {
+	streamBufMu.Lock()
+	defer streamBufMu.Unlock()
+	data := streamBufs[key]
+	delete(streamBufs, key)
 	return data
 }
 
-func pushStreamBuffer(data []byte) {
+func pushStreamBuffer(key uint64, data []byte) {
 	streamBufMu.Lock()
 	defer streamBufMu.Unlock()
 	// Copy to avoid retaining references to large chunk slices
 	buf := make([]byte, len(data))
 	copy(buf, data)
-	streamBuf = buf
+	streamBufs[key] = buf
 }
 
 // splitSSEEvents splits combined bytes into complete SSE events and an
@@ -572,7 +630,6 @@ func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat stri
 	return changed
 }
 
-
 func mustEnvelope(result any) []byte {
 	raw, err := json.Marshal(pluginabi.Envelope{OK: true, Result: mustRawMessage(result)})
 	if err != nil {
@@ -644,12 +701,12 @@ var defaultCloakTables = map[string]map[string]string{
 		"shell_command": "run_command", "apply_patch": "multi_replace_file_content",
 		"request_user_input": "ask_question", "view_image": "generate_image",
 		"update_plan": "manage_task", "tool_search": "search_web",
-		"get_goal": "schedule",
-		"create_goal": "send_message",
-		"update_goal": "define_subagent",
-		"list_mcp_resources": "list_resources",
+		"get_goal":                    "schedule",
+		"create_goal":                 "send_message",
+		"update_goal":                 "define_subagent",
+		"list_mcp_resources":          "list_resources",
 		"list_mcp_resource_templates": "list_permissions",
-		"read_mcp_resource": "read_resource",
+		"read_mcp_resource":           "read_resource",
 	},
 }
 
@@ -665,7 +722,6 @@ func init() {
 		defaultUncloakTables[client] = uncloaks
 	}
 }
-
 
 func copyToolMappings(m map[string]map[string]string) map[string]map[string]string {
 	if m == nil {
@@ -884,7 +940,19 @@ func parseToolMappings(value any) (map[string]map[string]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("client %q: %w", client, err)
 		}
-		result[client] = clientMap
+		// Normalize client keys to lowercase so user config such as
+		// "Claude_Code" or "Codex" matches the lowercase keys used by the
+		// detection logic and default tables.
+		// Merge rather than overwrite so multiple case variants of the same
+		// client (e.g. "Claude_Code" and "claude_code") combine deterministically.
+		normalized := strings.ToLower(client)
+		if result[normalized] == nil {
+			result[normalized] = clientMap
+			continue
+		}
+		for orig, target := range clientMap {
+			result[normalized][orig] = target
+		}
 	}
 	return result, nil
 }
@@ -1178,46 +1246,42 @@ func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, cac
 			if !ok {
 				continue
 			}
-			if descVal, ok := fn["description"].(string); ok {
-				next := descVal
-				descChanged := false
-				for _, mapping := range mappings {
-					var replaced bool
-					next, replaced = replaceInsensitive(next, mapping.Match, mapping.Replacement)
-					descChanged = descChanged || replaced
-				}
-				if cached != nil {
-					var toolReplaced bool
-					next, toolReplaced = replaceToolNamesInText(next, cached)
-					descChanged = descChanged || toolReplaced
-				}
-				if descChanged {
-					fn["description"] = next
-					changed = true
-				}
+			if rewriteDescriptionField(fn, "description", mappings, cached) {
+				changed = true
 			}
 		} else if sourceFormat == "anthropic" {
-			if descVal, ok := tMap["description"].(string); ok {
-				next := descVal
-				descChanged := false
-				for _, mapping := range mappings {
-					var replaced bool
-					next, replaced = replaceInsensitive(next, mapping.Match, mapping.Replacement)
-					descChanged = descChanged || replaced
-				}
-				if cached != nil {
-					var toolReplaced bool
-					next, toolReplaced = replaceToolNamesInText(next, cached)
-					descChanged = descChanged || toolReplaced
-				}
-				if descChanged {
-					tMap["description"] = next
-					changed = true
-				}
+			if rewriteDescriptionField(tMap, "description", mappings, cached) {
+				changed = true
 			}
 		}
 	}
 	return changed
+}
+
+// rewriteDescriptionField applies brand replacements and tool-name cloaking to
+// the string description stored at obj[key], writing back only when something
+// changed. It reports whether the field was modified.
+func rewriteDescriptionField(obj map[string]any, key string, mappings []rewriteMapping, cached *cachedCloakPatterns) bool {
+	descVal, ok := obj[key].(string)
+	if !ok {
+		return false
+	}
+	next := descVal
+	descChanged := false
+	for _, mapping := range mappings {
+		var replaced bool
+		next, replaced = replaceInsensitive(next, mapping.Match, mapping.Replacement)
+		descChanged = descChanged || replaced
+	}
+	if cached != nil {
+		var toolReplaced bool
+		next, toolReplaced = replaceToolNamesInText(next, cached)
+		descChanged = descChanged || toolReplaced
+	}
+	if descChanged {
+		obj[key] = next
+	}
+	return descChanged
 }
 
 func rewriteSystemMessages(root map[string]any, mappings []rewriteMapping, cached *cachedCloakPatterns) bool {
@@ -1251,7 +1315,6 @@ func rewriteSystemMessages(root map[string]any, mappings []rewriteMapping, cache
 	}
 	return changed
 }
-
 
 func rewriteSystemFields(value any, mappings []rewriteMapping) (any, bool) {
 	switch typed := value.(type) {
@@ -1627,4 +1690,3 @@ func detectCloakedClient(toolNames []string) string {
 	}
 	return ""
 }
-

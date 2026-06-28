@@ -60,6 +60,8 @@ tool_mappings:
     my_custom_tool: ask_permission
   codex:
     shell_command: run_command
+  Claude_Code:
+    grep: grep_search
 `)))
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; body=%s", code, raw)
@@ -68,6 +70,14 @@ tool_mappings:
 	// Verify ToolMappings parsed correctly
 	if cfg.ToolMappings["claude_code"]["my_custom_tool"] != "ask_permission" {
 		t.Fatalf("expected custom tool mapping")
+	}
+	// Client keys are normalized to lowercase, so "Claude_Code" merges into
+	// "claude_code" rather than creating a separate, unreachable entry.
+	if cfg.ToolMappings["claude_code"]["grep"] != "grep_search" {
+		t.Fatalf("expected mixed-case client key to normalize into claude_code; got %#v", cfg.ToolMappings["claude_code"])
+	}
+	if _, exists := cfg.ToolMappings["Claude_Code"]; exists {
+		t.Fatalf("expected no mixed-case client key after normalization")
 	}
 }
 
@@ -114,7 +124,7 @@ custom_mappings: |
 	tests := []string{"Cursor", "Windsurf", "JetBrains AI"}
 	for _, keyword := range tests {
 		t.Run(keyword, func(t *testing.T) {
-			got, rewritten := rewriteRequestBody([]byte(`{"system":"route this ` + keyword + ` session"}`), "openai")
+			got, rewritten := rewriteRequestBody([]byte(`{"system":"route this `+keyword+` session"}`), "openai")
 			if !rewritten {
 				t.Fatalf("%s rewritten = false, want true", keyword)
 			}

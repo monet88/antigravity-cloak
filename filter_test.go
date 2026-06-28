@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 func TestRewriteRequestReplacesDefaultSystemKeywords(t *testing.T) {
@@ -109,7 +111,9 @@ func TestRewriteRequestBodyCloaksClaudeCodeTools(t *testing.T) {
 		"tool_choice":{"type":"function","function":{"name":"bash"}}
 	}`
 	got, rewritten := rewriteRequestBody([]byte(body), "openai")
-	if !rewritten { t.Fatal("want rewritten") }
+	if !rewritten {
+		t.Fatal("want rewritten")
+	}
 	var parsed map[string]any
 	json.Unmarshal(got, &parsed)
 
@@ -152,7 +156,9 @@ func TestRewriteRequestBodyCloaksCodexTools(t *testing.T) {
 		"messages":[]
 	}`
 	got, rewritten := rewriteRequestBody([]byte(body), "openai")
-	if !rewritten { t.Fatal("want rewritten") }
+	if !rewritten {
+		t.Fatal("want rewritten")
+	}
 	var parsed map[string]any
 	json.Unmarshal(got, &parsed)
 
@@ -184,7 +190,9 @@ func TestRewriteRequestBodyCloaksToolRefsInMessageHistory(t *testing.T) {
 		]
 	}`
 	got, rewritten := rewriteRequestBody([]byte(body), "openai")
-	if !rewritten { t.Fatal("want rewritten") }
+	if !rewritten {
+		t.Fatal("want rewritten")
+	}
 	var parsed map[string]any
 	json.Unmarshal(got, &parsed)
 
@@ -203,7 +211,7 @@ func TestRewriteRequestBodyCloaksToolRefsInMessageHistory(t *testing.T) {
 }
 
 func TestRewriteRequestBodyHandlesToolChoiceShapes(t *testing.T) {
-	tests := []struct{
+	tests := []struct {
 		name string
 		body string
 	}{
@@ -223,9 +231,13 @@ func TestRewriteRequestBodyHandlesToolChoiceShapes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sourceFormat := "openai"
-			if strings.Contains(tt.name, "anthropic") { sourceFormat = "anthropic" }
+			if strings.Contains(tt.name, "anthropic") {
+				sourceFormat = "anthropic"
+			}
 			got, rewritten := rewriteRequestBody([]byte(tt.body), sourceFormat)
-			if !rewritten { t.Fatal("want rewritten") }
+			if !rewritten {
+				t.Fatal("want rewritten")
+			}
 			var parsed map[string]any
 			json.Unmarshal(got, &parsed)
 
@@ -265,7 +277,9 @@ func TestRewriteRequestBodySkipsUnknownTools(t *testing.T) {
 		"messages":[]
 	}`
 	_, rewritten := rewriteRequestBody([]byte(body), "openai")
-	if rewritten { t.Fatal("want no rewrite for unknown tools") }
+	if rewritten {
+		t.Fatal("want no rewrite for unknown tools")
+	}
 }
 
 func TestRewriteRequestBodyAppliesBrandReplaceToToolDescription(t *testing.T) {
@@ -274,7 +288,9 @@ func TestRewriteRequestBodyAppliesBrandReplaceToToolDescription(t *testing.T) {
 		"messages":[]
 	}`
 	got, rewritten := rewriteRequestBody([]byte(body), "openai")
-	if !rewritten { t.Fatal("want rewritten") }
+	if !rewritten {
+		t.Fatal("want rewritten")
+	}
 	var parsed map[string]any
 	json.Unmarshal(got, &parsed)
 
@@ -294,7 +310,9 @@ func TestRewriteRequestBodyAppliesBrandReplaceToSystemMessages(t *testing.T) {
 		]
 	}`
 	got, rewritten := rewriteRequestBody([]byte(body), "openai")
-	if !rewritten { t.Fatal("want rewritten") }
+	if !rewritten {
+		t.Fatal("want rewritten")
+	}
 	var parsed map[string]any
 	json.Unmarshal(got, &parsed)
 
@@ -324,7 +342,9 @@ func TestRewriteRequestBodyCloaksAnthropicFormat(t *testing.T) {
 		]
 	}`
 	got, rewritten := rewriteRequestBody([]byte(body), "anthropic")
-	if !rewritten { t.Fatal("want rewritten") }
+	if !rewritten {
+		t.Fatal("want rewritten")
+	}
 	var parsed map[string]any
 	json.Unmarshal(got, &parsed)
 
@@ -501,7 +521,6 @@ func TestExtractToolNames(t *testing.T) {
 		})
 	}
 }
-
 
 func TestReplaceToolNamesInText(t *testing.T) {
 	cloakTable := map[string]string{
@@ -849,7 +868,8 @@ func TestSSESplitStringChunk(t *testing.T) {
 	chunk1 := []byte(`data: {"type": "tool_use", "id": "123", "name": "run_c`)
 
 	// Simulate new stream
-	resetStreamBuffer()
+	const streamKey = uint64(1)
+	resetStreamBuffer(streamKey)
 
 	complete1, incomplete1 := splitSSEEvents(chunk1)
 	if len(complete1) != 0 {
@@ -858,12 +878,12 @@ func TestSSESplitStringChunk(t *testing.T) {
 	if string(incomplete1) != string(chunk1) {
 		t.Fatal("chunk1 should be entirely buffered")
 	}
-	pushStreamBuffer(incomplete1)
+	pushStreamBuffer(streamKey, incomplete1)
 
 	// Chunk 2: completes the event
 	chunk2 := []byte("ommand\", \"input\": {}}\n\n")
 
-	buffered := popStreamBuffer()
+	buffered := popStreamBuffer(streamKey)
 	if buffered == nil {
 		t.Fatal("expected buffered data from chunk 1")
 	}
@@ -896,12 +916,13 @@ func TestSSESplitStringChunk(t *testing.T) {
 func TestStreamBufferResetOnNewStream(t *testing.T) {
 	// Verify that resetStreamBuffer clears leftover data from a previous stream,
 	// preventing cross-stream pollution.
-	pushStreamBuffer([]byte("leftover from stream 1"))
+	const streamKey = uint64(1)
+	pushStreamBuffer(streamKey, []byte("leftover from stream 1"))
 
 	// Simulate new stream (ChunkIndex == 0)
-	resetStreamBuffer()
+	resetStreamBuffer(streamKey)
 
-	data := popStreamBuffer()
+	data := popStreamBuffer(streamKey)
 	if data != nil {
 		t.Fatalf("expected nil after reset, got %q", string(data))
 	}
@@ -909,23 +930,61 @@ func TestStreamBufferResetOnNewStream(t *testing.T) {
 
 func TestStreamBufferPushPop(t *testing.T) {
 	// Verify basic push/pop semantics.
-	resetStreamBuffer()
+	const streamKey = uint64(1)
+	resetStreamBuffer(streamKey)
 
-	data := popStreamBuffer()
+	data := popStreamBuffer(streamKey)
 	if data != nil {
 		t.Fatal("expected nil from empty buffer")
 	}
 
-	pushStreamBuffer([]byte("test data"))
-	data = popStreamBuffer()
+	pushStreamBuffer(streamKey, []byte("test data"))
+	data = popStreamBuffer(streamKey)
 	if string(data) != "test data" {
 		t.Fatalf("expected 'test data', got %q", string(data))
 	}
 
 	// Second pop should be nil
-	data = popStreamBuffer()
+	data = popStreamBuffer(streamKey)
 	if data != nil {
 		t.Fatal("expected nil after pop")
+	}
+}
+
+func TestStreamBufferIsolatesConcurrentStreams(t *testing.T) {
+	// Two interleaved streams must not corrupt each other's buffered tail.
+	const keyA = uint64(0xA)
+	const keyB = uint64(0xB)
+	resetStreamBuffer(keyA)
+	resetStreamBuffer(keyB)
+
+	pushStreamBuffer(keyA, []byte("stream-A-tail"))
+	pushStreamBuffer(keyB, []byte("stream-B-tail"))
+
+	if got := string(popStreamBuffer(keyA)); got != "stream-A-tail" {
+		t.Fatalf("stream A buffer = %q, want %q", got, "stream-A-tail")
+	}
+	// Popping A must not disturb B.
+	if got := string(popStreamBuffer(keyB)); got != "stream-B-tail" {
+		t.Fatalf("stream B buffer = %q, want %q", got, "stream-B-tail")
+	}
+}
+
+func TestStreamBufferKeyDiffersPerRequest(t *testing.T) {
+	// Distinct request bodies must map to distinct buffer keys so concurrent
+	// streams stay isolated; identical bodies share a key across chunks.
+	reqA := &pluginapi.StreamChunkInterceptRequest{OriginalRequest: []byte(`{"a":1}`)}
+	reqB := &pluginapi.StreamChunkInterceptRequest{OriginalRequest: []byte(`{"b":2}`)}
+	if streamBufferKey(reqA) == streamBufferKey(reqB) {
+		t.Fatal("expected different keys for different request bodies")
+	}
+	if streamBufferKey(reqA) != streamBufferKey(reqA) {
+		t.Fatal("expected stable key for identical request body")
+	}
+	// Falls back to RequestBody when OriginalRequest is empty.
+	reqC := &pluginapi.StreamChunkInterceptRequest{RequestBody: []byte(`{"a":1}`)}
+	if streamBufferKey(reqA) != streamBufferKey(reqC) {
+		t.Fatal("expected OriginalRequest and matching RequestBody fallback to share a key")
 	}
 }
 
