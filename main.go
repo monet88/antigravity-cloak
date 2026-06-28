@@ -237,7 +237,7 @@ func handleResponseIntercept(request []byte) []byte {
 	}
 
 	debugLog("handleResponseIntercept: SourceFormat=%s RequestBody=%s Body=%s", req.SourceFormat, string(req.RequestBody), string(req.Body))
-	uncloakTable := buildUncloakTable(req.RequestBody, req.SourceFormat)
+	uncloakTable, _ := buildUncloakTable(req.RequestBody, req.SourceFormat)
 	debugLog("handleResponseIntercept: uncloakTable=%v", uncloakTable)
 	if uncloakTable == nil {
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
@@ -258,13 +258,14 @@ func handleStreamChunkIntercept(request []byte) []byte {
 	}
 
 	debugLog("handleStreamChunkIntercept: SourceFormat=%s RequestBody=%s Body=%s", req.SourceFormat, string(req.RequestBody), string(req.Body))
-	uncloakTable := buildUncloakTable(req.RequestBody, req.SourceFormat)
-	debugLog("handleStreamChunkIntercept: uncloakTable=%v", uncloakTable)
-	if uncloakTable == nil {
+	_, client := buildUncloakTable(req.RequestBody, req.SourceFormat)
+	debugLog("handleStreamChunkIntercept: client=%s", client)
+	if client == "" {
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 	}
 
-	modified, changed := uncloakStreamChunk(req.Body, uncloakTable, req.SourceFormat)
+	cached := activeFilterConfig().uncloakRegexCache[client]
+	modified, changed := uncloakStreamChunk(req.Body, cached)
 	debugLog("handleStreamChunkIntercept: changed=%t Body=%s", changed, string(modified))
 	if !changed {
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
@@ -272,11 +273,11 @@ func handleStreamChunkIntercept(request []byte) []byte {
 	return mustEnvelope(pluginapi.StreamChunkInterceptResponse{Body: modified})
 }
 
-func buildUncloakTable(requestBody []byte, sourceFormat string) map[string]string {
+func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]string, string) {
 	var reqRoot map[string]any
 	if err := safeUnmarshal(requestBody, &reqRoot); err != nil {
 		debugLog("buildUncloakTable: unmarshal err=%v", err)
-		return nil
+		return nil, ""
 	}
 	toolNames := extractToolNames(reqRoot, sourceFormat)
 
@@ -284,17 +285,17 @@ func buildUncloakTable(requestBody []byte, sourceFormat string) map[string]strin
 	client := detectClient(toolNames)
 	debugLog("buildUncloakTable: toolNames=%v client=%s", toolNames, client)
 	if client != "" {
-		return effectiveUncloakTable(client)
+		return effectiveUncloakTable(client), client
 	}
 
 	// Request body may already be cloaked — detect from cloak targets
 	cloakedClient := detectCloakedClient(toolNames)
 	debugLog("buildUncloakTable: cloakedClient=%s", cloakedClient)
 	if cloakedClient != "" {
-		return effectiveUncloakTable(cloakedClient)
+		return effectiveUncloakTable(cloakedClient), cloakedClient
 	}
 
-	return nil
+	return nil, ""
 }
 
 func effectiveUncloakTable(client string) map[string]string {
@@ -326,36 +327,46 @@ func uncloakResponseBody(body []byte, uncloakTable map[string]string, sourceForm
 	return raw, true
 }
 
-func uncloakStreamChunk(body []byte, uncloakTable map[string]string, sourceFormat string) ([]byte, bool) {
-	lines := strings.Split(string(body), "\n")
+// uncloakStreamChunk uses pre-compiled regex to replace tool names directly in
+// raw SSE bytes. This is fragment-safe: it works on partial JSON without needing
+// complete, parseable JSON objects, avoiding the classic SSE fragmentation issue
+// where a network chunk splits a JSON object across boundaries.
+func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool) {
+	if cached == nil || cached.re == nil {
+		return nil, false
+	}
+
+	// Find all matches of "name":"<target_tool_name>" and replace with originals.
+	// Uses FindAllSubmatchIndex to extract the tool name capture group and look
+	// it up in the uncloak table for precise replacement.
+	bodyStr := string(body)
+	matches := cached.re.FindAllStringSubmatchIndex(bodyStr, -1)
+	if len(matches) == 0 {
+		return nil, false
+	}
+
+	var buf strings.Builder
+	buf.Grow(len(bodyStr))
+	lastEnd := 0
 	changed := false
-	for i, line := range lines {
-		trimmedLine := strings.TrimRight(line, "\r")
-		suffix := line[len(trimmedLine):]
 
-		if !strings.HasPrefix(trimmedLine, "data: ") {
-			continue
-		}
-
-		dataJSON := strings.TrimPrefix(trimmedLine, "data: ")
-		var root any
-		if err := safeUnmarshal([]byte(dataJSON), &root); err != nil {
-			continue
-		}
-
-		if uncloakJSONNode(root, uncloakTable, sourceFormat) {
-			newJSON, err := safeMarshal(root)
-			if err == nil {
-				lines[i] = "data: " + string(newJSON) + suffix
-				changed = true
-			}
+	for _, loc := range matches {
+		// loc[2]:loc[3] is capture group 1 (the tool name)
+		toolName := bodyStr[loc[2]:loc[3]]
+		if orig, ok := cached.lookup[toolName]; ok {
+			buf.WriteString(bodyStr[lastEnd:loc[2]])
+			buf.WriteString(orig)
+			lastEnd = loc[3]
+			changed = true
 		}
 	}
 
 	if !changed {
 		return nil, false
 	}
-	return []byte(strings.Join(lines, "\n")), true
+
+	buf.WriteString(bodyStr[lastEnd:])
+	return []byte(buf.String()), true
 }
 
 func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat string) bool {
@@ -542,6 +553,31 @@ type filterConfig struct {
 	UseDefaultKeywords bool
 	CustomMappings     []rewriteMapping
 	ToolMappings       map[string]map[string]string // client → {orig_tool: antigravity_tool}
+
+	// Pre-compiled regex patterns, rebuilt on config change.
+	cloakRegexCache   map[string]*cachedCloakPatterns  // client → compiled cloak patterns
+	uncloakRegexCache map[string]*cachedUncloakPattern // client → compiled uncloak pattern
+}
+
+// cachedCloakPatterns holds pre-compiled regexes for tool name replacement
+// in descriptions and system messages (request cloaking path).
+type cachedCloakPatterns struct {
+	cloakTable     map[string]string     // orig → target (for Tier 1 quoted replacement)
+	safeRe         *regexp.Regexp        // Tier 2: word-boundary for unambiguous names
+	safeLookup     map[string]string     // match → replacement for safe names
+	ambiguousRules []cachedAmbiguousRule // Tier 3: pattern-based for short words
+}
+
+type cachedAmbiguousRule struct {
+	patterns []*regexp.Regexp
+	target   string
+}
+
+// cachedUncloakPattern holds a pre-compiled regex for stream chunk uncloaking.
+// Pattern matches: "name"\s*:\s*"(target1|target2|...)" in raw bytes.
+type cachedUncloakPattern struct {
+	re     *regexp.Regexp
+	lookup map[string]string // matched target → original name
 }
 
 var (
@@ -550,20 +586,84 @@ var (
 )
 
 func defaultFilterConfig() filterConfig {
-	return filterConfig{
+	cfg := filterConfig{
 		UseDefaultKeywords: true,
 		ToolMappings:       copyToolMappings(defaultCloakTables),
 	}
+	rebuildCachedRegexes(&cfg)
+	return cfg
 }
 
 func applyFilterConfig(cfg filterConfig) {
 	filterConfigMu.Lock()
 	defer filterConfigMu.Unlock()
 
-	currentFilterConfig = filterConfig{
+	newCfg := filterConfig{
 		UseDefaultKeywords: cfg.UseDefaultKeywords,
 		CustomMappings:     append([]rewriteMapping(nil), normalizeMappings(cfg.CustomMappings)...),
 		ToolMappings:       copyToolMappings(cfg.ToolMappings),
+	}
+	rebuildCachedRegexes(&newCfg)
+	currentFilterConfig = newCfg
+}
+
+// rebuildCachedRegexes pre-compiles all regex patterns from the current
+// ToolMappings. Called once on config change, not on every request.
+func rebuildCachedRegexes(cfg *filterConfig) {
+	cfg.cloakRegexCache = make(map[string]*cachedCloakPatterns, len(cfg.ToolMappings))
+	cfg.uncloakRegexCache = make(map[string]*cachedUncloakPattern, len(cfg.ToolMappings))
+
+	for client, cloakTable := range cfg.ToolMappings {
+		// Build cloak patterns (for request path: tool name replacement in text)
+		cp := &cachedCloakPatterns{
+			cloakTable: cloakTable,
+			safeLookup: make(map[string]string),
+		}
+		var safeParts []string
+		for orig, target := range cloakTable {
+			if isUnambiguousToolName(orig) {
+				safeParts = append(safeParts, regexp.QuoteMeta(orig))
+				cp.safeLookup[orig] = target
+			} else {
+				qOrig := regexp.QuoteMeta(orig)
+				var patterns []*regexp.Regexp
+				for _, p := range []string{
+					`(?i)(the\s+)` + qOrig + `(\s+(?:tool|function|command)\b)`,
+					`(?i)((?:use|call|run|invoke|with)\s+)` + qOrig + `(\b)`,
+				} {
+					if re, err := regexp.Compile(p); err == nil {
+						patterns = append(patterns, re)
+					}
+				}
+				cp.ambiguousRules = append(cp.ambiguousRules, cachedAmbiguousRule{
+					patterns: patterns,
+					target:   target,
+				})
+			}
+		}
+		if len(safeParts) > 0 {
+			pattern := `\b(` + strings.Join(safeParts, "|") + `)\b`
+			cp.safeRe, _ = regexp.Compile(pattern)
+		}
+		cfg.cloakRegexCache[client] = cp
+
+		// Build uncloak pattern (for stream path: regex-based tool name restore)
+		targets := make([]string, 0, len(cloakTable))
+		lookup := make(map[string]string, len(cloakTable))
+		for orig, target := range cloakTable {
+			targets = append(targets, regexp.QuoteMeta(target))
+			lookup[target] = orig
+		}
+		if len(targets) > 0 {
+			// Match "name" : "<target>" with flexible whitespace
+			pattern := `"name"\s*:\s*"(` + strings.Join(targets, "|") + `)"`
+			if re, err := regexp.Compile(pattern); err == nil {
+				cfg.uncloakRegexCache[client] = &cachedUncloakPattern{
+					re:     re,
+					lookup: lookup,
+				}
+			}
+		}
 	}
 }
 
@@ -575,6 +675,8 @@ func activeFilterConfig() filterConfig {
 		UseDefaultKeywords: currentFilterConfig.UseDefaultKeywords,
 		CustomMappings:     append([]rewriteMapping(nil), currentFilterConfig.CustomMappings...),
 		ToolMappings:       copyToolMappings(currentFilterConfig.ToolMappings),
+		cloakRegexCache:    currentFilterConfig.cloakRegexCache,
+		uncloakRegexCache:  currentFilterConfig.uncloakRegexCache,
 	}
 }
 
@@ -765,7 +867,8 @@ func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
 	changed := false
 
 	// 1. Existing brand text replace on "system" key
-	mappings := effectiveMappings(activeFilterConfig())
+	cfg := activeFilterConfig()
+	mappings := effectiveMappings(cfg)
 	rewritten, sysChanged := rewriteSystemFields(rootMap, mappings)
 	rootMap = rewritten.(map[string]any)
 	changed = changed || sysChanged
@@ -773,21 +876,22 @@ func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
 	// 2. Tool cloaking
 	toolNames := extractToolNames(rootMap, sourceFormat)
 	client := detectClient(toolNames)
-	var cloakTable map[string]string
+	var cachedCloak *cachedCloakPatterns
 	if client != "" {
-		cloakTable = effectiveCloakTable(client)
+		cloakTable := effectiveCloakTable(client)
 		if len(cloakTable) > 0 {
 			toolCloaked := cloakToolNames(rootMap, cloakTable, sourceFormat)
 			changed = changed || toolCloaked
 		}
+		cachedCloak = cfg.cloakRegexCache[client]
 	}
 
 	// 3. Brand replace + tool name replace in tools[].description
-	descChanged := rewriteToolDescriptions(rootMap, mappings, cloakTable, sourceFormat)
+	descChanged := rewriteToolDescriptions(rootMap, mappings, cachedCloak, sourceFormat)
 	changed = changed || descChanged
 
 	// 4. Brand replace + tool name replace in messages[].content where role == "system"
-	sysMsgChanged := rewriteSystemMessages(rootMap, mappings, cloakTable)
+	sysMsgChanged := rewriteSystemMessages(rootMap, mappings, cachedCloak)
 	changed = changed || sysMsgChanged
 
 	if !changed {
@@ -921,7 +1025,7 @@ func cloakToolNames(body map[string]any, cloakTable map[string]string, sourceFor
 	return changed
 }
 
-func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, cloakTable map[string]string, sourceFormat string) bool {
+func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, cached *cachedCloakPatterns, sourceFormat string) bool {
 	changed := false
 	toolsRaw, ok := root["tools"].([]any)
 	if !ok {
@@ -945,9 +1049,9 @@ func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, clo
 					next, replaced = replaceInsensitive(next, mapping.Match, mapping.Replacement)
 					descChanged = descChanged || replaced
 				}
-				if len(cloakTable) > 0 {
+				if cached != nil {
 					var toolReplaced bool
-					next, toolReplaced = replaceToolNamesInText(next, cloakTable)
+					next, toolReplaced = replaceToolNamesInText(next, cached)
 					descChanged = descChanged || toolReplaced
 				}
 				if descChanged {
@@ -964,9 +1068,9 @@ func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, clo
 					next, replaced = replaceInsensitive(next, mapping.Match, mapping.Replacement)
 					descChanged = descChanged || replaced
 				}
-				if len(cloakTable) > 0 {
+				if cached != nil {
 					var toolReplaced bool
-					next, toolReplaced = replaceToolNamesInText(next, cloakTable)
+					next, toolReplaced = replaceToolNamesInText(next, cached)
 					descChanged = descChanged || toolReplaced
 				}
 				if descChanged {
@@ -979,7 +1083,7 @@ func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, clo
 	return changed
 }
 
-func rewriteSystemMessages(root map[string]any, mappings []rewriteMapping, cloakTable map[string]string) bool {
+func rewriteSystemMessages(root map[string]any, mappings []rewriteMapping, cached *cachedCloakPatterns) bool {
 	changed := false
 	msgsRaw, ok := root["messages"].([]any)
 	if !ok {
@@ -997,9 +1101,9 @@ func rewriteSystemMessages(root map[string]any, mappings []rewriteMapping, cloak
 					msg["content"] = next
 					changed = true
 				}
-				if len(cloakTable) > 0 {
+				if cached != nil {
 					current := msg["content"]
-					toolNext, toolChanged := replaceToolNamesInValue(current, cloakTable)
+					toolNext, toolChanged := replaceToolNamesInValue(current, cached)
 					if toolChanged {
 						msg["content"] = toolNext
 						changed = true
@@ -1110,28 +1214,19 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 	return builder.String(), true
 }
 
-func replaceToolNamesInText(text string, cloakTable map[string]string) (string, bool) {
-	if len(cloakTable) == 0 {
+// replaceToolNamesInText uses pre-compiled regex patterns from cachedCloakPatterns.
+// Patterns are compiled once on config change (rebuildCachedRegexes), not per call.
+func replaceToolNamesInText(text string, cached *cachedCloakPatterns) (string, bool) {
+	if cached == nil || len(cached.cloakTable) == 0 {
 		return text, false
 	}
 
 	result := text
 	changed := false
 
-	// Classify tool names: unambiguous (safe for word-boundary) vs ambiguous (context-only)
-	var safeParts []string
-	var ambiguousNames []string
-	for orig := range cloakTable {
-		if isUnambiguousToolName(orig) {
-			safeParts = append(safeParts, regexp.QuoteMeta(orig))
-		} else {
-			ambiguousNames = append(ambiguousNames, orig)
-		}
-	}
-
 	// Tier 1: Quoted replacement for ALL names — backticks and double-quotes
 	// are strong signals of a tool name reference regardless of word length.
-	for orig, target := range cloakTable {
+	for orig, target := range cached.cloakTable {
 		for _, q := range []string{"`", `"`} {
 			old := q + orig + q
 			repl := q + target + q
@@ -1142,42 +1237,24 @@ func replaceToolNamesInText(text string, cloakTable map[string]string) (string, 
 		}
 	}
 
-	// Tier 2: Word-boundary replacement for unambiguous names (contain _, camelCase, etc.)
-	if len(safeParts) > 0 {
-		pattern := `\b(` + strings.Join(safeParts, "|") + `)\b`
-		if re, err := regexp.Compile(pattern); err == nil {
-			newResult := re.ReplaceAllStringFunc(result, func(match string) string {
-				if target, ok := cloakTable[match]; ok {
-					return target
-				}
-				return match
-			})
-			if newResult != result {
-				result = newResult
-				changed = true
+	// Tier 2: Word-boundary replacement for unambiguous names (pre-compiled)
+	if cached.safeRe != nil {
+		newResult := cached.safeRe.ReplaceAllStringFunc(result, func(match string) string {
+			if target, ok := cached.safeLookup[match]; ok {
+				return target
 			}
+			return match
+		})
+		if newResult != result {
+			result = newResult
+			changed = true
 		}
 	}
 
-	// Tier 3: Pattern-based replacement for ambiguous names (common short words
-	// like "read", "edit", "write", "agent", "skill", "workflow").
-	// Only replace when the name appears in a clear tool-reference context.
-	for _, orig := range ambiguousNames {
-		target := cloakTable[orig]
-		qOrig := regexp.QuoteMeta(orig)
-
-		patterns := []string{
-			// "the <name> tool/function/command" — e.g. "the bash tool"
-			`(?i)(the\s+)` + qOrig + `(\s+(?:tool|function|command)\b)`,
-			// "use/call/run/invoke/with <name>" followed by word boundary — e.g. "use read to"
-			`(?i)((?:use|call|run|invoke|with)\s+)` + qOrig + `(\b)`,
-		}
-		for _, p := range patterns {
-			re, err := regexp.Compile(p)
-			if err != nil {
-				continue
-			}
-			newResult := re.ReplaceAllString(result, "${1}"+target+"${2}")
+	// Tier 3: Pattern-based replacement for ambiguous names (pre-compiled)
+	for _, rule := range cached.ambiguousRules {
+		for _, re := range rule.patterns {
+			newResult := re.ReplaceAllString(result, "${1}"+rule.target+"${2}")
 			if newResult != result {
 				result = newResult
 				changed = true
@@ -1203,14 +1280,14 @@ func isUnambiguousToolName(name string) bool {
 	return false
 }
 
-func replaceToolNamesInValue(value any, cloakTable map[string]string) (any, bool) {
+func replaceToolNamesInValue(value any, cached *cachedCloakPatterns) (any, bool) {
 	switch typed := value.(type) {
 	case string:
-		return replaceToolNamesInText(typed, cloakTable)
+		return replaceToolNamesInText(typed, cached)
 	case map[string]any:
 		changed := false
 		for key, child := range typed {
-			next, childChanged := replaceToolNamesInValue(child, cloakTable)
+			next, childChanged := replaceToolNamesInValue(child, cached)
 			if childChanged {
 				typed[key] = next
 				changed = true
@@ -1220,7 +1297,7 @@ func replaceToolNamesInValue(value any, cloakTable map[string]string) (any, bool
 	case []any:
 		changed := false
 		for i, child := range typed {
-			next, childChanged := replaceToolNamesInValue(child, cloakTable)
+			next, childChanged := replaceToolNamesInValue(child, cached)
 			if childChanged {
 				typed[i] = next
 				changed = true

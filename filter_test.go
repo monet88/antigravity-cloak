@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -514,6 +515,7 @@ func TestReplaceToolNamesInText(t *testing.T) {
 		"askUserQuestion": "ask_question",
 		"shell_command":   "run_command",
 	}
+	cached := buildTestCloakPatterns(cloakTable)
 	tests := []struct {
 		name    string
 		input   string
@@ -553,7 +555,7 @@ func TestReplaceToolNamesInText(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, changed := replaceToolNamesInText(tt.input, cloakTable)
+			got, changed := replaceToolNamesInText(tt.input, cached)
 			if changed != tt.changed {
 				t.Fatalf("changed = %v, want %v (got %q)", changed, tt.changed, got)
 			}
@@ -658,9 +660,12 @@ func TestBuildUncloakTableWithCloakedRequest(t *testing.T) {
 		],
 		"messages":[]
 	}`
-	uncloakTable := buildUncloakTable([]byte(cloakedReqBody), "openai")
+	uncloakTable, client := buildUncloakTable([]byte(cloakedReqBody), "openai")
 	if uncloakTable == nil {
 		t.Fatal("expected non-nil uncloak table for cloaked Claude Code request")
+	}
+	if client == "" {
+		t.Fatal("expected non-empty client name")
 	}
 	if uncloakTable["run_command"] != "bash" {
 		t.Fatalf("expected run_command → bash, got %q", uncloakTable["run_command"])
@@ -738,10 +743,10 @@ func TestRewriteRequestPreservesLargeIntegers(t *testing.T) {
 }
 
 func TestStreamChunkPreservesDataFidelity(t *testing.T) {
-	uncloakTable := map[string]string{"run_command": "bash"}
+	cached := buildTestUncloakPattern(map[string]string{"run_command": "bash"})
 	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\",\"arguments\":\"{\\\"code\\\":\\\"<h1>Test</h1>\\\",\\\"id\\\":1234567890123456789}\"}}]}}]}\n\n"
 
-	result, changed := uncloakStreamChunk([]byte(chunk), uncloakTable, "openai")
+	result, changed := uncloakStreamChunk([]byte(chunk), cached)
 	if !changed {
 		t.Fatal("expected changed = true")
 	}
@@ -751,12 +756,82 @@ func TestStreamChunkPreservesDataFidelity(t *testing.T) {
 	if !strings.Contains(resultStr, `"bash"`) {
 		t.Fatalf("tool name not uncloaked: %s", resultStr)
 	}
-	// Verify no HTML escaping
+	// Verify no HTML escaping (regex doesn't touch non-name content)
 	if strings.Contains(resultStr, `\u003c`) {
 		t.Fatalf("HTML chars were escaped: %s", resultStr)
 	}
-	// Verify number preserved
+	// Verify number preserved (regex doesn't touch non-name content)
 	if !strings.Contains(resultStr, "1234567890123456789") {
 		t.Fatalf("large integer corrupted: %s", resultStr)
 	}
+}
+
+func TestSSEFragmentedChunk(t *testing.T) {
+	// Regression: SSE chunks may arrive split across network boundaries.
+	// The old JSON-based approach would fail to parse partial JSON.
+	// The new regex approach works on raw bytes regardless of JSON completeness.
+	cached := buildTestUncloakPattern(map[string]string{"run_command": "bash"})
+
+	// Simulate a fragmented chunk: JSON is incomplete (no closing brackets)
+	fragment := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command"`)
+
+	result, changed := uncloakStreamChunk(fragment, cached)
+	if !changed {
+		t.Fatal("expected regex to match even in fragmented JSON")
+	}
+	resultStr := string(result)
+	if !strings.Contains(resultStr, `"name":"bash"`) {
+		t.Fatalf("tool name not uncloaked in fragment: %s", resultStr)
+	}
+	// Verify the rest of the fragment is preserved exactly
+	if !strings.HasPrefix(resultStr, `data: {"choices"`) {
+		t.Fatalf("fragment prefix corrupted: %s", resultStr)
+	}
+}
+
+// buildTestCloakPatterns creates a cachedCloakPatterns for testing,
+// mirroring the logic in rebuildCachedRegexes.
+func buildTestCloakPatterns(cloakTable map[string]string) *cachedCloakPatterns {
+	cp := &cachedCloakPatterns{
+		cloakTable: cloakTable,
+		safeLookup: make(map[string]string),
+	}
+	var safeParts []string
+	for orig, target := range cloakTable {
+		if isUnambiguousToolName(orig) {
+			safeParts = append(safeParts, regexp.QuoteMeta(orig))
+			cp.safeLookup[orig] = target
+		} else {
+			qOrig := regexp.QuoteMeta(orig)
+			var patterns []*regexp.Regexp
+			for _, p := range []string{
+				`(?i)(the\s+)` + qOrig + `(\s+(?:tool|function|command)\b)`,
+				`(?i)((?:use|call|run|invoke|with)\s+)` + qOrig + `(\b)`,
+			} {
+				if re, err := regexp.Compile(p); err == nil {
+					patterns = append(patterns, re)
+				}
+			}
+			cp.ambiguousRules = append(cp.ambiguousRules, cachedAmbiguousRule{
+				patterns: patterns,
+				target:   target,
+			})
+		}
+	}
+	if len(safeParts) > 0 {
+		pattern := `\b(` + strings.Join(safeParts, "|") + `)\b`
+		cp.safeRe, _ = regexp.Compile(pattern)
+	}
+	return cp
+}
+
+// buildTestUncloakPattern creates a cachedUncloakPattern for testing.
+func buildTestUncloakPattern(uncloakTable map[string]string) *cachedUncloakPattern {
+	targets := make([]string, 0, len(uncloakTable))
+	for target := range uncloakTable {
+		targets = append(targets, regexp.QuoteMeta(target))
+	}
+	pattern := `"name"\s*:\s*"(` + strings.Join(targets, "|") + `)"`
+	re := regexp.MustCompile(pattern)
+	return &cachedUncloakPattern{re: re, lookup: uncloakTable}
 }
