@@ -34,7 +34,7 @@ You can disable the built-in preset and provide your own mapping relationships i
 ```yaml
 plugins:
   configs:
-    antigravity-coding-filter:
+    antigravity-cloak:
       enabled: true
       priority: 1
       use_default_keywords: false
@@ -53,7 +53,7 @@ You can also override or extend the default tool name mapping tables for specifi
 ```yaml
 plugins:
   configs:
-    antigravity-coding-filter:
+    antigravity-cloak:
       enabled: true
       priority: 1
       tool_mappings:
@@ -71,11 +71,11 @@ CLIProxyAPI dynamic plugins require CGO. Confirm `CGO_ENABLED=1` before building
 Windows amd64:
 
 ```powershell
-go build -buildmode=c-shared -o plugins/windows/amd64/antigravity-coding-filter.dll .
-Remove-Item plugins/windows/amd64/antigravity-coding-filter.h
+go build -buildmode=c-shared -o plugins/windows/amd64/antigravity-cloak.dll .
+Remove-Item plugins/windows/amd64/antigravity-cloak.h
 ```
 
-The plugin ID is derived from the dynamic library filename, so this build path registers the plugin as `antigravity-coding-filter`.
+The plugin ID is derived from the dynamic library filename, so this build path registers the plugin as `antigravity-cloak`.
 
 ## CLIProxyAPI Config
 
@@ -84,7 +84,7 @@ plugins:
   enabled: true
   dir: "plugins"
   configs:
-    antigravity-coding-filter:
+    antigravity-cloak:
       enabled: true
       priority: 1
       use_default_keywords: true
