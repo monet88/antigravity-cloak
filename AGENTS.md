@@ -220,6 +220,64 @@ With debug on, send ONE request, then check:
 Because stream chunk bodies are multi-line SSE, parse by [DEBUG] record, not by
 line, when separating input bodies from changed=true output bodies.
 
+## Installing a custom (non-official) plugin onto a remote VPS
+
+This is for the production CLIProxyAPI on the GCP VM (compose dir ~/cliproxy on
+chang-gateway-vm), reached only through the reverse-proxied management API at
+https://vps.monet.uno/api-cli. Do everything through the management API - no
+SSH, no editing files on the box directly. Management key goes in the
+Authorization: Bearer <key> header; the panel/API lives under /v0/management.
+
+Key facts learned the hard way:
+- The official store registry is always loaded. Your own plugin is only
+  visible after its registry is added as an extra store-source. If you skip
+  this, install returns 404 (host does not know the plugin id).
+- The VPS config is NOT guaranteed to match the local config.yaml. The running
+  VPS box was missing both the custom store-source and the antigravity-cloak
+  block even though local had them. Always read the live VPS config first.
+- There is NO narrow endpoint for store-sources (tried
+  /v0/management/plugin-store/sources, /plugin-store-sources, /store-sources -
+  all 404). The only way to add a store-source is to edit the full config via
+  GET/PUT /v0/management/config.yaml.
+- config.yaml GET returns raw YAML bytes; in PowerShell read with
+  Invoke-WebRequest and decode .Content as UTF-8 (it comes back as a byte[],
+  not a string - .Substring fails on it).
+
+Procedure (PowerShell, $base/$key set to the VPS API + management key):
+1. Back up the live config to a local file FIRST:
+   GET /v0/management/config.yaml -> save bytes verbatim (LF, no CRLF).
+2. Build the new config by inserting ONLY the store-sources lines under
+   `plugins:` (right after `enabled: true`, before `configs:`). Diff against the
+   backup and confirm the ONLY additions are those 2 lines. Do not touch
+   anything else.
+   ```yaml
+   plugins:
+     enabled: true
+     store-sources:
+       - https://raw.githubusercontent.com/monet88/antigravity-cloak/main/registry.json
+     configs:
+       ...
+   ```
+3. PUT /v0/management/config.yaml with the new YAML. Expect
+   {"ok":true,"changed":["config"]}. Config reloads live, no restart.
+4. GET /v0/management/plugin-store and confirm the new source + the
+   antigravity-cloak entry appear (installed:false).
+5. POST /v0/management/plugin-store/antigravity-cloak/install
+   (body {"version":"0.2.0"} or omit for latest). Host downloads the matching
+   GOOS/GOARCH .so from the GitHub release into
+   plugins/linux/amd64/antigravity-cloak-v<ver>.so. Expect
+   restart_required:false.
+6. PATCH /v0/management/plugins/antigravity-cloak/enabled body {"enabled":true}.
+7. PATCH /v0/management/plugins/antigravity-cloak/config to set fields, e.g.
+   {"model_prefixes":["agy"]}. (GET .../config to read first; PUT replaces,
+   PATCH merges.)
+8. Verify: GET /v0/management/plugins, find antigravity-cloak with
+   registered:true, effective_enabled:true, and path pointing at the v<ver> .so.
+
+The install/enable/patch calls persist their own plugins.configs.antigravity-cloak
+block (enabled, model_prefixes, store metadata) back into the VPS config - you
+only had to hand-add the store-source. Keep the local backup for rollback.
+
 ## Gotchas recap
 
 - Dependency is pinned to CLIProxyAPI v7.2.42 while the container ran v7.2.43.
