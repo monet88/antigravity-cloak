@@ -1519,6 +1519,18 @@ func TestDetectClientOhMyPiRequiresSignatureOrThreshold(t *testing.T) {
 	if client := detectClient([]string{"bash", "task"}); client != "oh_my_pi" {
 		t.Fatalf("detectClient([bash, task]) = %q, want 'oh_my_pi'", client)
 	}
+	if client := detectClient([]string{"read", "vibe_spawn"}); client != "oh_my_pi" {
+		t.Fatalf("detectClient([read, vibe_spawn]) = %q, want 'oh_my_pi'", client)
+	}
+	if client := detectClient([]string{"vibe_spawn", "vibe_send"}); client != "oh_my_pi" {
+		t.Fatalf("detectClient([vibe_spawn, vibe_send]) = %q, want 'oh_my_pi'", client)
+	}
+	if client := detectClient([]string{"read", "init_experiment"}); client != "oh_my_pi" {
+		t.Fatalf("detectClient([read, init_experiment]) = %q, want 'oh_my_pi'", client)
+	}
+	if client := detectClient([]string{"init_experiment", "run_experiment", "log_experiment", "update_notes"}); client != "oh_my_pi" {
+		t.Fatalf("detectClient([autoresearch tools]) = %q, want 'oh_my_pi'", client)
+	}
 }
 
 func TestStreamSessionManagerHeaderInitSchemaV4(t *testing.T) {

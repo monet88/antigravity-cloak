@@ -16,49 +16,12 @@ CLIProxyAPI v7 dynamic plugin for disguising coding-CLI traffic (**Claude Code**
 
 ## Supported Coding Clients
 
-### 1. Oh My Pi (`oh_my_pi` / `omp`)
-| Native Tool | Antigravity Cloaked Name | Description |
-| :--- | :--- | :--- |
-| `read` | `view_file` | Read files, directories, and web URLs |
-| `write` | `write_to_file` | Create or overwrite files |
-| `edit` | `replace_file_content` | Line-anchored code patch |
-| `bash` | `run_command` | Execute persistent shell commands |
-| `grep` | `grep_search` | Regex file search |
-| `glob` | `list_dir` | Match and glob files/directories |
-| `task` | `invoke_subagent` | Dispatch background subagents |
-| `ask` | `ask_question` | Interactive user prompt UI |
-| `todo` | `manage_task` | Manage task checklist state |
-| `hub` | `send_message` | Peer-to-peer messaging and job control |
-| `web_search` | `search_web` | Web search |
-| `eval` | `execute_code` | Run code in persistent kernel |
+`antigravity-cloak` seamlessly cloaks and uncloaks native tool definitions and stream chunks for:
+- **Oh My Pi (`oh_my_pi` / `omp`)**: Standard core tools (`read`, `write`, `edit`, `bash`, `grep`, `task`, `ask`, `todo`, `hub`, `eval`, `web_search`), Vibe Mode (`vibe_spawn`, `vibe_send`, `vibe_wait`, `vibe_kill`, `vibe_list`), and Autoresearch Mode (`init_experiment`, `run_experiment`, `log_experiment`, `update_notes`).
+- **Claude Code (`claude_code`)**: `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `ToolSearch`, `Skill`, `Workflow`.
+- **OpenAI Codex (`codex`)**: `shell_command`, `apply_patch`, `request_user_input`, `view_image`, `update_plan`, `tool_search`, `get_goal`, `create_goal`, `update_goal`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`.
 
-### 2. Claude Code (`claude_code`)
-- `Bash` $\to$ `run_command`
-- `Edit` $\to$ `replace_file_content`
-- `Read` $\to$ `view_file`
-- `Write` $\to$ `write_to_file`
-- `Grep` $\to$ `grep_search`
-- `Glob` $\to$ `list_dir`
-- `Agent` $\to$ `invoke_subagent`
-- `AskUserQuestion` $\to$ `ask_question`
-- `ToolSearch` $\to$ `search_web`
-- `Skill` $\to$ `call_mcp_tool`
-- `Workflow` $\to$ `schedule`
-
-### 3. OpenAI Codex (`codex`)
-- `shell_command` $\to$ `run_command`
-- `apply_patch` $\to$ `multi_replace_file_content`
-- `request_user_input` $\to$ `ask_question`
-- `view_image` $\to$ `generate_image`
-- `update_plan` $\to$ `manage_task`
-- `tool_search` $\to$ `search_web`
-- `get_goal` $\to$ `schedule`
-- `create_goal` $\to$ `send_message`
-- `update_goal` $\to$ `define_subagent`
-- `list_mcp_resources` $\to$ `list_resources`
-- `list_mcp_resource_templates` $\to$ `list_permissions`
-- `read_mcp_resource` $\to$ `read_resource`
-
+> For complete domain glossary and full mapping tables across all clients and modes, refer to **[CONTEXT.md](CONTEXT.md)**.
 ---
 
 ## Built-in Keyword Preset (50+ Signals)

@@ -94,7 +94,7 @@ const abiVersion = 1
 
 const (
 	pluginName       = "antigravity-cloak"
-	pluginVersion    = "0.3.1"
+	pluginVersion    = "0.4.0"
 	pluginRepository = "https://github.com/monet88/antigravity-cloak"
 )
 
@@ -985,18 +985,27 @@ var defaultCloakTables = map[string]map[string]string{
 		"read_mcp_resource":           "read_resource",
 	},
 	"oh_my_pi": {
-		"read":       "view_file",
-		"write":      "write_to_file",
-		"edit":       "replace_file_content",
-		"bash":       "run_command",
-		"grep":       "grep_search",
-		"glob":       "list_dir",
-		"task":       "invoke_subagent",
-		"ask":        "ask_question",
-		"todo":       "manage_task",
-		"hub":        "send_message",
-		"web_search": "search_web",
-		"eval":       "execute_code",
+		"read":            "view_file",
+		"write":           "write_to_file",
+		"edit":            "replace_file_content",
+		"bash":            "run_command",
+		"grep":            "grep_search",
+		"glob":            "list_dir",
+		"task":            "invoke_subagent",
+		"ask":             "ask_question",
+		"todo":            "manage_task",
+		"hub":             "send_message",
+		"web_search":      "search_web",
+		"eval":            "execute_code",
+		"vibe_spawn":      "define_subagent",
+		"vibe_send":       "schedule",
+		"vibe_wait":       "wait",
+		"vibe_kill":       "cancel",
+		"vibe_list":       "list",
+		"init_experiment": "create_goal",
+		"run_experiment":  "call_mcp_tool",
+		"log_experiment":  "update_plan",
+		"update_notes":    "update_goal",
 	},
 }
 
@@ -1008,7 +1017,11 @@ var defaultCloakTables = map[string]map[string]string{
 // MUST stay in sync with the matching keys of defaultCloakTables; update both
 // together when a table changes.
 var clientDistinctiveTools = map[string]map[string]bool{
-	"oh_my_pi": {"hub": true, "task": true, "todo": true, "eval": true, "web_search": true},
+	"oh_my_pi": {
+		"hub": true, "task": true, "todo": true, "eval": true, "web_search": true,
+		"vibe_spawn": true, "vibe_send": true, "vibe_wait": true, "vibe_kill": true, "vibe_list": true,
+		"init_experiment": true, "run_experiment": true, "log_experiment": true, "update_notes": true,
+	},
 }
 
 const (

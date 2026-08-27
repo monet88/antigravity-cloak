@@ -16,6 +16,62 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 - **Uncloaking (Response & Stream Path)**: Reverses the translation in upstream responses (JSON bodies and SSE stream chunks) back to the client's native tool names so the client remains unaware of the disguise.
 - **MCP Pass-through**: MCP tools (`mcp__*`) bypass cloaking in both directions.
 
+#### Cloak Mapping Tables
+
+##### 1. Oh My Pi (`oh_my_pi` / `omp`)
+| Native Tool | Antigravity Cloaked Name | Mode / Category | Description |
+| :--- | :--- | :--- | :--- |
+| `read` | `view_file` | Standard Core | Read files, directories, and web URLs |
+| `write` | `write_to_file` | Standard Core | Create or overwrite files |
+| `edit` | `replace_file_content` | Standard Core | Line-anchored code patch |
+| `bash` | `run_command` | Standard Core | Execute persistent shell commands |
+| `grep` | `grep_search` | Standard Core | Regex file search |
+| `glob` | `list_dir` | Standard Core | Match and glob files/directories |
+| `task` | `invoke_subagent` | Standard Core | Dispatch background subagents |
+| `ask` | `ask_question` | Standard Core | Interactive user prompt UI |
+| `todo` | `manage_task` | Standard Core | Manage task checklist state |
+| `hub` | `send_message` | Standard Core | Peer-to-peer messaging and job control |
+| `web_search` | `search_web` | Standard Core | Web search |
+| `eval` | `execute_code` | Standard Core | Run code in persistent kernel |
+| `vibe_spawn` | `define_subagent` | Vibe Mode | Starts persistent worker session |
+| `vibe_send` | `schedule` | Vibe Mode | Message / steer worker session |
+| `vibe_wait` | `wait` | Vibe Mode | Block until worker turn completes |
+| `vibe_kill` | `cancel` | Vibe Mode | Terminate worker session |
+| `vibe_list` | `list` | Vibe Mode | List worker sessions and roster |
+| `init_experiment` | `create_goal` | Autoresearch | Initialize benchmark experiment session |
+| `run_experiment` | `call_mcp_tool` | Autoresearch | Run benchmark workload |
+| `log_experiment` | `update_plan` | Autoresearch | Record metric, commit or discard |
+| `update_notes` | `update_goal` | Autoresearch | Update experiment playbook / ideas |
+
+> **Virtual Devices (`xd://`)**: Other auxiliary tools in `oh-my-pi` (`ast_grep`, `ast_edit`, `lsp`, `checkpoint`, `rewind`, `browser`, `retain`, `recall`, `reflect`, `memory_edit`, `security_scan`) are unmounted from top-level tool definitions and dispatched as virtual file payloads via `read`/`write` to `xd://<tool>`, thus automatically protected without needing top-level mappings.
+
+##### 2. Claude Code (`claude_code`)
+- `Bash` $\to$ `run_command`
+- `Edit` $\to$ `replace_file_content`
+- `Read` $\to$ `view_file`
+- `Write` $\to$ `write_to_file`
+- `Grep` $\to$ `grep_search`
+- `Glob` $\to$ `list_dir`
+- `Agent` $\to$ `invoke_subagent`
+- `AskUserQuestion` $\to$ `ask_question`
+- `ToolSearch` $\to$ `search_web`
+- `Skill` $\to$ `call_mcp_tool`
+- `Workflow` $\to$ `schedule`
+
+##### 3. OpenAI Codex (`codex`)
+- `shell_command` $\to$ `run_command`
+- `apply_patch` $\to$ `multi_replace_file_content`
+- `request_user_input` $\to$ `ask_question`
+- `view_image` $\to$ `generate_image`
+- `update_plan` $\to$ `manage_task`
+- `tool_search` $\to$ `search_web`
+- `get_goal` $\to$ `schedule`
+- `create_goal` $\to$ `send_message`
+- `update_goal` $\to$ `define_subagent`
+- `list_mcp_resources` $\to$ `list_resources`
+- `list_mcp_resource_templates` $\to$ `list_permissions`
+- `read_mcp_resource` $\to$ `read_resource`
+
 ### 3. Activation Model (Two-Stage Gating)
 Every interceptor evaluates two sequential gates:
 1. **Model Gate (`modelAllowsCloak`)**: Evaluates `model_prefixes` against `Model` and `RequestedModel`. If empty, all models pass. If configured, non-matching models exit early with a no-op response.

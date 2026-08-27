@@ -17,10 +17,10 @@ coding-CLI traffic as Antigravity. Two jobs:
 - Module: github.com/monet88/antigravity-cloak
 - Go: 1.26.0. Depends on github.com/router-for-me/CLIProxyAPI/v7 v7.2.143
   (SDK sdk/pluginapi, sdk/pluginabi). Plugin ABI version is 1.
-- Source layout: everything lives in main.go (plus filter_test.go,
-  plugin_test.go). Upstream references are cloned under .ref/ (gitignored
-  workspace), not part of the module.
-
+- Source layout: `main.go` (plugin core). All test files MUST be placed in
+  the `tests/` directory (e.g. `tests/filter_test.go`, `tests/plugin_test.go`),
+  NEVER at the repository root. Upstream references are cloned under `.ref/`
+  (gitignored workspace), not part of the module.
 ## Activation model (important)
 
 Two gates decide whether cloaking runs, checked in this order in every handler:
@@ -74,61 +74,14 @@ inverse (defaultUncloakTables is built by inverting the cloak table in init()).
 Casing MUST match what the client actually sends, because uncloak restores the
 exact key string back to the client and tool names are case-sensitive.
 
-claude_code (Claude Code sends PascalCase tool names):
+Supported clients:
+- `claude_code` (PascalCase: `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `ToolSearch`, `Skill`, `Workflow`)
+- `codex` (snake_case: `shell_command`, `apply_patch`, `request_user_input`, `view_image`, `update_plan`, `tool_search`, `get_goal`, `create_goal`, `update_goal`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`)
+- `oh_my_pi` (lowercase: standard tools `read`, `write`, `edit`, `bash`, `grep`, `glob`, `task`, `ask`, `todo`, `hub`, `web_search`, `eval`, plus Vibe Mode `vibe_*` and Autoresearch Mode `*_experiment`, `update_notes`)
 
-```
-Bash            -> run_command
-Edit            -> replace_file_content
-Read            -> view_file
-Write           -> write_to_file
-Grep            -> grep_search
-Glob            -> list_dir
-Agent           -> invoke_subagent
-AskUserQuestion -> ask_question
-ToolSearch      -> search_web
-Skill           -> call_mcp_tool
-Workflow        -> schedule
-```
-
-codex (Codex sends snake_case tool names):
-
-```
-shell_command               -> run_command
-apply_patch                 -> multi_replace_file_content
-request_user_input          -> ask_question
-view_image                  -> generate_image
-update_plan                 -> manage_task
-tool_search                 -> search_web
-get_goal                    -> schedule
-create_goal                 -> send_message
-update_goal                 -> define_subagent
-list_mcp_resources          -> list_resources
-list_mcp_resource_templates -> list_permissions
-read_mcp_resource           -> read_resource
-```
-
-oh_my_pi / omp (Oh My Pi sends lowercase tool names):
-
-```
-read       -> view_file
-write      -> write_to_file
-edit       -> replace_file_content
-bash       -> run_command
-grep       -> grep_search
-glob       -> list_dir
-task       -> invoke_subagent
-ask        -> ask_question
-todo       -> manage_task
-hub        -> send_message
-web_search -> search_web
-eval       -> execute_code
-```
-
-The right-hand side are real Antigravity native tool names. MCP tools (mcp__*)
-are NOT in any table, so they pass through untouched both directions - intended.
+> Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 
 ### Two casing rules that bite
-
 1. sourceFormat normalization. The proxy sends SourceFormat="claude" for
    Claude Code, but the body-walking branches only understand "anthropic" /
    "openai". normalizeSourceFormat maps claude/antigravity -> anthropic and
@@ -306,7 +259,7 @@ only had to hand-add the store-source. Keep the local backup for rollback.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **antigravity-cloak** (251 symbols, 778 relationships, 22 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **antigravity-cloak** (413 symbols, 1138 relationships, 36 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
