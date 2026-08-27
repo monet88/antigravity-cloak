@@ -8,7 +8,7 @@ CLIProxyAPI v7.2.143 introduced schema_version >= 3 where `OriginalRequest` and 
 
 ## Decision
 1. **Encapsulate Stream Buffering & Session Caching**: Implement `streamSessionManager` to:
-   - Cache uncloak regex patterns on header-init using `RequestID` (or fallback metadata/header identifiers/anonymous single-stream fallback).
+   - Cache uncloak regex patterns on header-init under a correlation key: `RequestID`, a metadata/header identifier, or (for schema < 3, where every chunk repeats the request body) an FNV hash of that body.
    - Reassemble incomplete TCP fragments across SSE event boundaries (`\n\n`).
    - Prune abandoned or stale sessions (> 5 minutes) opportunistically on chunk arrival and session initialization.
    - Clean up sessions immediately on `data: [DONE]`.
@@ -21,3 +21,4 @@ CLIProxyAPI v7.2.143 introduced schema_version >= 3 where `OriginalRequest` and 
 - Full compatibility with CLIProxyAPI schema_version >= 3 without breaking legacy schema < 3 mode.
 - SSE stream uncloaking functions reliably across fragmented TCP chunks.
 - Lock-free configuration reads on all request, response, and stream interceptor hooks.
+- Payload chunks carrying no correlation identifier (schema >= 3 streams without `RequestID`/metadata/header ids) cannot be attributed to a stream and pass through unmolested. An earlier design cached them in a single shared anonymous slot, but concurrent unidentifiable streams overwrote each other's buffered tails and one stream's `[DONE]` deleted the other's session; the shared slot was rejected in favor of isolation over coverage.

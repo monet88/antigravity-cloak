@@ -22,9 +22,10 @@ Every interceptor evaluates two sequential gates:
 2. **Client Gate (`detectClient`)**: Counts tool name matches against known client cloak tables. If matches >= 2, the client is identified and cloaking proceeds.
 
 ### 4. Stream Session Management (`StreamSessionManager`)
-- **Schema-Aware Caching**: In CLIProxyAPI schema_version >= 3, request bodies (`OriginalRequest`/`RequestBody`) are delivered only on the header-init chunk (`ChunkIndex == StreamChunkHeaderInitIndex`). The manager caches the uncloak regex pattern by `RequestID` or fallback stream identifier.
+- **Schema-Aware Caching**: In CLIProxyAPI schema_version >= 3, request bodies (`OriginalRequest`/`RequestBody`) are delivered only on the header-init chunk (`ChunkIndex == StreamChunkHeaderInitIndex`). The manager caches the uncloak regex pattern under the stream's correlation key - `RequestID`, a metadata/header id, or (schema < 3, where every chunk repeats the request body) an FNV hash of that body.
+- **Uncorrelated Chunks**: Payload chunks carrying no correlation key cannot be attributed to any stream and pass through unmolested rather than compete for shared state (which would corrupt concurrent streams).
 - **SSE Event Reassembly**: Buffers incomplete TCP fragments (`\n\n` boundaries) and uncloaks complete SSE events without cross-stream pollution.
-- **Lifecycle & Cleanup**: Automatically frees sessions on `data: [DONE]`, cleans up abandoned/interrupted streams via opportunistic pruning on chunk arrival, and tracks buffer expiration.
+- **Lifecycle & Cleanup**: Automatically frees sessions on `data: [DONE]` and cleans up abandoned/interrupted streams via opportunistic pruning on chunk arrival.
 
 ### 5. Configuration Lifecycle
 Managed via `atomic.Pointer[filterConfig]`, enabling lock-free, zero-copy configuration reads on hot request and streaming paths with thread-safe live reconfiguration.

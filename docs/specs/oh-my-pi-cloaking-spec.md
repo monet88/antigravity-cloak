@@ -50,14 +50,15 @@ Provide seamless, bidirectional cloaking and brand rewriting in the `antigravity
 - **Plugin Architecture**: Implement dynamic C-shared plugin matching CLIProxyAPI v7 ABI specifications.
 - **Data-Driven Tool Cloaking**: Default cloak tables maintain client-specific maps (`claude_code`, `codex`, `oh_my_pi`).
 - **SSE Stream Reassembly**: Interceptor buffers incomplete SSE chunks across `\n\n` delimiters, ensuring regex replacement runs only on full JSON tokens.
-- **Ratio-Ranked Client Classification**: `detectCloakedClient` calculates `hits / total_targets` and ranks candidates; if a clear winner exists (> runner-up), it resolves to that client; if candidates tie at 100% (native Antigravity superset), cloaking is skipped.
+- **Ratio-Ranked Client Classification**: `detectCloakedClient` qualifies candidates whose target coverage reaches 80% of their cloak table, ranks them by exact ratio (ties broken by hit count, then client id) and returns the winner. Candidates tying at 100% (native Antigravity superset) are indistinguishable, so cloaking is skipped. For original-name detection, clients whose source names are common words (e.g. Oh My Pi's `read`/`bash`) require a distinctive harness tool (`hub`, `task`, `todo`, `eval`, `web_search`) or at least 4 simultaneous matches before they qualify; overall detection also demands >= 2 matching tool names.
 - **Keyword Preset Expansion**: Expand built-in rewrite table to include 50+ mainstream AI coding tools, agents, and Oh My Pi aliases (`Oh My Pi`, `oh-my-pi`, `omp`).
 - **Dependency Alignment**: Pin CLIProxyAPI dependency to v7.2.143 on Go 1.26.
 
 ## Testing Decisions
 
 - **Black-Box RPC Emulation**: Test request interception (`request.intercept_before`), response interception (`response.intercept_after`), and stream chunk interception (`response.stream_chunk`) via high-level `handlePluginCall` envelopes.
-- **Format Matrix**: Test across both OpenAI (`chat-completions` / `responses`) and Anthropic payload structures.
+- **Format Matrix**: Test across both OpenAI (`chat-completions` / `responses`) and Anthropic payload structures, including Anthropic content_block SSE streams split mid tool name across TCP chunks.
+- **MCP Pass-Through**: Assert `mcp__*` tool names survive request cloaking and response/stream uncloaking untouched in both directions.
 - **Multi-Client Collision Matrix**: Test client detection with pure, mixed, and superset tool collections to ensure unambiguous identification.
 - **Streaming Split-Chunk Simulation**: Test chunk boundaries split mid-word (e.g. `run_` + `command`) with SSE reassembly buffer verification.
 
