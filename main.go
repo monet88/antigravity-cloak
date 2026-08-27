@@ -301,8 +301,14 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		debugLog("handleRequestInterceptBefore: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(pluginapi.RequestInterceptResponse{})
 	}
-	body, rewritten := rewriteRequestBody(req.Body, format)
-	debugLog("handleRequestInterceptBefore: rewritten=%t Body=%s", rewritten, string(body))
+	body, rewritten, client := rewriteRequestBodyWithClient(req.Body, format)
+	debugLog("handleRequestInterceptBefore: rewritten=%t client=%s Body=%s", rewritten, client, string(body))
+	if client != "" && req.RequestID != "" {
+		cached := activeFilterConfig().uncloakRegexCache[client]
+		if cached != nil && cached.re != nil {
+			globalStreamManager.resetSession("req:"+req.RequestID, client, cached)
+		}
+	}
 	if !rewritten {
 		return mustEnvelope(pluginapi.RequestInterceptResponse{})
 	}
@@ -321,7 +327,15 @@ func handleResponseIntercept(request []byte) []byte {
 		debugLog("handleResponseIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
-	uncloakTable, _ := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+	var uncloakTable map[string]string
+	if req.RequestID != "" {
+		if client := globalStreamManager.getClient("req:" + req.RequestID); client != "" {
+			uncloakTable = effectiveUncloakTable(client)
+		}
+	}
+	if uncloakTable == nil {
+		uncloakTable, _ = buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+	}
 	debugLog("handleResponseIntercept: uncloakTable=%v", uncloakTable)
 	if uncloakTable == nil {
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
@@ -581,6 +595,15 @@ func (m *streamSessionManager) ensureSession(key, client string, cached *cachedU
 	return sess
 }
 
+func (m *streamSessionManager) getClient(key string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sess := m.sessions[key]; sess != nil {
+		return sess.client
+	}
+	return ""
+}
+
 func (m *streamSessionManager) deleteSession(key string) {
 	if key == "" {
 		return
@@ -609,6 +632,11 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		// Without a correlation key the future payload chunks cannot be
 		// attributed back to this session — detection would be wasted work.
 		if key == "" {
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
+		// If session was already pre-registered by request intercept, keep it.
+		if sessClient := m.getClient(key); sessClient != "" {
+			debugLog("StreamSessionManager: header-init using pre-registered session key=%s client=%s", key, sessClient)
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
 		_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
@@ -659,27 +687,42 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		combined = req.Body
 	}
 
-	completeEvents, incompleteTail := splitSSEEvents(combined)
-	sess.tail = incompleteTail
+	// Check if this is an SSE-formatted stream vs individual JSON chunk payload
+	trimmed := bytes.TrimSpace(combined)
+	if bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) || bytes.Contains(combined, []byte("\n\n")) || bytes.Contains(combined, []byte("\r\n\r\n")) {
+		completeEvents, incompleteTail := splitSSEEvents(combined)
+		sess.tail = incompleteTail
+		sess.updatedAt = time.Now()
+		m.mu.Unlock()
+
+		if len(completeEvents) == 0 {
+			debugLog("StreamSessionManager: no complete events, dropping chunk len=%d", len(incompleteTail))
+			return pluginapi.StreamChunkInterceptResponse{DropChunk: true}
+		}
+
+		modified, changed := uncloakStreamChunk(completeEvents, cached)
+		if !changed {
+			modified = completeEvents
+		}
+
+		// Cleanup session if stream reached [DONE]
+		if bytes.Contains(completeEvents, []byte("data: [DONE]")) {
+			m.deleteSession(key)
+		}
+
+		if bytes.Equal(modified, req.Body) {
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
+		return pluginapi.StreamChunkInterceptResponse{Body: modified}
+	}
+
+	// Standalone JSON chunk payload (e.g. CLIProxyAPI OpenAI protocol chunk)
+	sess.tail = nil
 	sess.updatedAt = time.Now()
 	m.mu.Unlock()
 
-	if len(completeEvents) == 0 {
-		debugLog("StreamSessionManager: no complete events, dropping chunk len=%d", len(incompleteTail))
-		return pluginapi.StreamChunkInterceptResponse{DropChunk: true}
-	}
-
-	modified, changed := uncloakStreamChunk(completeEvents, cached)
+	modified, changed := uncloakStreamChunk(req.Body, cached)
 	if !changed {
-		modified = completeEvents
-	}
-
-	// Cleanup session if stream reached [DONE]
-	if bytes.Contains(completeEvents, []byte("data: [DONE]")) {
-		m.deleteSession(key)
-	}
-
-	if bytes.Equal(modified, req.Body) {
 		return pluginapi.StreamChunkInterceptResponse{}
 	}
 	return pluginapi.StreamChunkInterceptResponse{Body: modified}
@@ -1387,14 +1430,19 @@ func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
 }
 
 func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
+	raw, changed, _ := rewriteRequestBodyWithClient(body, sourceFormat)
+	return raw, changed
+}
+
+func rewriteRequestBodyWithClient(body []byte, sourceFormat string) ([]byte, bool, string) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {
-		return nil, false
+		return nil, false, ""
 	}
 
 	rootMap, ok := root.(map[string]any)
 	if !ok {
-		return nil, false
+		return nil, false, ""
 	}
 
 	changed := false
@@ -1428,13 +1476,13 @@ func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
 	changed = changed || sysMsgChanged
 
 	if !changed {
-		return nil, false
+		return nil, false, client
 	}
 	raw, err := safeMarshal(rootMap)
 	if err != nil {
-		return nil, false
+		return nil, false, client
 	}
-	return raw, true
+	return raw, true, client
 }
 
 func effectiveCloakTable(client string) map[string]string {
@@ -2026,35 +2074,41 @@ func detectClient(toolNames []string) string {
 // cloakTargetMatch records how many of one client's cloak targets appear in
 // an observed tool-name set.
 type cloakTargetMatch struct {
-	client string
-	hits   int
-	total  int
+	client    string
+	hits      int
+	observed  int
+	tableSize int
 }
 
-// higherRatioThan orders two matches by hit ratio (m > o), using exact integer
+// higherRatioThan orders two matches by hit ratio over observed tools (m > o), using exact integer
 // arithmetic. Equal ratios must be broken by the caller.
 func (m cloakTargetMatch) higherRatioThan(o cloakTargetMatch) bool {
-	return m.hits*o.total > o.hits*m.total
+	return m.hits*o.observed > o.hits*m.observed
 }
 
-// atFullCoverage reports whether every one of the client's cloak targets matched.
+// atFullCoverage reports whether every one of the client's table targets matched.
 func (m cloakTargetMatch) atFullCoverage() bool {
-	return m.hits == m.total
+	return m.hits == m.tableSize
 }
 
 // detectCloakedClient identifies which client's cloaking was applied by
 // checking cloak TARGET names against the provided tool names.
-// A candidate qualifies when most of its targets are present
-// (>= minCloakTargetHitNum/minCloakTargetHitDen); the best-qualified candidate
-// wins. When candidates tie at 100% (native Antigravity serving every table),
+// A candidate qualifies when at least minToolNameHits (2) tools match AND
+// it accounts for most of the observed tools (hits/observed >= 80%) OR
+// most of its own table (hits/tableSize >= 80%).
+// When candidates tie at 100% (native Antigravity serving every table),
 // no client can be distinguished and cloaking is skipped.
 func detectCloakedClient(toolNames []string) string {
+	if len(toolNames) < 3 {
+		return ""
+	}
 	cfg := activeFilterConfig()
 	nameSet := make(map[string]bool, len(toolNames))
 	for _, n := range toolNames {
 		nameSet[n] = true
 	}
 
+	totalObserved := len(nameSet)
 	var matches []cloakTargetMatch
 	for client, cloakTable := range cfg.ToolMappings {
 		if len(cloakTable) == 0 {
@@ -2066,23 +2120,37 @@ func detectCloakedClient(toolNames []string) string {
 				hits++
 			}
 		}
-		if hits*minCloakTargetHitDen >= len(cloakTable)*minCloakTargetHitNum {
+		if hits >= 3 && (hits*minCloakTargetHitDen >= totalObserved*minCloakTargetHitNum || hits*minCloakTargetHitDen >= len(cloakTable)*minCloakTargetHitNum) {
 			matches = append(matches, cloakTargetMatch{
-				client: client,
-				hits:   hits,
-				total:  len(cloakTable),
+				client:    client,
+				hits:      hits,
+				observed:  totalObserved,
+				tableSize: len(cloakTable),
 			})
 		}
 	}
 
-	switch len(matches) {
-	case 0:
+	if len(matches) == 0 {
 		return ""
-	case 1:
+	}
+
+	// Native Antigravity superset check: if multiple distinct clients see 100% of their table
+	// matched, this is native traffic serving every tool table, so cloaking is skipped.
+	fullCoverageCount := 0
+	for _, m := range matches {
+		if m.atFullCoverage() {
+			fullCoverageCount++
+		}
+	}
+	if fullCoverageCount >= 2 {
+		return ""
+	}
+
+	if len(matches) == 1 {
 		return matches[0].client
 	}
 
-	// Multiple qualifying clients: rank by target-hit ratio, breaking exact
+	// Multiple qualifying clients: rank by target-hit ratio over observed, breaking exact
 	// ties deterministically by absolute hit count and finally by client id,
 	// so repeated detections against identical input agree.
 	sort.Slice(matches, func(i, j int) bool {
@@ -2100,8 +2168,10 @@ func detectCloakedClient(toolNames []string) string {
 	if top.higherRatioThan(runnerUp) {
 		return top.client
 	}
-	// Full-coverage tie: every qualified client sees all its cloak targets in
-	// the names — indistinguishable native Antigravity traffic — so skip.
+	if top.hits > runnerUp.hits {
+		return top.client
+	}
+	// Full-coverage tie
 	if top.atFullCoverage() && runnerUp.atFullCoverage() {
 		return ""
 	}

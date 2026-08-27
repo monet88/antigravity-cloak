@@ -1751,3 +1751,84 @@ func TestStreamSessionManagerCleanupStaleSessions(t *testing.T) {
 		t.Fatalf("expected stale session to be pruned by processChunk")
 	}
 }
+
+func TestDetectCloakedClientOhMyPiStandardNineTools(t *testing.T) {
+	// Standard default 9 tools sent by Oh My Pi after cloaking
+	ompCloakedTools := []string{
+		"view_file", "write_to_file", "replace_file_content",
+		"run_command", "grep_search", "list_dir",
+		"invoke_subagent", "ask_question", "manage_task",
+	}
+	got := detectCloakedClient(ompCloakedTools)
+	if got != "oh_my_pi" {
+		t.Fatalf("detectCloakedClient(ompCloakedTools) = %q, want 'oh_my_pi'", got)
+	}
+}
+
+func TestHandleRequestAndStreamUncloakRoundTripOhMyPi(t *testing.T) {
+	const reqID = "omp-roundtrip-test-1"
+	reqPayload := `{"model":"agy/gemini-3.7-flash","stream":true,"messages":[{"role":"user","content":"test"}],"tools":[{"type":"function","function":{"name":"bash","description":"run bash"}},{"type":"function","function":{"name":"read","description":"read file"}},{"type":"function","function":{"name":"edit","description":"edit file"}},{"type":"function","function":{"name":"write","description":"write file"}},{"type":"function","function":{"name":"grep","description":"search"}},{"type":"function","function":{"name":"glob","description":"find"}},{"type":"function","function":{"name":"task","description":"subtask"}},{"type":"function","function":{"name":"ask","description":"ask"}},{"type":"function","function":{"name":"todo","description":"task"}}],"stream":true}`
+
+	reqJSON, _ := json.Marshal(pluginapi.RequestInterceptRequest{
+		RequestID:      reqID,
+		SourceFormat:   "openai",
+		Model:          "agy/gemini-3.7-flash",
+		RequestedModel: "agy/gemini-3.7-flash",
+		Body:           []byte(reqPayload),
+	})
+
+	// 1. Request Intercept Before
+	respEnv := handleRequestInterceptBefore(reqJSON)
+	var reqEnv struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body []byte `json:"Body"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(respEnv, &reqEnv); err != nil {
+		t.Fatalf("unmarshal request resp: %v", err)
+	}
+	if !strings.Contains(string(reqEnv.Result.Body), "run_command") {
+		t.Fatalf("expected request tools cloaked to run_command: %s", string(reqEnv.Result.Body))
+	}
+
+	// 2. Stream Header Init (ChunkIndex = -1)
+	initJSON, _ := json.Marshal(pluginapi.StreamChunkInterceptRequest{
+		RequestID:       reqID,
+		SourceFormat:    "openai",
+		Model:           "agy/gemini-3.7-flash",
+		RequestedModel:  "agy/gemini-3.7-flash",
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+		OriginalRequest: reqEnv.Result.Body,
+		RequestBody:     reqEnv.Result.Body,
+	})
+	handleStreamChunkIntercept(initJSON)
+
+	// 3. Stream Payload Chunk with tool_call "run_command"
+	payloadChunk := "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"run_command\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]}}]}\n\n"
+	chunkJSON, _ := json.Marshal(pluginapi.StreamChunkInterceptRequest{
+		RequestID:      reqID,
+		SourceFormat:   "openai",
+		Model:          "agy/gemini-3.7-flash",
+		RequestedModel: "agy/gemini-3.7-flash",
+		ChunkIndex:     0,
+		Body:           []byte(payloadChunk),
+	})
+	streamEnv := handleStreamChunkIntercept(chunkJSON)
+	var streamEnvResp struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body []byte `json:"Body"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(streamEnv, &streamEnvResp); err != nil {
+		t.Fatalf("unmarshal stream chunk resp: %v", err)
+	}
+	streamOut := string(streamEnvResp.Result.Body)
+	if strings.Contains(streamOut, "run_command") {
+		t.Fatalf("run_command leaked through stream without uncloaking: %s", streamOut)
+	}
+	if !strings.Contains(streamOut, `"name":"bash"`) && !strings.Contains(streamOut, `"name": "bash"`) {
+		t.Fatalf("expected run_command uncloaked to bash: %s", streamOut)
+	}
+}
