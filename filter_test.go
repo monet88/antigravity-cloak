@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -1545,4 +1546,89 @@ func TestAtomicFilterConfigConcurrentSafety(t *testing.T) {
 	close(stop)
 	wg.Wait()
 	restoreDefaultFilterConfig(t)
+}
+
+func TestEffectiveMappingsCustomOverride(t *testing.T) {
+	cfg := filterConfig{
+		UseDefaultKeywords: true,
+		CustomMappings: []rewriteMapping{
+			{Match: "Codex", Replacement: "MyBrand"},
+		},
+		ToolMappings: copyToolMappings(defaultCloakTables),
+	}
+	applyFilterConfig(cfg)
+	defer restoreDefaultFilterConfig(t)
+
+	body := []byte(`{"system":"This is Codex testing"}`)
+	rewritten, changed := rewriteRequestBody(body, "openai")
+	if !changed {
+		t.Fatalf("expected changed = true")
+	}
+	if strings.Contains(string(rewritten), "Antigravity") {
+		t.Fatalf("expected custom mapping MyBrand to override Antigravity, got: %s", string(rewritten))
+	}
+	if !strings.Contains(string(rewritten), "MyBrand") {
+		t.Fatalf("expected MyBrand in rewritten body, got: %s", string(rewritten))
+	}
+}
+
+func TestStreamSessionManagerNoRequestIDSchemaV3(t *testing.T) {
+	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`
+	// Header-init without RequestID (ChunkIndex == -1)
+	initReq := &pluginapi.StreamChunkInterceptRequest{
+		RequestID:       "",
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(reqBody),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}
+	globalStreamManager.processChunk(initReq, "openai")
+
+	// Payload chunk without RequestID and without OriginalRequest/RequestBody (as in schema_version >= 3)
+	payloadChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
+	chunkReq := &pluginapi.StreamChunkInterceptRequest{
+		RequestID:    "",
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte(payloadChunk),
+	}
+	resp, handled := globalStreamManager.processChunk(chunkReq, "openai")
+	if !handled {
+		t.Fatalf("expected chunk to be handled and uncloaked")
+	}
+	if !strings.Contains(string(resp.Body), "Bash") {
+		t.Fatalf("expected payload chunk to be uncloaked to Bash, got: %s", string(resp.Body))
+	}
+}
+
+func TestStreamSessionManagerCleanupStaleSessionsAndLegacyBufs(t *testing.T) {
+	// Add an abandoned session and a legacy buffer with a stale timestamp (>5 mins ago)
+	staleTime := time.Now().Add(-10 * time.Minute)
+	globalStreamManager.mu.Lock()
+	globalStreamManager.sessions["req:stale-stream"] = &streamSession{
+		client:    "claude_code",
+		updatedAt: staleTime,
+	}
+	globalStreamManager.legacyBufs[999] = &legacyBufEntry{
+		data:      []byte("old tail"),
+		updatedAt: staleTime,
+	}
+	globalStreamManager.mu.Unlock()
+
+	// Trigger opportunistic cleanup via processChunk on any chunk
+	dummyReq := &pluginapi.StreamChunkInterceptRequest{
+		RequestID:    "req:active-stream",
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte("data: {}\n\n"),
+	}
+	globalStreamManager.processChunk(dummyReq, "openai")
+
+	globalStreamManager.mu.Lock()
+	defer globalStreamManager.mu.Unlock()
+	if _, exists := globalStreamManager.sessions["req:stale-stream"]; exists {
+		t.Fatalf("expected stale session to be pruned by processChunk")
+	}
+	if _, exists := globalStreamManager.legacyBufs[999]; exists {
+		t.Fatalf("expected stale legacy buffer to be pruned by processChunk")
+	}
 }

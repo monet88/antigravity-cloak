@@ -491,10 +491,16 @@ type streamSession struct {
 	updatedAt time.Time
 }
 
+type legacyBufEntry struct {
+	data      []byte
+	updatedAt time.Time
+}
+
 type streamSessionManager struct {
-	mu         sync.Mutex
-	sessions   map[string]*streamSession
-	legacyBufs map[uint64][]byte
+	mu               sync.Mutex
+	sessions         map[string]*streamSession
+	anonymousSession *streamSession
+	legacyBufs       map[uint64]*legacyBufEntry
 }
 
 var globalStreamManager = newStreamSessionManager()
@@ -502,7 +508,7 @@ var globalStreamManager = newStreamSessionManager()
 func newStreamSessionManager() *streamSessionManager {
 	return &streamSessionManager{
 		sessions:   make(map[string]*streamSession),
-		legacyBufs: make(map[uint64][]byte),
+		legacyBufs: make(map[uint64]*legacyBufEntry),
 	}
 }
 
@@ -510,30 +516,67 @@ func (m *streamSessionManager) sessionKey(req *pluginapi.StreamChunkInterceptReq
 	if req.RequestID != "" {
 		return "req:" + req.RequestID
 	}
-	src := req.OriginalRequest
-	if len(src) == 0 {
-		src = req.RequestBody
+	if req.Metadata != nil {
+		for _, k := range []string{"request_id", "stream_id", "session_id", "trace_id", "id"} {
+			if v, ok := req.Metadata[k].(string); ok && v != "" {
+				return "meta:" + k + ":" + v
+			}
+		}
 	}
-	h := fnv.New64a()
-	_, _ = h.Write(src)
-	return fmt.Sprintf("fnv:%x", h.Sum64())
+	if req.RequestHeaders != nil {
+		for _, h := range []string{"X-Request-Id", "X-Correlation-Id", "X-Amzn-Trace-Id"} {
+			if v := req.RequestHeaders.Get(h); v != "" {
+				return "req_hdr:" + h + ":" + v
+			}
+		}
+	}
+	if req.ResponseHeaders != nil {
+		for _, h := range []string{"X-Request-Id", "X-Correlation-Id"} {
+			if v := req.ResponseHeaders.Get(h); v != "" {
+				return "resp_hdr:" + h + ":" + v
+			}
+		}
+	}
+	// For legacy chunks (schema < 3, ChunkIndex >= 0) where OriginalRequest/RequestBody
+	// is populated on every chunk, use the FNV hash of the request body as session key.
+	if req.ChunkIndex >= 0 {
+		src := req.OriginalRequest
+		if len(src) == 0 {
+			src = req.RequestBody
+		}
+		if len(src) > 0 {
+			h := fnv.New64a()
+			_, _ = h.Write(src)
+			return fmt.Sprintf("fnv:%x", h.Sum64())
+		}
+	}
+	return ""
 }
 
 func (m *streamSessionManager) initSession(key, client string, cached *cachedUncloakPattern) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cleanupStaleLocked()
-	m.sessions[key] = &streamSession{
+	sess := &streamSession{
 		client:    client,
 		cached:    cached,
 		updatedAt: time.Now(),
+	}
+	if key != "" {
+		m.sessions[key] = sess
+	} else {
+		m.anonymousSession = sess
 	}
 }
 
 func (m *streamSessionManager) deleteSession(key string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.sessions, key)
+	if key != "" {
+		delete(m.sessions, key)
+	} else {
+		m.anonymousSession = nil
+	}
 }
 
 func (m *streamSessionManager) cleanupStaleLocked() {
@@ -541,6 +584,14 @@ func (m *streamSessionManager) cleanupStaleLocked() {
 	for k, s := range m.sessions {
 		if s.updatedAt.Before(cutoff) {
 			delete(m.sessions, k)
+		}
+	}
+	if m.anonymousSession != nil && m.anonymousSession.updatedAt.Before(cutoff) {
+		m.anonymousSession = nil
+	}
+	for k, b := range m.legacyBufs {
+		if b.updatedAt.Before(cutoff) {
+			delete(m.legacyBufs, k)
 		}
 	}
 }
@@ -563,7 +614,15 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 	}
 
 	m.mu.Lock()
-	sess := m.sessions[key]
+	m.cleanupStaleLocked()
+
+	var sess *streamSession
+	if key != "" {
+		sess = m.sessions[key]
+	} else {
+		sess = m.anonymousSession
+	}
+
 	if sess == nil {
 		// Fallback for tests or schema_version < 3 where ChunkIndex >= 0 carries OriginalRequest/RequestBody
 		src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
@@ -578,7 +637,11 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 						cached:    cached,
 						updatedAt: time.Now(),
 					}
-					m.sessions[key] = sess
+					if key != "" {
+						m.sessions[key] = sess
+					} else {
+						m.anonymousSession = sess
+					}
 				}
 			}
 		}
@@ -645,21 +708,27 @@ func resetStreamBuffer(key uint64) {
 	defer globalStreamManager.mu.Unlock()
 	delete(globalStreamManager.legacyBufs, key)
 }
-
 func popStreamBuffer(key uint64) []byte {
 	globalStreamManager.mu.Lock()
 	defer globalStreamManager.mu.Unlock()
-	data := globalStreamManager.legacyBufs[key]
+	entry := globalStreamManager.legacyBufs[key]
+	if entry == nil {
+		return nil
+	}
 	delete(globalStreamManager.legacyBufs, key)
-	return data
+	return entry.data
 }
 
 func pushStreamBuffer(key uint64, data []byte) {
 	globalStreamManager.mu.Lock()
 	defer globalStreamManager.mu.Unlock()
+	globalStreamManager.cleanupStaleLocked()
 	buf := make([]byte, len(data))
 	copy(buf, data)
-	globalStreamManager.legacyBufs[key] = buf
+	globalStreamManager.legacyBufs[key] = &legacyBufEntry{
+		data:      buf,
+		updatedAt: time.Now(),
+	}
 }
 
 // splitSSEEvents splits combined bytes into complete SSE events and an
@@ -1283,7 +1352,7 @@ func effectiveMappings(cfg *filterConfig) []rewriteMapping {
 	if len(cfg.CustomMappings) > 0 {
 		mappings = append(mappings, cfg.CustomMappings...)
 	}
-	return mappings
+	return normalizeMappings(mappings)
 }
 
 func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
