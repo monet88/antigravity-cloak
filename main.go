@@ -44,6 +44,7 @@ import (
 	"hash/fnv"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"unsafe"
@@ -91,7 +92,7 @@ const abiVersion = 1
 
 const (
 	pluginName       = "antigravity-cloak"
-	pluginVersion    = "0.2.0"
+	pluginVersion    = "0.3.0"
 	pluginRepository = "https://github.com/monet88/antigravity-cloak"
 )
 
@@ -224,7 +225,7 @@ func configFields() []pluginapi.ConfigField {
 		{
 			Name:        "use_default_keywords",
 			Type:        pluginapi.ConfigFieldTypeBoolean,
-			Description: "Enable the built-in rewrite mapping preset: OpenCode, Codex, Claude Code -> Antigravity.",
+			Description: "Enable the built-in coding software and agent keyword preset.",
 		},
 		{
 			Name:        "custom_mappings",
@@ -234,7 +235,7 @@ func configFields() []pluginapi.ConfigField {
 		{
 			Name:        "tool_mappings",
 			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Custom tool name mappings per client. Keys: client name (claude_code, codex). Values: map of original_tool_name → antigravity_target_name. Overrides defaults for matching keys.",
+			Description: "Custom tool name mappings per client. Keys: client name (claude_code, codex, oh_my_pi). Values: map of original_tool_name → antigravity_target_name. Overrides defaults for matching keys.",
 		},
 		{
 			Name:        "model_prefixes",
@@ -742,9 +743,69 @@ func safeMarshal(v any) ([]byte, error) {
 }
 
 var defaultRewriteMappings = []rewriteMapping{
-	{Match: "opencode", Replacement: "Antigravity"},
-	{Match: "codex", Replacement: "Antigravity"},
-	{Match: "claude code", Replacement: "Antigravity"},
+	// Major AI code editors, assistants, and terminal coding agents.
+	{Match: "Claude Code", Replacement: "Antigravity"},
+	{Match: "OpenAI Codex", Replacement: "Antigravity"},
+	{Match: "Codex CLI", Replacement: "Antigravity"},
+	{Match: "Codex", Replacement: "Antigravity"},
+	{Match: "OpenCode", Replacement: "Antigravity"},
+	{Match: "GitHub Copilot CLI", Replacement: "Antigravity"},
+	{Match: "GitHub Copilot", Replacement: "Antigravity"},
+	{Match: "Gemini Code Assist", Replacement: "Antigravity"},
+	{Match: "Gemini CLI", Replacement: "Antigravity"},
+	{Match: "Cursor", Replacement: "Antigravity"},
+	{Match: "Windsurf", Replacement: "Antigravity"},
+	{Match: "Codeium", Replacement: "Antigravity"},
+	{Match: "Cline", Replacement: "Antigravity"},
+	{Match: "Roo Code", Replacement: "Antigravity"},
+	{Match: "Kilo Code", Replacement: "Antigravity"},
+	{Match: "Aider", Replacement: "Antigravity"},
+	{Match: "Continue.dev", Replacement: "Antigravity"},
+	{Match: "Amazon Q Developer", Replacement: "Antigravity"},
+	{Match: "Amazon CodeWhisperer", Replacement: "Antigravity"},
+	{Match: "JetBrains AI Assistant", Replacement: "Antigravity"},
+	{Match: "JetBrains Junie", Replacement: "Antigravity"},
+	{Match: "Kiro", Replacement: "Antigravity"},
+	{Match: "Qoder CLI", Replacement: "Antigravity"},
+	{Match: "Qoder", Replacement: "Antigravity"},
+	{Match: "Qwen Code", Replacement: "Antigravity"},
+	{Match: "Trae", Replacement: "Antigravity"},
+	{Match: "Tabnine", Replacement: "Antigravity"},
+	{Match: "Sourcegraph Cody", Replacement: "Antigravity"},
+	{Match: "Augment Code", Replacement: "Antigravity"},
+	{Match: "Replit Agent", Replacement: "Antigravity"},
+	{Match: "Replit Ghostwriter", Replacement: "Antigravity"},
+	{Match: "Devin", Replacement: "Antigravity"},
+	{Match: "OpenHands", Replacement: "Antigravity"},
+	{Match: "SWE-agent", Replacement: "Antigravity"},
+	{Match: "Goose", Replacement: "Antigravity"},
+	{Match: "Zed AI", Replacement: "Antigravity"},
+	{Match: "Void Editor", Replacement: "Antigravity"},
+	{Match: "PearAI", Replacement: "Antigravity"},
+	{Match: "Refact.ai", Replacement: "Antigravity"},
+	{Match: "Tabby", Replacement: "Antigravity"},
+	{Match: "GitLab Duo", Replacement: "Antigravity"},
+	{Match: "Visual Studio IntelliCode", Replacement: "Antigravity"},
+	{Match: "CodeBuddy", Replacement: "Antigravity"},
+	{Match: "Blackbox AI", Replacement: "Antigravity"},
+	{Match: "Pieces for Developers", Replacement: "Antigravity"},
+	{Match: "Qodo", Replacement: "Antigravity"},
+	{Match: "CodiumAI", Replacement: "Antigravity"},
+	{Match: "Rovo Dev CLI", Replacement: "Antigravity"},
+	{Match: "Factory Droid", Replacement: "Antigravity"},
+
+	// Oh My Pi coding agent & harness.
+	{Match: "Oh My Pi", Replacement: "Antigravity"},
+	{Match: "oh-my-pi", Replacement: "Antigravity"},
+	{Match: "omp", Replacement: "Antigravity"},
+
+	// General-purpose local agents that can generate and modify code.
+	{Match: "OpenClaw", Replacement: "Antigravity"},
+	{Match: "Clawdbot", Replacement: "Antigravity"},
+	{Match: "Moltbot", Replacement: "Antigravity"},
+	{Match: "Hermes Agent", Replacement: "Antigravity"},
+	{Match: "Hermes", Replacement: "Antigravity"},
+	{Match: "WorkBuddy", Replacement: "Antigravity"},
 }
 
 type rewriteMapping struct {
@@ -769,6 +830,20 @@ var defaultCloakTables = map[string]map[string]string{
 		"list_mcp_resources":          "list_resources",
 		"list_mcp_resource_templates": "list_permissions",
 		"read_mcp_resource":           "read_resource",
+	},
+	"oh_my_pi": {
+		"read":       "view_file",
+		"write":      "write_to_file",
+		"edit":       "replace_file_content",
+		"bash":       "run_command",
+		"grep":       "grep_search",
+		"glob":       "list_dir",
+		"task":       "invoke_subagent",
+		"ask":        "ask_question",
+		"todo":       "manage_task",
+		"hub":        "send_message",
+		"web_search": "search_web",
+		"eval":       "execute_code",
 	},
 }
 
@@ -1054,6 +1129,9 @@ func parseToolMappings(value any) (map[string]map[string]string, error) {
 		// Merge rather than overwrite so multiple case variants of the same
 		// client (e.g. "Claude_Code" and "claude_code") combine deterministically.
 		normalized := strings.ToLower(client)
+		if normalized == "omp" || normalized == "oh-my-pi" {
+			normalized = "oh_my_pi"
+		}
 		if result[normalized] == nil {
 			result[normalized] = clientMap
 			continue
@@ -1781,6 +1859,8 @@ func detectCloakedClient(toolNames []string) string {
 	type clientMatch struct {
 		client string
 		hits   int
+		total  int
+		ratio  float64
 	}
 	var matches []clientMatch
 	for client, cloakTable := range cfg.ToolMappings {
@@ -1795,13 +1875,34 @@ func detectCloakedClient(toolNames []string) string {
 		}
 		// 80% threshold: most of the client's cloak targets are present
 		if hits*5 >= len(cloakTable)*4 {
-			matches = append(matches, clientMatch{client, hits})
+			matches = append(matches, clientMatch{
+				client: client,
+				hits:   hits,
+				total:  len(cloakTable),
+				ratio:  float64(hits) / float64(len(cloakTable)),
+			})
 		}
 	}
 
-	// Exactly one client's cloak targets match → that client was cloaked
-	// Multiple matches → likely native Antigravity (superset of all cloak targets)
+	if len(matches) == 0 {
+		return ""
+	}
 	if len(matches) == 1 {
+		return matches[0].client
+	}
+
+	// Multiple matches: sort by highest match ratio, then most hits.
+	// If the top candidate has a strictly higher match ratio than the runner-up,
+	// it is the cloaked client. If there is a tie at the top (e.g. native Antigravity
+	// having all tools for all clients), return "" (no cloaking applied).
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].ratio == matches[j].ratio {
+			return matches[i].hits > matches[j].hits
+		}
+		return matches[i].ratio > matches[j].ratio
+	})
+
+	if matches[0].ratio > matches[1].ratio {
 		return matches[0].client
 	}
 	return ""

@@ -1119,3 +1119,237 @@ func TestParseFilterConfigYAMLModelPrefixes(t *testing.T) {
 		t.Fatalf("ModelPrefixes = %v, want [agy/ antigravity/]", cfg.ModelPrefixes)
 	}
 }
+
+func TestBuiltInKeywordPresetCoversMainstreamCodingToolsAndAgents(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	applyFilterConfig(defaultFilterConfig())
+
+	for _, mapping := range defaultRewriteMappings {
+		keyword := mapping.Match
+		t.Run(keyword, func(t *testing.T) {
+			body := `{"system":"You are running with ` + keyword + ` in this environment."}`
+			got, rewritten := rewriteRequestBody([]byte(body), "openai")
+			if !rewritten {
+				t.Fatalf("keyword %q was not rewritten", keyword)
+			}
+			if strings.Contains(strings.ToLower(string(got)), strings.ToLower(keyword)) && strings.ToLower(keyword) != "antigravity" {
+				t.Fatalf("keyword %q still present in output: %s", keyword, got)
+			}
+			if !strings.Contains(string(got), "Antigravity") {
+				t.Fatalf("replacement Antigravity missing for keyword %q: %s", keyword, got)
+			}
+		})
+	}
+}
+
+func TestRewriteRequestBodyCloaksOhMyPiTools(t *testing.T) {
+	// OpenAI format with Oh My Pi tools
+	body := `{
+		"system":"Helpful, trusted assistant for load-bearing changes in Oh My Pi coding harness.",
+		"tools":[
+			{"type":"function","function":{"name":"read","description":"Read files, directories, and web URLs"}},
+			{"type":"function","function":{"name":"write","description":"Creates or overwrites file at specified path"}},
+			{"type":"function","function":{"name":"edit","description":"Line-anchored patch language"}},
+			{"type":"function","function":{"name":"bash","description":"Runs commands in persistent shell"}},
+			{"type":"function","function":{"name":"grep","description":"Searches files with regex"}},
+			{"type":"function","function":{"name":"glob","description":"Globs files and directories"}},
+			{"type":"function","function":{"name":"task","description":"Delegate work to subagents"}},
+			{"type":"function","function":{"name":"ask","description":"Ask user for clarification"}},
+			{"type":"function","function":{"name":"todo","description":"Manage tasks"}},
+			{"type":"function","function":{"name":"hub","description":"Agent coordination and messaging"}},
+			{"type":"function","function":{"name":"eval","description":"Run code in persistent kernel"}},
+			{"type":"function","function":{"name":"web_search","description":"Web search beyond knowledge cutoff"}}
+		],
+		"messages":[
+			{"role":"system","content":"Use bash for short pipelines and read for files."},
+			{"role":"user","content":"inspect the repo"},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"main.go\"}"}}]},
+			{"role":"tool","name":"read","content":"package main\n"}
+		],
+		"tool_choice":{"type":"function","function":{"name":"bash"}}
+	}`
+	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	if !rewritten {
+		t.Fatal("want rewritten = true for Oh My Pi request")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(got, &parsed); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	// Assert system prompt rewritten
+	sys := parsed["system"].(string)
+	if !strings.Contains(sys, "Antigravity") || strings.Contains(sys, "Oh My Pi") {
+		t.Errorf("system prompt = %q, want 'Oh My Pi' replaced with 'Antigravity'", sys)
+	}
+
+	// Assert tools cloaked
+	toolsRaw := parsed["tools"].([]any)
+	expectedMap := map[string]string{
+		"read":       "view_file",
+		"write":      "write_to_file",
+		"edit":       "replace_file_content",
+		"bash":       "run_command",
+		"grep":       "grep_search",
+		"glob":       "list_dir",
+		"task":       "invoke_subagent",
+		"ask":        "ask_question",
+		"todo":       "manage_task",
+		"hub":        "send_message",
+		"eval":       "execute_code",
+		"web_search": "search_web",
+	}
+	for i, tr := range toolsRaw {
+		fn := tr.(map[string]any)["function"].(map[string]any)
+		origName := []string{"read", "write", "edit", "bash", "grep", "glob", "task", "ask", "todo", "hub", "eval", "web_search"}[i]
+		wantCloaked := expectedMap[origName]
+		if fn["name"] != wantCloaked {
+			t.Errorf("tools[%d] name = %q, want %q", i, fn["name"], wantCloaked)
+		}
+	}
+
+	// Assert tool_choice cloaked
+	tc := parsed["tool_choice"].(map[string]any)["function"].(map[string]any)
+	if tc["name"] != "run_command" {
+		t.Errorf("tool_choice name = %q, want run_command", tc["name"])
+	}
+
+	// Assert messages tool_calls and tool role cloaked
+	msgs := parsed["messages"].([]any)
+	// Assistant message tool_calls
+	asstMsg := msgs[2].(map[string]any)
+	tcs := asstMsg["tool_calls"].([]any)
+	tc0 := tcs[0].(map[string]any)["function"].(map[string]any)
+	if tc0["name"] != "view_file" {
+		t.Errorf("messages[2].tool_calls[0].name = %q, want view_file", tc0["name"])
+	}
+	// Tool response message name
+	toolMsg := msgs[3].(map[string]any)
+	if toolMsg["name"] != "view_file" {
+		t.Errorf("messages[3].name = %q, want view_file", toolMsg["name"])
+	}
+
+	// Assert system message prose cloaking: "Use bash" -> "Use run_command"
+	sysMsg := msgs[0].(map[string]any)
+	if sysContent := sysMsg["content"].(string); !strings.Contains(sysContent, "run_command") {
+		t.Errorf("messages[0].content = %q, want 'run_command'", sysContent)
+	}
+}
+
+func TestRewriteRequestBodyCloaksOhMyPiToolsAnthropicFormat(t *testing.T) {
+	body := `{
+		"system":"You are Oh My Pi.",
+		"tools":[
+			{"name":"read","description":"Read files","input_schema":{"type":"object"}},
+			{"name":"bash","description":"Run shell","input_schema":{"type":"object"}}
+		],
+		"messages":[
+			{
+				"role":"assistant",
+				"content":[{"type":"tool_use","id":"tool_1","name":"read","input":{"path":"a.go"}}]
+			}
+		]
+	}`
+	got, rewritten := rewriteRequestBody([]byte(body), "anthropic")
+	if !rewritten {
+		t.Fatal("want rewritten = true")
+	}
+	var parsed map[string]any
+	json.Unmarshal(got, &parsed)
+
+	toolsRaw := parsed["tools"].([]any)
+	t0 := toolsRaw[0].(map[string]any)
+	if t0["name"] != "view_file" {
+		t.Errorf("tools[0].name = %q, want view_file", t0["name"])
+	}
+	t1 := toolsRaw[1].(map[string]any)
+	if t1["name"] != "run_command" {
+		t.Errorf("tools[1].name = %q, want run_command", t1["name"])
+	}
+
+	msgs := parsed["messages"].([]any)
+	cnt := msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if cnt["name"] != "view_file" {
+		t.Errorf("content[0].name = %q, want view_file", cnt["name"])
+	}
+}
+
+func TestUncloakResponseBodyOhMyPi(t *testing.T) {
+	uncloakTable := defaultUncloakTables["oh_my_pi"]
+
+	// OpenAI shape
+	respOpenAI := []byte(`{
+		"choices":[{
+			"message":{
+				"role":"assistant",
+				"tool_calls":[{"id":"call_1","type":"function","function":{"name":"run_command","arguments":"{}"}}]
+			}
+		}]
+	}`)
+	out, changed := uncloakResponseBody(respOpenAI, uncloakTable, "openai")
+	if !changed {
+		t.Fatal("want changed = true")
+	}
+	if !strings.Contains(string(out), `"name":"bash"`) {
+		t.Fatalf("output does not contain uncloaked name 'bash': %s", out)
+	}
+
+	// Anthropic shape
+	respAnthropic := []byte(`{
+		"content":[{"type":"tool_use","id":"tool_1","name":"view_file","input":{}}]
+	}`)
+	outAnth, changedAnth := uncloakResponseBody(respAnthropic, uncloakTable, "anthropic")
+	if !changedAnth {
+		t.Fatal("want changedAnth = true")
+	}
+	if !strings.Contains(string(outAnth), `"name":"read"`) {
+		t.Fatalf("output does not contain uncloaked name 'read': %s", outAnth)
+	}
+}
+
+func TestUncloakStreamChunkOhMyPi(t *testing.T) {
+	cfg := defaultFilterConfig()
+	cached := cfg.uncloakRegexCache["oh_my_pi"]
+	if cached == nil {
+		t.Fatal("cached uncloak pattern for oh_my_pi is nil")
+	}
+
+	chunk := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"run_command"}}]}}]}\n\n`)
+	out, changed := uncloakStreamChunk(chunk, cached)
+	if !changed {
+		t.Fatal("want changed = true for stream chunk")
+	}
+	if !strings.Contains(string(out), `"name":"bash"`) {
+		t.Fatalf("uncloaked chunk missing 'bash': %s", out)
+	}
+}
+
+func TestDetectClientOhMyPi(t *testing.T) {
+	toolNames := []string{"read", "bash", "edit", "write", "grep", "glob", "task", "ask", "todo", "hub", "eval", "web_search"}
+	client := detectClient(toolNames)
+	if client != "oh_my_pi" {
+		t.Fatalf("detectClient(%v) = %q, want 'oh_my_pi'", toolNames, client)
+	}
+
+	// Cloaked tool names detection
+	cloakedTargets := []string{"view_file", "run_command", "replace_file_content", "write_to_file", "grep_search", "list_dir", "invoke_subagent", "ask_question", "manage_task", "send_message", "execute_code", "search_web"}
+	cloakedClient := detectCloakedClient(cloakedTargets)
+	if cloakedClient != "oh_my_pi" {
+		t.Fatalf("detectCloakedClient(%v) = %q, want 'oh_my_pi'", cloakedTargets, cloakedClient)
+	}
+}
+
+func TestParseToolMappingsOhMyPiAliases(t *testing.T) {
+	raw := map[string]any{
+		"omp": map[string]any{
+			"custom_tool": "custom_target",
+		},
+	}
+	parsed, err := parseToolMappings(raw)
+	if err != nil {
+		t.Fatalf("parseToolMappings err: %v", err)
+	}
+	if parsed["oh_my_pi"]["custom_tool"] != "custom_target" {
+		t.Fatalf("parsed mapping = %v, want oh_my_pi.custom_tool = custom_target", parsed)
+	}
+}
