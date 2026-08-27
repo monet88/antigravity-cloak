@@ -1,0 +1,31 @@
+.gitignore
+  s_90be6915eb1452::t_557ffecb2d1c2a 26-30
+AGENTS.md
+  s_90be6915eb1452::t_819cfd82cf5fa8 18,110-126,305-349
+filter_test.go
+  s_90be6915eb1452::t_38b5615da80b0e 1122-1355
+go.mod
+  s_90be6915eb1452::t_6d8eada74942cc 5
+go.sum
+  s_90be6915eb1452::t_aefdc43aa6893e 1-2
+main.go
+  s_90be6915eb1452::t_fa242b73432c02 47,95,228,238,746-808,834-847,1132-1134,1862-1863,1878-1883,1887-1889,1893-1907
+registry.json
+  s_90be6915eb1452::t_2043716bda5c87 7,9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "f44599d1f29a7a50d616dfa5c5dacb83852dd659",
+  "prompts": {},
+  "sessions": {
+    "s_90be6915eb1452": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0d1a-e55b-7962-ae3d-f2887fd63fa7",
+        "model": "unknown"
+      },
+      "human_author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
