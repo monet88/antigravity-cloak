@@ -1,0 +1,18 @@
+docs/verification-checklist.md
+  h_17f2fa2b92da6a 90
+main.go
+  h_17f2fa2b92da6a 97
+registry.json
+  h_17f2fa2b92da6a 9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "7c671279e786f9ed7048ec7f01f028ca55a7b3be",
+  "prompts": {},
+  "humans": {
+    "h_17f2fa2b92da6a": {
+      "author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
