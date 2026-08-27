@@ -1,0 +1,14 @@
+docs/specs/oh-my-pi-cloaking-spec.md
+  h_17f2fa2b92da6a 1-72
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "3c117f743d0e63848e991aae8d3eba4cfdaeb3a9",
+  "prompts": {},
+  "humans": {
+    "h_17f2fa2b92da6a": {
+      "author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
