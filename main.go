@@ -47,6 +47,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -345,82 +347,9 @@ func handleStreamChunkIntercept(request []byte) []byte {
 		debugLog("handleStreamChunkIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 	}
-	_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
-	debugLog("handleStreamChunkIntercept: client=%s", client)
-	if client == "" {
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
-	}
 
-	cfg := activeFilterConfig()
-	cached := cfg.uncloakRegexCache[client]
-	if cached == nil || cached.re == nil {
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
-	}
-
-	// ── SSE Event-Level Reassembly Buffer ──────────────────────────────
-	// TCP can split a network chunk at ANY byte boundary, including inside
-	// a tool name like "run_command" → Chunk1: "run_c", Chunk2: "ommand".
-	// Regex on each chunk alone would miss the match entirely.
-	//
-	// Solution: Buffer at the SSE EVENT level. SSE events are delimited by
-	// "\n\n". Incomplete events (no \n\n terminator) are buffered until the
-	// next chunk completes them. Regex only runs on complete events where
-	// tool names are guaranteed to be unfragmented.
-	//
-	// Stream identity: the SDK exposes no per-stream ID on this request, so we
-	// derive a stable key from the (per-stream constant) request body. Each
-	// concurrent stream therefore owns its own buffer slot, preventing the
-	// cross-stream corruption a single shared slot would cause. ChunkIndex == 0
-	// marks a new stream → reset that key's slot.
-	key := streamBufferKey(&req)
-
-	// Reset buffer on new stream
-	if req.ChunkIndex == 0 {
-		resetStreamBuffer(key)
-	}
-
-	// Retrieve and clear buffered tail from previous chunk
-	buffered := popStreamBuffer(key)
-
-	// Combine buffered tail + current chunk
-	var combined []byte
-	if len(buffered) > 0 {
-		combined = make([]byte, len(buffered)+len(req.Body))
-		copy(combined, buffered)
-		copy(combined[len(buffered):], req.Body)
-	} else {
-		combined = req.Body
-	}
-
-	// Split into complete SSE events and incomplete tail
-	completeEvents, incompleteTail := splitSSEEvents(combined)
-
-	// Buffer the incomplete tail for next chunk
-	if len(incompleteTail) > 0 {
-		pushStreamBuffer(key, incompleteTail)
-		debugLog("handleStreamChunkIntercept: buffered %d bytes (incomplete event)", len(incompleteTail))
-	}
-
-	if len(completeEvents) == 0 {
-		// No complete events — entire chunk is buffered.
-		// Use DropChunk to suppress this chunk entirely. The buffered bytes
-		// will be prepended to the next chunk and delivered then.
-		debugLog("handleStreamChunkIntercept: no complete events, dropping chunk")
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{DropChunk: true})
-	}
-
-	// Run regex replacement on complete events only
-	modified, changed := uncloakStreamChunk(completeEvents, cached)
-	debugLog("handleStreamChunkIntercept: changed=%t Body=%s", changed, string(modified))
-	if !changed {
-		modified = completeEvents
-	}
-
-	// If the result equals the original chunk, report no changes
-	if bytes.Equal(modified, req.Body) {
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
-	}
-	return mustEnvelope(pluginapi.StreamChunkInterceptResponse{Body: modified})
+	resp, _ := globalStreamManager.processChunk(&req, format)
+	return mustEnvelope(resp)
 }
 
 func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]string, string) {
@@ -536,7 +465,7 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 	return []byte(buf.String()), true
 }
 
-// ── SSE Event Reassembly Buffer ────────────────────────────────────────
+// ── Stream Session Manager & SSE Event Reassembly ────────────────────────
 //
 // Handles the "Split-String Chunk" attack: TCP can split a network chunk
 // at any byte boundary, including inside a tool name:
@@ -549,21 +478,158 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 // (those without a \n\n terminator) and only process/forward complete events
 // where all JSON content — including tool names — is guaranteed intact.
 //
-// The host runs each client request in its own goroutine, so multiple streams
-// can call the interceptor concurrently. A single shared slot would let one
-// stream pop, reset, or overwrite another stream's incomplete tail. We instead
-// key the buffers by a per-stream identifier so concurrent streams stay
-// isolated. ChunkIndex == 0 signals a new stream → that key's slot is reset.
+// In CLIProxyAPI schema_version >= 3, OriginalRequest and RequestBody are
+// delivered only on the header-init chunk (ChunkIndex == StreamChunkHeaderInitIndex).
+// StreamSessionManager caches the client uncloak pattern by RequestID (or fallback key)
+// on header-init, isolates concurrent streams, buffers incomplete TCP tails,
+// and runs uncloaking on complete SSE events.
 
-var (
-	streamBufMu sync.Mutex
-	streamBufs  = make(map[uint64][]byte) // per-stream incomplete tails
-)
+type streamSession struct {
+	client    string
+	cached    *cachedUncloakPattern
+	tail      []byte
+	updatedAt time.Time
+}
 
-// streamBufferKey derives a stable per-stream key. The SDK exposes no stream
-// ID on StreamChunkInterceptRequest, but the request body is constant for the
-// lifetime of a single stream, so an FNV-1a hash of it (preferring the raw
-// client body) uniquely identifies the stream across its chunks.
+type streamSessionManager struct {
+	mu         sync.Mutex
+	sessions   map[string]*streamSession
+	legacyBufs map[uint64][]byte
+}
+
+var globalStreamManager = newStreamSessionManager()
+
+func newStreamSessionManager() *streamSessionManager {
+	return &streamSessionManager{
+		sessions:   make(map[string]*streamSession),
+		legacyBufs: make(map[uint64][]byte),
+	}
+}
+
+func (m *streamSessionManager) sessionKey(req *pluginapi.StreamChunkInterceptRequest) string {
+	if req.RequestID != "" {
+		return "req:" + req.RequestID
+	}
+	src := req.OriginalRequest
+	if len(src) == 0 {
+		src = req.RequestBody
+	}
+	h := fnv.New64a()
+	_, _ = h.Write(src)
+	return fmt.Sprintf("fnv:%x", h.Sum64())
+}
+
+func (m *streamSessionManager) initSession(key, client string, cached *cachedUncloakPattern) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cleanupStaleLocked()
+	m.sessions[key] = &streamSession{
+		client:    client,
+		cached:    cached,
+		updatedAt: time.Now(),
+	}
+}
+
+func (m *streamSessionManager) deleteSession(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.sessions, key)
+}
+
+func (m *streamSessionManager) cleanupStaleLocked() {
+	cutoff := time.Now().Add(-5 * time.Minute)
+	for k, s := range m.sessions {
+		if s.updatedAt.Before(cutoff) {
+			delete(m.sessions, k)
+		}
+	}
+}
+
+func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptRequest, format string) (pluginapi.StreamChunkInterceptResponse, bool) {
+	key := m.sessionKey(req)
+
+	// Header-init index: CLIProxyAPI schema_version >= 3 provides OriginalRequest/RequestBody here.
+	if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex || req.ChunkIndex < 0 {
+		_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+		debugLog("StreamSessionManager: header-init key=%s client=%s", key, client)
+		if client != "" {
+			cfg := activeFilterConfig()
+			cached := cfg.uncloakRegexCache[client]
+			if cached != nil && cached.re != nil {
+				m.initSession(key, client, cached)
+			}
+		}
+		return pluginapi.StreamChunkInterceptResponse{}, false
+	}
+
+	m.mu.Lock()
+	sess := m.sessions[key]
+	if sess == nil {
+		// Fallback for tests or schema_version < 3 where ChunkIndex >= 0 carries OriginalRequest/RequestBody
+		src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
+		if len(src) > 0 {
+			_, client := buildUncloakTable(src, format)
+			if client != "" {
+				cfg := activeFilterConfig()
+				cached := cfg.uncloakRegexCache[client]
+				if cached != nil && cached.re != nil {
+					sess = &streamSession{
+						client:    client,
+						cached:    cached,
+						updatedAt: time.Now(),
+					}
+					m.sessions[key] = sess
+				}
+			}
+		}
+	}
+
+	if sess == nil || sess.cached == nil || sess.cached.re == nil {
+		m.mu.Unlock()
+		return pluginapi.StreamChunkInterceptResponse{}, false
+	}
+
+	// Reset buffer on first payload chunk (ChunkIndex == 0)
+	if req.ChunkIndex == 0 {
+		sess.tail = nil
+	}
+
+	var combined []byte
+	if len(sess.tail) > 0 {
+		combined = make([]byte, len(sess.tail)+len(req.Body))
+		copy(combined, sess.tail)
+		copy(combined[len(sess.tail):], req.Body)
+	} else {
+		combined = req.Body
+	}
+
+	completeEvents, incompleteTail := splitSSEEvents(combined)
+	sess.tail = incompleteTail
+	sess.updatedAt = time.Now()
+	cached := sess.cached
+	m.mu.Unlock()
+
+	if len(completeEvents) == 0 {
+		debugLog("StreamSessionManager: no complete events, dropping chunk len=%d", len(incompleteTail))
+		return pluginapi.StreamChunkInterceptResponse{DropChunk: true}, true
+	}
+
+	modified, changed := uncloakStreamChunk(completeEvents, cached)
+	if !changed {
+		modified = completeEvents
+	}
+
+	// Cleanup session if stream reached [DONE]
+	if bytes.Contains(completeEvents, []byte("data: [DONE]")) {
+		m.deleteSession(key)
+	}
+
+	if bytes.Equal(modified, req.Body) {
+		return pluginapi.StreamChunkInterceptResponse{}, false
+	}
+	return pluginapi.StreamChunkInterceptResponse{Body: modified}, true
+}
+
 func streamBufferKey(req *pluginapi.StreamChunkInterceptRequest) uint64 {
 	src := req.OriginalRequest
 	if len(src) == 0 {
@@ -575,26 +641,25 @@ func streamBufferKey(req *pluginapi.StreamChunkInterceptRequest) uint64 {
 }
 
 func resetStreamBuffer(key uint64) {
-	streamBufMu.Lock()
-	defer streamBufMu.Unlock()
-	delete(streamBufs, key)
+	globalStreamManager.mu.Lock()
+	defer globalStreamManager.mu.Unlock()
+	delete(globalStreamManager.legacyBufs, key)
 }
 
 func popStreamBuffer(key uint64) []byte {
-	streamBufMu.Lock()
-	defer streamBufMu.Unlock()
-	data := streamBufs[key]
-	delete(streamBufs, key)
+	globalStreamManager.mu.Lock()
+	defer globalStreamManager.mu.Unlock()
+	data := globalStreamManager.legacyBufs[key]
+	delete(globalStreamManager.legacyBufs, key)
 	return data
 }
 
 func pushStreamBuffer(key uint64, data []byte) {
-	streamBufMu.Lock()
-	defer streamBufMu.Unlock()
-	// Copy to avoid retaining references to large chunk slices
+	globalStreamManager.mu.Lock()
+	defer globalStreamManager.mu.Unlock()
 	buf := make([]byte, len(data))
 	copy(buf, data)
-	streamBufs[key] = buf
+	globalStreamManager.legacyBufs[key] = buf
 }
 
 // splitSSEEvents splits combined bytes into complete SSE events and an
@@ -858,6 +923,8 @@ func init() {
 		}
 		defaultUncloakTables[client] = uncloaks
 	}
+	cfg := defaultFilterConfig()
+	globalFilterConfig.Store(&cfg)
 }
 
 func copyToolMappings(m map[string]map[string]string) map[string]map[string]string {
@@ -915,8 +982,7 @@ type cachedUncloakPattern struct {
 }
 
 var (
-	filterConfigMu      sync.RWMutex
-	currentFilterConfig = defaultFilterConfig()
+	globalFilterConfig atomic.Pointer[filterConfig]
 )
 
 func defaultFilterConfig() filterConfig {
@@ -929,9 +995,6 @@ func defaultFilterConfig() filterConfig {
 }
 
 func applyFilterConfig(cfg filterConfig) {
-	filterConfigMu.Lock()
-	defer filterConfigMu.Unlock()
-
 	newCfg := filterConfig{
 		UseDefaultKeywords: cfg.UseDefaultKeywords,
 		CustomMappings:     append([]rewriteMapping(nil), normalizeMappings(cfg.CustomMappings)...),
@@ -939,7 +1002,7 @@ func applyFilterConfig(cfg filterConfig) {
 		ModelPrefixes:      append([]string(nil), cfg.ModelPrefixes...),
 	}
 	rebuildCachedRegexes(&newCfg)
-	currentFilterConfig = newCfg
+	globalFilterConfig.Store(&newCfg)
 }
 
 // rebuildCachedRegexes pre-compiles all regex patterns from the current
@@ -1002,18 +1065,14 @@ func rebuildCachedRegexes(cfg *filterConfig) {
 	}
 }
 
-func activeFilterConfig() filterConfig {
-	filterConfigMu.RLock()
-	defer filterConfigMu.RUnlock()
-
-	return filterConfig{
-		UseDefaultKeywords: currentFilterConfig.UseDefaultKeywords,
-		CustomMappings:     append([]rewriteMapping(nil), currentFilterConfig.CustomMappings...),
-		ToolMappings:       copyToolMappings(currentFilterConfig.ToolMappings),
-		ModelPrefixes:      append([]string(nil), currentFilterConfig.ModelPrefixes...),
-		cloakRegexCache:    currentFilterConfig.cloakRegexCache,
-		uncloakRegexCache:  currentFilterConfig.uncloakRegexCache,
+func activeFilterConfig() *filterConfig {
+	cfg := globalFilterConfig.Load()
+	if cfg == nil {
+		d := defaultFilterConfig()
+		globalFilterConfig.CompareAndSwap(nil, &d)
+		return globalFilterConfig.Load()
 	}
+	return cfg
 }
 
 type lifecycleRequest struct {
@@ -1213,13 +1272,18 @@ func parseMappingString(value string) ([]rewriteMapping, error) {
 	return mappings, nil
 }
 
-func effectiveMappings(cfg filterConfig) []rewriteMapping {
+func effectiveMappings(cfg *filterConfig) []rewriteMapping {
+	if cfg == nil {
+		return defaultRewriteMappings
+	}
 	mappings := make([]rewriteMapping, 0, len(defaultRewriteMappings)+len(cfg.CustomMappings))
 	if cfg.UseDefaultKeywords {
 		mappings = append(mappings, defaultRewriteMappings...)
 	}
-	mappings = append(mappings, cfg.CustomMappings...)
-	return normalizeMappings(mappings)
+	if len(cfg.CustomMappings) > 0 {
+		mappings = append(mappings, cfg.CustomMappings...)
+	}
+	return mappings
 }
 
 func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
@@ -1573,12 +1637,20 @@ func rewriteSystemValue(value any, mappings []rewriteMapping) (any, bool) {
 	}
 }
 
+func isWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
 func replaceInsensitive(value, match, replacement string) (string, bool) {
 	if match == "" {
 		return value, false
 	}
 	lowerValue := strings.ToLower(value)
 	lowerMatch := strings.ToLower(match)
+
+	firstIsWord := isWordByte(match[0])
+	lastIsWord := isWordByte(match[len(match)-1])
+
 	var builder strings.Builder
 	start := 0
 	changed := false
@@ -1588,10 +1660,21 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 			break
 		}
 		index += start
-		builder.WriteString(value[start:index])
-		builder.WriteString(replacement)
-		start = index + len(match)
-		changed = true
+		matchEnd := index + len(match)
+
+		// Check word boundaries if match starts/ends with a word character
+		hasLeftBoundary := !firstIsWord || index == 0 || !isWordByte(value[index-1])
+		hasRightBoundary := !lastIsWord || matchEnd == len(value) || !isWordByte(value[matchEnd])
+
+		if hasLeftBoundary && hasRightBoundary {
+			builder.WriteString(value[start:index])
+			builder.WriteString(replacement)
+			start = matchEnd
+			changed = true
+		} else {
+			builder.WriteString(value[start : index+1])
+			start = index + 1
+		}
 	}
 	if !changed {
 		return value, false
@@ -1833,6 +1916,18 @@ func detectClient(toolNames []string) string {
 				count++
 			}
 		}
+
+		// Validation rules per client:
+		// oh_my_pi uses common lowercase words (read, write, bash...) which could
+		// collide with arbitrary generic tools. Require either a distinctive
+		// harness tool (hub, task, todo, eval, web_search) or at least 4 matching tools.
+		if client == "oh_my_pi" {
+			hasDistinctive := nameSet["hub"] || nameSet["task"] || nameSet["todo"] || nameSet["eval"] || nameSet["web_search"]
+			if !hasDistinctive && count < 4 {
+				continue
+			}
+		}
+
 		if count > bestCount {
 			bestCount = count
 			bestClient = client
@@ -1891,14 +1986,11 @@ func detectCloakedClient(toolNames []string) string {
 		return matches[0].client
 	}
 
-	// Multiple matches: sort by highest match ratio, then most hits.
+	// Multiple matches: sort by highest match ratio.
 	// If the top candidate has a strictly higher match ratio than the runner-up,
 	// it is the cloaked client. If there is a tie at the top (e.g. native Antigravity
 	// having all tools for all clients), return "" (no cloaking applied).
 	sort.Slice(matches, func(i, j int) bool {
-		if matches[i].ratio == matches[j].ratio {
-			return matches[i].hits > matches[j].hits
-		}
 		return matches[i].ratio > matches[j].ratio
 	})
 

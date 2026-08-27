@@ -87,7 +87,7 @@ docker run --rm -v F:\CodeBase\antigravity-cloak:/src -w /src golang:1.26 sh -c 
 # Deploy to container:
 cd F:\cliproxy
 docker compose stop
-Copy-Item F:\CodeBase\antigravity-cloak\dist\antigravity-cloak.so F:\cliproxy\plugins\linux\amd64\antigravity-cloak-v0.1.1.so -Force
+Copy-Item F:\CodeBase\antigravity-cloak\dist\antigravity-cloak.so F:\cliproxy\plugins\linux\amd64\antigravity-cloak-v0.3.0.so -Force
 docker compose start
 ```
 

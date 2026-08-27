@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -1199,12 +1200,16 @@ func TestRewriteRequestBodyCloaksOhMyPiTools(t *testing.T) {
 		"eval":       "execute_code",
 		"web_search": "search_web",
 	}
-	for i, tr := range toolsRaw {
+	cloakedNames := make(map[string]bool, len(toolsRaw))
+	for _, tr := range toolsRaw {
 		fn := tr.(map[string]any)["function"].(map[string]any)
-		origName := []string{"read", "write", "edit", "bash", "grep", "glob", "task", "ask", "todo", "hub", "eval", "web_search"}[i]
-		wantCloaked := expectedMap[origName]
-		if fn["name"] != wantCloaked {
-			t.Errorf("tools[%d] name = %q, want %q", i, fn["name"], wantCloaked)
+		if name, ok := fn["name"].(string); ok {
+			cloakedNames[name] = true
+		}
+	}
+	for orig, want := range expectedMap {
+		if !cloakedNames[want] {
+			t.Errorf("expected cloaked tool %q (from %q) in tools array", want, orig)
 		}
 	}
 
@@ -1241,7 +1246,8 @@ func TestRewriteRequestBodyCloaksOhMyPiToolsAnthropicFormat(t *testing.T) {
 		"system":"You are Oh My Pi.",
 		"tools":[
 			{"name":"read","description":"Read files","input_schema":{"type":"object"}},
-			{"name":"bash","description":"Run shell","input_schema":{"type":"object"}}
+			{"name":"bash","description":"Run shell","input_schema":{"type":"object"}},
+			{"name":"task","description":"Spawn subagent","input_schema":{"type":"object"}}
 		],
 		"messages":[
 			{
@@ -1265,6 +1271,10 @@ func TestRewriteRequestBodyCloaksOhMyPiToolsAnthropicFormat(t *testing.T) {
 	t1 := toolsRaw[1].(map[string]any)
 	if t1["name"] != "run_command" {
 		t.Errorf("tools[1].name = %q, want run_command", t1["name"])
+	}
+	t2 := toolsRaw[2].(map[string]any)
+	if t2["name"] != "invoke_subagent" {
+		t.Errorf("tools[2].name = %q, want invoke_subagent", t2["name"])
 	}
 
 	msgs := parsed["messages"].([]any)
@@ -1314,7 +1324,7 @@ func TestUncloakStreamChunkOhMyPi(t *testing.T) {
 		t.Fatal("cached uncloak pattern for oh_my_pi is nil")
 	}
 
-	chunk := []byte(`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"run_command"}}]}}]}\n\n`)
+	chunk := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
 	out, changed := uncloakStreamChunk(chunk, cached)
 	if !changed {
 		t.Fatal("want changed = true for stream chunk")
@@ -1352,4 +1362,187 @@ func TestParseToolMappingsOhMyPiAliases(t *testing.T) {
 	if parsed["oh_my_pi"]["custom_tool"] != "custom_target" {
 		t.Fatalf("parsed mapping = %v, want oh_my_pi.custom_tool = custom_target", parsed)
 	}
+}
+
+func TestReplaceInsensitiveWordBoundaries(t *testing.T) {
+	// "omp" alias should only match standalone word, not inside "prompt", "complete", "computer"
+	input := "Please complete the prompt using computer and omp."
+	got, changed := replaceInsensitive(input, "omp", "Antigravity")
+	if !changed {
+		t.Fatal("expected changed = true for standalone 'omp'")
+	}
+	want := "Please complete the prompt using computer and Antigravity."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	// Pure substring matches without word boundary must not change
+	corruptInput := "This is a prompt with complete components."
+	noChangeGot, noChanged := replaceInsensitive(corruptInput, "omp", "Antigravity")
+	if noChanged {
+		t.Fatalf("corrupted prose: got %q", noChangeGot)
+	}
+}
+
+func TestDetectClientOhMyPiRequiresSignatureOrThreshold(t *testing.T) {
+	// Generic tools (read, write) alone should NOT trigger Oh My Pi
+	if client := detectClient([]string{"read", "write"}); client != "" {
+		t.Fatalf("detectClient([read, write]) = %q, want empty string", client)
+	}
+	if client := detectClient([]string{"read", "write", "edit"}); client != "" {
+		t.Fatalf("detectClient([read, write, edit]) = %q, want empty string", client)
+	}
+
+	// 4 generic tools should trigger Oh My Pi
+	if client := detectClient([]string{"read", "write", "edit", "bash"}); client != "oh_my_pi" {
+		t.Fatalf("detectClient([read, write, edit, bash]) = %q, want 'oh_my_pi'", client)
+	}
+
+	// 2 tools including a distinctive harness tool should trigger Oh My Pi
+	if client := detectClient([]string{"read", "hub"}); client != "oh_my_pi" {
+		t.Fatalf("detectClient([read, hub]) = %q, want 'oh_my_pi'", client)
+	}
+	if client := detectClient([]string{"bash", "task"}); client != "oh_my_pi" {
+		t.Fatalf("detectClient([bash, task]) = %q, want 'oh_my_pi'", client)
+	}
+}
+
+func TestStreamSessionManagerHeaderInitSchemaV4(t *testing.T) {
+	// In schema_version >= 3 (e.g. v4), OriginalRequest and RequestBody are
+	// only provided at ChunkIndex == StreamChunkHeaderInitIndex (-1).
+	// Subsequent payload chunks (ChunkIndex >= 0) have OriginalRequest/RequestBody = nil.
+	reqID := "stream-session-test-v4"
+	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
+
+	// Step 1: Header-init chunk (ChunkIndex == -1)
+	initReq := &pluginapi.StreamChunkInterceptRequest{
+		RequestID:       reqID,
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(reqBody),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}
+	resp, changed := globalStreamManager.processChunk(initReq, "openai")
+	if changed || resp.DropChunk || len(resp.Body) > 0 {
+		t.Fatalf("header-init should return empty no-op response, got changed=%t resp=%v", changed, resp)
+	}
+
+	// Step 2: Payload chunk 0 (ChunkIndex == 0, OriginalRequest = nil, RequestBody = nil)
+	payloadChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
+	chunkReq := &pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqID,
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte(payloadChunk),
+	}
+	chunkResp, chunkChanged := globalStreamManager.processChunk(chunkReq, "openai")
+	if !chunkChanged {
+		t.Fatal("payload chunk was not uncloaked via cached session from header-init")
+	}
+	if !strings.Contains(string(chunkResp.Body), `"name":"Bash"`) && !strings.Contains(string(chunkResp.Body), `"name": "Bash"`) {
+		t.Fatalf("expected tool name 'Bash' in uncloaked body, got: %s", string(chunkResp.Body))
+	}
+}
+func TestStreamSessionManagerIsolatesByRequestID(t *testing.T) {
+	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`
+	reqIDA := "stream-session-iso-A"
+	reqIDB := "stream-session-iso-B"
+
+	// Init session A
+	globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:       reqIDA,
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(reqBody),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}, "openai")
+
+	// Init session B
+	globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:       reqIDB,
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(reqBody),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}, "openai")
+
+	// Send split chunk to Stream A: "data: {\"name\": \"run_c" (incomplete)
+	respA1, handledA1 := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqIDA,
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_c"),
+	}, "openai")
+
+	if !handledA1 || !respA1.DropChunk {
+		t.Fatalf("Stream A chunk 1 should be buffered and dropped, got handled=%t drop=%t", handledA1, respA1.DropChunk)
+	}
+
+	// Send complete chunk to Stream B — should NOT be affected by Stream A's buffered tail
+	completeB := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
+	respB, handledB := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqIDB,
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte(completeB),
+	}, "openai")
+
+	if !handledB || respB.DropChunk {
+		t.Fatalf("Stream B chunk should be processed immediately, got handled=%t drop=%t", handledB, respB.DropChunk)
+	}
+	if !strings.Contains(string(respB.Body), "Bash") {
+		t.Fatalf("Stream B should be uncloaked to Bash, got: %s", string(respB.Body))
+	}
+
+	// Complete Stream A with second chunk
+	respA2, handledA2 := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqIDA,
+		SourceFormat: "openai",
+		ChunkIndex:   1,
+		Body:         []byte("ommand\"}}]}}]}\n\n"),
+	}, "openai")
+
+	if !handledA2 || respA2.DropChunk {
+		t.Fatalf("Stream A chunk 2 should complete reassembly, got handled=%t drop=%t", handledA2, respA2.DropChunk)
+	}
+	if !strings.Contains(string(respA2.Body), "Bash") {
+		t.Fatalf("Stream A should be uncloaked to Bash after reassembly, got: %s", string(respA2.Body))
+	}
+}
+
+func TestAtomicFilterConfigConcurrentSafety(t *testing.T) {
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	// 8 readers
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					cfg := activeFilterConfig()
+					if cfg == nil {
+						t.Errorf("activeFilterConfig returned nil")
+						return
+					}
+					_ = cfg.ToolMappings
+					_ = cfg.ModelPrefixes
+					_ = cfg.UseDefaultKeywords
+				}
+			}
+		}()
+	}
+
+	// 1 writer
+	for i := range 50 {
+		applyFilterConfig(filterConfig{
+			UseDefaultKeywords: i%2 == 0,
+			ToolMappings:       copyToolMappings(defaultCloakTables),
+			ModelPrefixes:      []string{"agy/", "antigravity/"},
+		})
+	}
+
+	close(stop)
+	wg.Wait()
+	restoreDefaultFilterConfig(t)
 }

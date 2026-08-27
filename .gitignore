@@ -24,7 +24,5 @@ worktrees/
 .codex/
 test/
 .ref/
-AGENTS.md
-CLAUDE.md
 .claude
 .agents
