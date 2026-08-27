@@ -1,0 +1,21 @@
+filter_test.go
+  s_90be6915eb1452::t_5c93616cd21cc6 9,1550-1634
+main.go
+  s_90be6915eb1452::t_1a8de6b710c590 494-498,500-503,511,519-524,526-553,560,565-569,575-579,589-596,617-625,640-644,714-717,719,725,728-731,1355
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "2e104e46d1f19c824cc170a365c5d16dc6053434",
+  "prompts": {},
+  "sessions": {
+    "s_90be6915eb1452": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0d1a-e55b-7962-ae3d-f2887fd63fa7",
+        "model": "unknown"
+      },
+      "human_author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
