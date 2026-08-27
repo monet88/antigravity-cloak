@@ -1,0 +1,16 @@
+tests/test_client.py
+  h_17f2fa2b92da6a 1-76
+tests/test_omp.py
+  h_17f2fa2b92da6a 1-118
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "ff38e68fa7b34bcfecea66f6f871baef5e35a71f",
+  "prompts": {},
+  "humans": {
+    "h_17f2fa2b92da6a": {
+      "author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
