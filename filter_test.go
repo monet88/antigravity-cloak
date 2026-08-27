@@ -863,9 +863,10 @@ func TestStreamChunkReassemblesSplitToolName(t *testing.T) {
 	// Without event reassembly, regex misses the match on both chunks. With
 	// reassembly via the session tail buffer, chunk 1 is held back, combined
 	// with chunk 2 into a complete SSE event, then uncloaked.
+	mgr := newStreamSessionManager()
 	const reqID = "split-chunk-reassembly"
 	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`
-	globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:       reqID,
 		SourceFormat:    "openai",
 		OriginalRequest: []byte(reqBody),
@@ -873,7 +874,7 @@ func TestStreamChunkReassemblesSplitToolName(t *testing.T) {
 	}, "openai")
 
 	// Chunk 1: incomplete event — tool name cut at "run_c"
-	resp1 := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:    reqID,
 		SourceFormat: "openai",
 		ChunkIndex:   0,
@@ -884,7 +885,7 @@ func TestStreamChunkReassemblesSplitToolName(t *testing.T) {
 	}
 
 	// Chunk 2 completes the event
-	resp2 := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	resp2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:    reqID,
 		SourceFormat: "openai",
 		ChunkIndex:   1,
@@ -1429,9 +1430,10 @@ func TestStreamUncloakAnthropicSSE(t *testing.T) {
 	// Anthropic-format streaming: content_block_start carries the tool_use
 	// name; here it is split mid-name across TCP chunks to exercise Anthropic
 	// shaping AND event reassembly together, plus CRLF event boundaries.
+	mgr := newStreamSessionManager()
 	const reqID = "anthropic-sse-cloak"
 	reqBody := `{"tools":[{"name":"write","description":"w"},{"name":"read","description":"r"},{"name":"task","description":"t"}],"messages":[]}`
-	globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:       reqID,
 		SourceFormat:    "anthropic",
 		OriginalRequest: []byte(reqBody),
@@ -1439,7 +1441,7 @@ func TestStreamUncloakAnthropicSSE(t *testing.T) {
 	}, "anthropic")
 
 	// Chunk 1 ends mid-tool-name inside an incomplete CRLF-delimited event.
-	resp1 := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:    reqID,
 		SourceFormat: "anthropic",
 		ChunkIndex:   0,
@@ -1451,7 +1453,7 @@ func TestStreamUncloakAnthropicSSE(t *testing.T) {
 	}
 
 	// Chunk 2 completes the event plus more events, ending the stream.
-	resp2 := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	resp2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:    reqID,
 		SourceFormat: "anthropic",
 		ChunkIndex:   1,
@@ -1468,9 +1470,9 @@ func TestStreamUncloakAnthropicSSE(t *testing.T) {
 		t.Fatalf("expected view_file restored to read in Anthropic stream: %s", out)
 	}
 
-	globalStreamManager.mu.Lock()
-	_, alive := globalStreamManager.sessions["req:"+reqID]
-	globalStreamManager.mu.Unlock()
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:"+reqID]
+	mgr.mu.Unlock()
 	if alive {
 		t.Fatal("session should be deleted once the stream sends [DONE]")
 	}
@@ -1520,6 +1522,7 @@ func TestDetectClientOhMyPiRequiresSignatureOrThreshold(t *testing.T) {
 }
 
 func TestStreamSessionManagerHeaderInitSchemaV4(t *testing.T) {
+	mgr := newStreamSessionManager()
 	// In schema_version >= 3 (e.g. v4), OriginalRequest and RequestBody are
 	// only provided at ChunkIndex == StreamChunkHeaderInitIndex (-1).
 	// Subsequent payload chunks (ChunkIndex >= 0) have OriginalRequest/RequestBody = nil.
@@ -1533,7 +1536,7 @@ func TestStreamSessionManagerHeaderInitSchemaV4(t *testing.T) {
 		OriginalRequest: []byte(reqBody),
 		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
 	}
-	resp := globalStreamManager.processChunk(initReq, "openai")
+	resp := mgr.processChunk(initReq, "openai")
 	if resp.DropChunk || len(resp.Body) > 0 {
 		t.Fatalf("header-init should return empty no-op response, got resp=%v", resp)
 	}
@@ -1546,7 +1549,7 @@ func TestStreamSessionManagerHeaderInitSchemaV4(t *testing.T) {
 		ChunkIndex:   0,
 		Body:         []byte(payloadChunk),
 	}
-	chunkResp := globalStreamManager.processChunk(chunkReq, "openai")
+	chunkResp := mgr.processChunk(chunkReq, "openai")
 	if len(chunkResp.Body) == 0 {
 		t.Fatal("payload chunk was not uncloaked via cached session from header-init")
 	}
@@ -1554,13 +1557,15 @@ func TestStreamSessionManagerHeaderInitSchemaV4(t *testing.T) {
 		t.Fatalf("expected tool name 'Bash' in uncloaked body, got: %s", string(chunkResp.Body))
 	}
 }
+
 func TestStreamSessionManagerIsolatesByRequestID(t *testing.T) {
+	mgr := newStreamSessionManager()
 	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`
 	reqIDA := "stream-session-iso-A"
 	reqIDB := "stream-session-iso-B"
 
 	// Init session A
-	globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:       reqIDA,
 		SourceFormat:    "openai",
 		OriginalRequest: []byte(reqBody),
@@ -1568,7 +1573,7 @@ func TestStreamSessionManagerIsolatesByRequestID(t *testing.T) {
 	}, "openai")
 
 	// Init session B
-	globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:       reqIDB,
 		SourceFormat:    "openai",
 		OriginalRequest: []byte(reqBody),
@@ -1576,7 +1581,7 @@ func TestStreamSessionManagerIsolatesByRequestID(t *testing.T) {
 	}, "openai")
 
 	// Send split chunk to Stream A: "data: {\"name\": \"run_c" (incomplete)
-	respA1 := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	respA1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:    reqIDA,
 		SourceFormat: "openai",
 		ChunkIndex:   0,
@@ -1589,7 +1594,7 @@ func TestStreamSessionManagerIsolatesByRequestID(t *testing.T) {
 
 	// Send complete chunk to Stream B — should NOT be affected by Stream A's buffered tail
 	completeB := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
-	respB := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	respB := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:    reqIDB,
 		SourceFormat: "openai",
 		ChunkIndex:   0,
@@ -1604,7 +1609,7 @@ func TestStreamSessionManagerIsolatesByRequestID(t *testing.T) {
 	}
 
 	// Complete Stream A with second chunk
-	respA2 := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+	respA2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:    reqIDA,
 		SourceFormat: "openai",
 		ChunkIndex:   1,
@@ -1681,6 +1686,7 @@ func TestEffectiveMappingsCustomOverride(t *testing.T) {
 }
 
 func TestStreamChunksWithoutCorrelationKeyPassThrough(t *testing.T) {
+	mgr := newStreamSessionManager()
 	// Schema_version >= 3 payload chunks carry neither RequestID nor the
 	// original request body. Such chunks cannot be attributed to a stream;
 	// sharing one slot between them would corrupt concurrent output, so they
@@ -1691,7 +1697,7 @@ func TestStreamChunksWithoutCorrelationKeyPassThrough(t *testing.T) {
 		OriginalRequest: []byte(`{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`),
 		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
 	}
-	resp := globalStreamManager.processChunk(initNoKey, "openai")
+	resp := mgr.processChunk(initNoKey, "openai")
 	if len(resp.Body) > 0 || resp.DropChunk {
 		t.Fatalf("header-init should stay a no-op, got %+v", resp)
 	}
@@ -1704,13 +1710,13 @@ func TestStreamChunksWithoutCorrelationKeyPassThrough(t *testing.T) {
 		Body:         []byte(payloadChunk),
 	}
 	countSessions := func() int {
-		globalStreamManager.mu.Lock()
-		defer globalStreamManager.mu.Unlock()
-		return len(globalStreamManager.sessions)
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		return len(mgr.sessions)
 	}
 	sessionsBefore := countSessions()
 
-	resp = globalStreamManager.processChunk(chunkReq, "openai")
+	resp = mgr.processChunk(chunkReq, "openai")
 	if len(resp.Body) > 0 || resp.DropChunk {
 		t.Fatalf("expected pass-through of uncorrelated payload chunk, got body=%q drop=%t", string(resp.Body), resp.DropChunk)
 	}
@@ -1720,14 +1726,15 @@ func TestStreamChunksWithoutCorrelationKeyPassThrough(t *testing.T) {
 }
 
 func TestStreamSessionManagerCleanupStaleSessions(t *testing.T) {
+	mgr := newStreamSessionManager()
 	// Add an abandoned session with a stale timestamp (>5 mins ago)
 	staleTime := time.Now().Add(-10 * time.Minute)
-	globalStreamManager.mu.Lock()
-	globalStreamManager.sessions["req:stale-stream"] = &streamSession{
+	mgr.mu.Lock()
+	mgr.sessions["req:stale-stream"] = &streamSession{
 		client:    "claude_code",
 		updatedAt: staleTime,
 	}
-	globalStreamManager.mu.Unlock()
+	mgr.mu.Unlock()
 
 	// Trigger opportunistic cleanup via processChunk on any chunk
 	dummyReq := &pluginapi.StreamChunkInterceptRequest{
@@ -1736,11 +1743,11 @@ func TestStreamSessionManagerCleanupStaleSessions(t *testing.T) {
 		ChunkIndex:   0,
 		Body:         []byte("data: {}\n\n"),
 	}
-	globalStreamManager.processChunk(dummyReq, "openai")
+	mgr.processChunk(dummyReq, "openai")
 
-	globalStreamManager.mu.Lock()
-	defer globalStreamManager.mu.Unlock()
-	if _, exists := globalStreamManager.sessions["req:stale-stream"]; exists {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if _, exists := mgr.sessions["req:stale-stream"]; exists {
 		t.Fatalf("expected stale session to be pruned by processChunk")
 	}
 }
