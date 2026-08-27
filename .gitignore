@@ -24,3 +24,5 @@ worktrees/
 .codex/
 test/
 .ref/
+.claude
+.agents

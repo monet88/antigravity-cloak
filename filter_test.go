@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -856,55 +858,42 @@ func TestSplitSSEEvents(t *testing.T) {
 	}
 }
 
-func TestSSESplitStringChunk(t *testing.T) {
+func TestStreamChunkReassemblesSplitToolName(t *testing.T) {
 	// THE critical test: tool name "run_command" is split across two TCP chunks.
-	// Without event reassembly, regex misses the match on both chunks.
-	// With reassembly, the incomplete event from chunk 1 is buffered and
-	// combined with chunk 2 to form a complete event before regex runs.
-	cached := buildTestUncloakPattern(map[string]string{"run_command": "bash"})
+	// Without event reassembly, regex misses the match on both chunks. With
+	// reassembly via the session tail buffer, chunk 1 is held back, combined
+	// with chunk 2 into a complete SSE event, then uncloaked.
+	mgr := newStreamSessionManager()
+	const reqID = "split-chunk-reassembly"
+	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:       reqID,
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(reqBody),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}, "openai")
 
 	// Chunk 1: incomplete event — tool name cut at "run_c"
-	chunk1 := []byte(`data: {"type": "tool_use", "id": "123", "name": "run_c`)
-
-	// Simulate new stream
-	const streamKey = uint64(1)
-	resetStreamBuffer(streamKey)
-
-	complete1, incomplete1 := splitSSEEvents(chunk1)
-	if len(complete1) != 0 {
-		t.Fatal("chunk1 should have no complete events")
-	}
-	if string(incomplete1) != string(chunk1) {
-		t.Fatal("chunk1 should be entirely buffered")
-	}
-	pushStreamBuffer(streamKey, incomplete1)
-
-	// Chunk 2: completes the event
-	chunk2 := []byte("ommand\", \"input\": {}}\n\n")
-
-	buffered := popStreamBuffer(streamKey)
-	if buffered == nil {
-		t.Fatal("expected buffered data from chunk 1")
+	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqID,
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte(`data: {"type": "tool_use", "id": "123", "name": "run_c`),
+	}, "openai")
+	if !resp1.DropChunk {
+		t.Fatal("chunk 1 should have been buffered as an incomplete event")
 	}
 
-	// Combine buffered + chunk2
-	combined := make([]byte, len(buffered)+len(chunk2))
-	copy(combined, buffered)
-	copy(combined[len(buffered):], chunk2)
+	// Chunk 2 completes the event
+	resp2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqID,
+		SourceFormat: "openai",
+		ChunkIndex:   1,
+		Body:         []byte("ommand\", \"input\": {}}\n\n"),
+	}, "openai")
 
-	complete2, incomplete2 := splitSSEEvents(combined)
-	if len(incomplete2) != 0 {
-		t.Fatalf("expected no incomplete tail, got %q", string(incomplete2))
-	}
-
-	// Regex on complete event
-	result, changed := uncloakStreamChunk(complete2, cached)
-	if !changed {
-		t.Fatal("expected uncloakStreamChunk to match the reassembled tool name")
-	}
-
-	resultStr := string(result)
-	if !strings.Contains(resultStr, `"name": "bash"`) && !strings.Contains(resultStr, `"name":"bash"`) {
+	resultStr := string(resp2.Body)
+	if !strings.Contains(resultStr, `"name": "Bash"`) && !strings.Contains(resultStr, `"name":"Bash"`) {
 		t.Fatalf("tool name not uncloaked after reassembly: %s", resultStr)
 	}
 	if strings.Contains(resultStr, "run_command") {
@@ -912,78 +901,23 @@ func TestSSESplitStringChunk(t *testing.T) {
 	}
 }
 
-func TestStreamBufferResetOnNewStream(t *testing.T) {
-	// Verify that resetStreamBuffer clears leftover data from a previous stream,
-	// preventing cross-stream pollution.
-	const streamKey = uint64(1)
-	pushStreamBuffer(streamKey, []byte("leftover from stream 1"))
-
-	// Simulate new stream (ChunkIndex == 0)
-	resetStreamBuffer(streamKey)
-
-	data := popStreamBuffer(streamKey)
-	if data != nil {
-		t.Fatalf("expected nil after reset, got %q", string(data))
+func TestSessionKeyFallsBackToBodyHash(t *testing.T) {
+	// Legacy schema (< 3) streams repeat the request body on every payload
+	// chunk, so its FNV hash identifies the stream even without RequestID or
+	// metadata. Schema >= 3 payload chunks carry neither, yielding no key.
+	m := newStreamSessionManager()
+	reqA := &pluginapi.StreamChunkInterceptRequest{ChunkIndex: 0, OriginalRequest: []byte(`{"a":1}`)}
+	reqB := &pluginapi.StreamChunkInterceptRequest{ChunkIndex: 0, OriginalRequest: []byte(`{"b":2}`)}
+	keyA, keyB := m.sessionKey(reqA), m.sessionKey(reqB)
+	if keyA == "" || keyB == "" || keyA == keyB {
+		t.Fatalf("expected distinct non-empty body-hash keys, got %q vs %q", keyA, keyB)
 	}
-}
-
-func TestStreamBufferPushPop(t *testing.T) {
-	// Verify basic push/pop semantics.
-	const streamKey = uint64(1)
-	resetStreamBuffer(streamKey)
-
-	data := popStreamBuffer(streamKey)
-	if data != nil {
-		t.Fatal("expected nil from empty buffer")
+	if m.sessionKey(reqA) != keyA {
+		t.Fatal("expected a stable hash key for identical request bodies")
 	}
-
-	pushStreamBuffer(streamKey, []byte("test data"))
-	data = popStreamBuffer(streamKey)
-	if string(data) != "test data" {
-		t.Fatalf("expected 'test data', got %q", string(data))
-	}
-
-	// Second pop should be nil
-	data = popStreamBuffer(streamKey)
-	if data != nil {
-		t.Fatal("expected nil after pop")
-	}
-}
-
-func TestStreamBufferIsolatesConcurrentStreams(t *testing.T) {
-	// Two interleaved streams must not corrupt each other's buffered tail.
-	const keyA = uint64(0xA)
-	const keyB = uint64(0xB)
-	resetStreamBuffer(keyA)
-	resetStreamBuffer(keyB)
-
-	pushStreamBuffer(keyA, []byte("stream-A-tail"))
-	pushStreamBuffer(keyB, []byte("stream-B-tail"))
-
-	if got := string(popStreamBuffer(keyA)); got != "stream-A-tail" {
-		t.Fatalf("stream A buffer = %q, want %q", got, "stream-A-tail")
-	}
-	// Popping A must not disturb B.
-	if got := string(popStreamBuffer(keyB)); got != "stream-B-tail" {
-		t.Fatalf("stream B buffer = %q, want %q", got, "stream-B-tail")
-	}
-}
-
-func TestStreamBufferKeyDiffersPerRequest(t *testing.T) {
-	// Distinct request bodies must map to distinct buffer keys so concurrent
-	// streams stay isolated; identical bodies share a key across chunks.
-	reqA := &pluginapi.StreamChunkInterceptRequest{OriginalRequest: []byte(`{"a":1}`)}
-	reqB := &pluginapi.StreamChunkInterceptRequest{OriginalRequest: []byte(`{"b":2}`)}
-	if streamBufferKey(reqA) == streamBufferKey(reqB) {
-		t.Fatal("expected different keys for different request bodies")
-	}
-	if streamBufferKey(reqA) != streamBufferKey(reqA) {
-		t.Fatal("expected stable key for identical request body")
-	}
-	// Falls back to RequestBody when OriginalRequest is empty.
-	reqC := &pluginapi.StreamChunkInterceptRequest{RequestBody: []byte(`{"a":1}`)}
-	if streamBufferKey(reqA) != streamBufferKey(reqC) {
-		t.Fatal("expected OriginalRequest and matching RequestBody fallback to share a key")
+	bodyless := &pluginapi.StreamChunkInterceptRequest{ChunkIndex: 0}
+	if key := m.sessionKey(bodyless); key != "" {
+		t.Fatalf("expected no key for a schema >= 3 payload chunk without identifiers, got %q", key)
 	}
 }
 
@@ -1117,5 +1051,703 @@ func TestParseFilterConfigYAMLModelPrefixes(t *testing.T) {
 	}
 	if len(cfg.ModelPrefixes) != 2 || cfg.ModelPrefixes[0] != "agy/" || cfg.ModelPrefixes[1] != "antigravity/" {
 		t.Fatalf("ModelPrefixes = %v, want [agy/ antigravity/]", cfg.ModelPrefixes)
+	}
+}
+
+func TestBuiltInKeywordPresetCoversMainstreamCodingToolsAndAgents(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	applyFilterConfig(defaultFilterConfig())
+
+	for _, mapping := range defaultRewriteMappings {
+		keyword := mapping.Match
+		t.Run(keyword, func(t *testing.T) {
+			body := `{"system":"You are running with ` + keyword + ` in this environment."}`
+			got, rewritten := rewriteRequestBody([]byte(body), "openai")
+			if !rewritten {
+				t.Fatalf("keyword %q was not rewritten", keyword)
+			}
+			if strings.Contains(strings.ToLower(string(got)), strings.ToLower(keyword)) && strings.ToLower(keyword) != "antigravity" {
+				t.Fatalf("keyword %q still present in output: %s", keyword, got)
+			}
+			if !strings.Contains(string(got), "Antigravity") {
+				t.Fatalf("replacement Antigravity missing for keyword %q: %s", keyword, got)
+			}
+		})
+	}
+}
+
+func TestRewriteRequestBodyCloaksOhMyPiTools(t *testing.T) {
+	// OpenAI format with Oh My Pi tools
+	body := `{
+		"system":"Helpful, trusted assistant for load-bearing changes in Oh My Pi coding harness.",
+		"tools":[
+			{"type":"function","function":{"name":"read","description":"Read files, directories, and web URLs"}},
+			{"type":"function","function":{"name":"write","description":"Creates or overwrites file at specified path"}},
+			{"type":"function","function":{"name":"edit","description":"Line-anchored patch language"}},
+			{"type":"function","function":{"name":"bash","description":"Runs commands in persistent shell"}},
+			{"type":"function","function":{"name":"grep","description":"Searches files with regex"}},
+			{"type":"function","function":{"name":"glob","description":"Globs files and directories"}},
+			{"type":"function","function":{"name":"task","description":"Delegate work to subagents"}},
+			{"type":"function","function":{"name":"ask","description":"Ask user for clarification"}},
+			{"type":"function","function":{"name":"todo","description":"Manage tasks"}},
+			{"type":"function","function":{"name":"hub","description":"Agent coordination and messaging"}},
+			{"type":"function","function":{"name":"eval","description":"Run code in persistent kernel"}},
+			{"type":"function","function":{"name":"web_search","description":"Web search beyond knowledge cutoff"}}
+		],
+		"messages":[
+			{"role":"system","content":"Use bash for short pipelines and read for files."},
+			{"role":"user","content":"inspect the repo"},
+			{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"read","arguments":"{\"path\":\"main.go\"}"}}]},
+			{"role":"tool","name":"read","content":"package main\n"}
+		],
+		"tool_choice":{"type":"function","function":{"name":"bash"}}
+	}`
+	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	if !rewritten {
+		t.Fatal("want rewritten = true for Oh My Pi request")
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(got, &parsed); err != nil {
+		t.Fatalf("unmarshal error: %v", err)
+	}
+
+	// Assert system prompt rewritten
+	sys := parsed["system"].(string)
+	if !strings.Contains(sys, "Antigravity") || strings.Contains(sys, "Oh My Pi") {
+		t.Errorf("system prompt = %q, want 'Oh My Pi' replaced with 'Antigravity'", sys)
+	}
+
+	// Assert tools cloaked
+	toolsRaw := parsed["tools"].([]any)
+	expectedMap := map[string]string{
+		"read":       "view_file",
+		"write":      "write_to_file",
+		"edit":       "replace_file_content",
+		"bash":       "run_command",
+		"grep":       "grep_search",
+		"glob":       "list_dir",
+		"task":       "invoke_subagent",
+		"ask":        "ask_question",
+		"todo":       "manage_task",
+		"hub":        "send_message",
+		"eval":       "execute_code",
+		"web_search": "search_web",
+	}
+	cloakedNames := make(map[string]bool, len(toolsRaw))
+	for _, tr := range toolsRaw {
+		fn := tr.(map[string]any)["function"].(map[string]any)
+		if name, ok := fn["name"].(string); ok {
+			cloakedNames[name] = true
+		}
+	}
+	for orig, want := range expectedMap {
+		if !cloakedNames[want] {
+			t.Errorf("expected cloaked tool %q (from %q) in tools array", want, orig)
+		}
+	}
+
+	// Assert tool_choice cloaked
+	tc := parsed["tool_choice"].(map[string]any)["function"].(map[string]any)
+	if tc["name"] != "run_command" {
+		t.Errorf("tool_choice name = %q, want run_command", tc["name"])
+	}
+
+	// Assert messages tool_calls and tool role cloaked
+	msgs := parsed["messages"].([]any)
+	// Assistant message tool_calls
+	asstMsg := msgs[2].(map[string]any)
+	tcs := asstMsg["tool_calls"].([]any)
+	tc0 := tcs[0].(map[string]any)["function"].(map[string]any)
+	if tc0["name"] != "view_file" {
+		t.Errorf("messages[2].tool_calls[0].name = %q, want view_file", tc0["name"])
+	}
+	// Tool response message name
+	toolMsg := msgs[3].(map[string]any)
+	if toolMsg["name"] != "view_file" {
+		t.Errorf("messages[3].name = %q, want view_file", toolMsg["name"])
+	}
+
+	// Assert system message prose cloaking: "Use bash" -> "Use run_command"
+	sysMsg := msgs[0].(map[string]any)
+	if sysContent := sysMsg["content"].(string); !strings.Contains(sysContent, "run_command") {
+		t.Errorf("messages[0].content = %q, want 'run_command'", sysContent)
+	}
+}
+
+func TestRewriteRequestBodyCloaksOhMyPiToolsAnthropicFormat(t *testing.T) {
+	body := `{
+		"system":"You are Oh My Pi.",
+		"tools":[
+			{"name":"read","description":"Read files","input_schema":{"type":"object"}},
+			{"name":"bash","description":"Run shell","input_schema":{"type":"object"}},
+			{"name":"task","description":"Spawn subagent","input_schema":{"type":"object"}}
+		],
+		"messages":[
+			{
+				"role":"assistant",
+				"content":[{"type":"tool_use","id":"tool_1","name":"read","input":{"path":"a.go"}}]
+			}
+		]
+	}`
+	got, rewritten := rewriteRequestBody([]byte(body), "anthropic")
+	if !rewritten {
+		t.Fatal("want rewritten = true")
+	}
+	var parsed map[string]any
+	json.Unmarshal(got, &parsed)
+
+	toolsRaw := parsed["tools"].([]any)
+	t0 := toolsRaw[0].(map[string]any)
+	if t0["name"] != "view_file" {
+		t.Errorf("tools[0].name = %q, want view_file", t0["name"])
+	}
+	t1 := toolsRaw[1].(map[string]any)
+	if t1["name"] != "run_command" {
+		t.Errorf("tools[1].name = %q, want run_command", t1["name"])
+	}
+	t2 := toolsRaw[2].(map[string]any)
+	if t2["name"] != "invoke_subagent" {
+		t.Errorf("tools[2].name = %q, want invoke_subagent", t2["name"])
+	}
+
+	msgs := parsed["messages"].([]any)
+	cnt := msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)
+	if cnt["name"] != "view_file" {
+		t.Errorf("content[0].name = %q, want view_file", cnt["name"])
+	}
+}
+
+func TestUncloakResponseBodyOhMyPi(t *testing.T) {
+	uncloakTable := defaultUncloakTables["oh_my_pi"]
+
+	// OpenAI shape
+	respOpenAI := []byte(`{
+		"choices":[{
+			"message":{
+				"role":"assistant",
+				"tool_calls":[{"id":"call_1","type":"function","function":{"name":"run_command","arguments":"{}"}}]
+			}
+		}]
+	}`)
+	out, changed := uncloakResponseBody(respOpenAI, uncloakTable, "openai")
+	if !changed {
+		t.Fatal("want changed = true")
+	}
+	if !strings.Contains(string(out), `"name":"bash"`) {
+		t.Fatalf("output does not contain uncloaked name 'bash': %s", out)
+	}
+
+	// Anthropic shape
+	respAnthropic := []byte(`{
+		"content":[{"type":"tool_use","id":"tool_1","name":"view_file","input":{}}]
+	}`)
+	outAnth, changedAnth := uncloakResponseBody(respAnthropic, uncloakTable, "anthropic")
+	if !changedAnth {
+		t.Fatal("want changedAnth = true")
+	}
+	if !strings.Contains(string(outAnth), `"name":"read"`) {
+		t.Fatalf("output does not contain uncloaked name 'read': %s", outAnth)
+	}
+}
+
+func TestUncloakStreamChunkOhMyPi(t *testing.T) {
+	cfg := defaultFilterConfig()
+	cached := cfg.uncloakRegexCache["oh_my_pi"]
+	if cached == nil {
+		t.Fatal("cached uncloak pattern for oh_my_pi is nil")
+	}
+
+	chunk := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
+	out, changed := uncloakStreamChunk(chunk, cached)
+	if !changed {
+		t.Fatal("want changed = true for stream chunk")
+	}
+	if !strings.Contains(string(out), `"name":"bash"`) {
+		t.Fatalf("uncloaked chunk missing 'bash': %s", out)
+	}
+}
+
+func TestDetectClientOhMyPi(t *testing.T) {
+	toolNames := []string{"read", "bash", "edit", "write", "grep", "glob", "task", "ask", "todo", "hub", "eval", "web_search"}
+	client := detectClient(toolNames)
+	if client != "oh_my_pi" {
+		t.Fatalf("detectClient(%v) = %q, want 'oh_my_pi'", toolNames, client)
+	}
+
+	// Cloaked tool names detection
+	cloakedTargets := []string{"view_file", "run_command", "replace_file_content", "write_to_file", "grep_search", "list_dir", "invoke_subagent", "ask_question", "manage_task", "send_message", "execute_code", "search_web"}
+	cloakedClient := detectCloakedClient(cloakedTargets)
+	if cloakedClient != "oh_my_pi" {
+		t.Fatalf("detectCloakedClient(%v) = %q, want 'oh_my_pi'", cloakedTargets, cloakedClient)
+	}
+}
+
+func TestParseToolMappingsOhMyPiAliases(t *testing.T) {
+	raw := map[string]any{
+		"omp": map[string]any{
+			"custom_tool": "custom_target",
+		},
+	}
+	parsed, err := parseToolMappings(raw)
+	if err != nil {
+		t.Fatalf("parseToolMappings err: %v", err)
+	}
+	if parsed["oh_my_pi"]["custom_tool"] != "custom_target" {
+		t.Fatalf("parsed mapping = %v, want oh_my_pi.custom_tool = custom_target", parsed)
+	}
+}
+
+func TestNormalizeClientKeyAliases(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"omp", "oh_my_pi"},
+		{"oh-my-pi", "oh_my_pi"},
+		{"OH-MY-PI", "oh_my_pi"},
+		{"  Claude_Code  ", "claude_code"},
+		{"codex", "codex"},
+	}
+	for _, tt := range tests {
+		if got := normalizeClientKey(tt.in); got != tt.want {
+			t.Fatalf("normalizeClientKey(%q) = %q, want %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+func TestDetectCloakedClientTieRules(t *testing.T) {
+	// Spec: candidates tying at FULL target coverage are indistinguishable
+	// (native Antigravity serving every table) and cloaking is skipped; ties
+	// below full confidence resolve deterministically instead.
+	applyFilterConfig(filterConfig{
+		UseDefaultKeywords: true,
+		ToolMappings: map[string]map[string]string{
+			"c1": {"A": "tA", "B": "tB", "C": "tC", "D": "tD", "E": "tE"},
+			"c2": {"A": "tA", "B": "tB", "C": "tC", "D": "tD", "F": "tF"},
+		},
+	})
+	defer restoreDefaultFilterConfig(t)
+
+	// Partial tie: both clients hit 4/5 targets ({tA..tD}) — neither reaches
+	// full confidence, so detection resolves rather than skips.
+	partialNames := []string{"tA", "tB", "tC", "tD"}
+	first := detectCloakedClient(partialNames)
+	if first != "c1" && first != "c2" {
+		t.Fatalf("partial tie should resolve to a ranked winner, got %q", first)
+	}
+	for range 10 {
+		if again := detectCloakedClient(partialNames); again != first {
+			t.Fatalf("detection not deterministic: %q then %q", first, again)
+		}
+	}
+
+	// Full-coverage tie: every cloak target of both clients is present.
+	fullNames := []string{"tA", "tB", "tC", "tD", "tE", "tF"}
+	if got := detectCloakedClient(fullNames); got != "" {
+		t.Fatalf("full-coverage tie should skip cloaking, got %q", got)
+	}
+}
+
+func TestMCPPassthroughBothDirections(t *testing.T) {
+	// Spec story 29: MCP tools (mcp__*) must pass through unmolested in both
+	// directions while surrounding client tools are cloaked/restored.
+	applyFilterConfig(filterConfig{
+		UseDefaultKeywords: true,
+		ToolMappings:       copyToolMappings(defaultCloakTables),
+	})
+	defer restoreDefaultFilterConfig(t)
+
+	// Request side (OpenAI shape): omp detection needs a distinctive harness
+	// tool ("hub"), mcp__github__create_issue must survive verbatim.
+	body, changed := rewriteRequestBody([]byte(`{"system":"This is omp coding.","tools":[`+
+		`{"type":"function","function":{"name":"bash","description":"run shell"}},`+
+		`{"type":"function","function":{"name":"hub","description":"send message"}},`+
+		`{"type":"function","function":{"name":"mcp__github__create_issue","description":"create issue"}}],"messages":[]}`), "openai")
+	if !changed {
+		t.Fatal("expected OpenAI request body to be rewritten")
+	}
+	out := string(body)
+	if strings.Contains(out, `"name":"bash"`) {
+		t.Fatalf("expected bash cloaked to run_command: %s", out)
+	}
+	if !strings.Contains(out, "run_command") {
+		t.Fatalf("expected cloaked run_command in body: %s", out)
+	}
+	if !strings.Contains(out, `"name":"mcp__github__create_issue"`) {
+		t.Fatalf("MCP tool name was molested on the way up: %s", out)
+	}
+
+	// Request side (Anthropic shape).
+	anthBody, anthChanged := rewriteRequestBody([]byte(`{"system":"Oh My Pi agent","tools":[`+
+		`{"name":"write","description":"write file"},`+
+		`{"name":"mcp__jira__search","description":"search jira"},`+
+		`{"name":"hub","description":"send message"}],"messages":[]}`), "anthropic")
+	if !anthChanged {
+		t.Fatal("expected Anthropic request body to be rewritten")
+	}
+	anthOut := string(anthBody)
+	if !strings.Contains(anthOut, `"name":"write_to_file"`) {
+		t.Fatalf("expected omp write cloaked in Anthropic body: %s", anthOut)
+	}
+	if !strings.Contains(anthOut, `"name":"mcp__jira__search"`) {
+		t.Fatalf("MCP tool name was molested in Anthropic body: %s", anthOut)
+	}
+
+	// Response side (Anthropic shape): MCP tool_use round-trips untouched
+	// while native Antigravity names restore.
+	modified, respChanged := uncloakResponseBody(
+		[]byte(`{"content":[{"type":"tool_use","id":"t1","name":"view_file","input":{}},`+
+			`{"type":"tool_use","id":"t2","name":"mcp__github__list_issues","input":{}}]}`),
+		defaultUncloakTables["oh_my_pi"], "anthropic")
+	if !respChanged {
+		t.Fatal("expected Anthropic response body to be uncloaked")
+	}
+	if respOut := string(modified); !strings.Contains(respOut, "mcp__github__list_issues") {
+		t.Fatalf("MCP tool name was molested on the way back: %s", respOut)
+	}
+
+	// Stream side (OpenAI shape): MCP tool name survives uncloak in SSE chunks.
+	cached := defaultFilterConfig().uncloakRegexCache["oh_my_pi"]
+	if cached == nil {
+		t.Fatal("cached uncloak pattern for oh_my_pi is nil")
+	}
+	chunk := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[" +
+		"{\"index\":0,\"function\":{\"name\":\"execute_code\"}}," +
+		"{\"index\":1,\"function\":{\"name\":\"mcp__fs__read_file\"}}]}}]}\n\n")
+	streamOut, changedStream := uncloakStreamChunk(chunk, cached)
+	if !changedStream {
+		t.Fatal("expected stream chunk to be uncloaked")
+	}
+	streamStr := string(streamOut)
+	if !strings.Contains(streamStr, `"name":"eval"`) {
+		t.Fatalf("expected execute_code restored to eval: %s", streamStr)
+	}
+	if !strings.Contains(streamStr, `"name":"mcp__fs__read_file"`) {
+		t.Fatalf("MCP tool name was molested in stream chunk: %s", streamStr)
+	}
+}
+
+func TestStreamUncloakAnthropicSSE(t *testing.T) {
+	// Anthropic-format streaming: content_block_start carries the tool_use
+	// name; here it is split mid-name across TCP chunks to exercise Anthropic
+	// shaping AND event reassembly together, plus CRLF event boundaries.
+	mgr := newStreamSessionManager()
+	const reqID = "anthropic-sse-cloak"
+	reqBody := `{"tools":[{"name":"write","description":"w"},{"name":"read","description":"r"},{"name":"task","description":"t"}],"messages":[]}`
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:       reqID,
+		SourceFormat:    "anthropic",
+		OriginalRequest: []byte(reqBody),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}, "anthropic")
+
+	// Chunk 1 ends mid-tool-name inside an incomplete CRLF-delimited event.
+	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqID,
+		SourceFormat: "anthropic",
+		ChunkIndex:   0,
+		Body: []byte("event: content_block_start\r\n" +
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"view_f`),
+	}, "anthropic")
+	if !resp1.DropChunk {
+		t.Fatal("first Anthropic chunk should be buffered as an incomplete event")
+	}
+
+	// Chunk 2 completes the event plus more events, ending the stream.
+	resp2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqID,
+		SourceFormat: "anthropic",
+		ChunkIndex:   1,
+		Body: []byte("ile\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"file_path\\\":\\\"/tmp/x\\\"}\"}}\n\n" +
+			"data: [DONE]\n\n"),
+	}, "anthropic")
+
+	out := string(resp2.Body)
+	if strings.Contains(out, "view_file") {
+		t.Fatalf("cloaked name 'view_file' leaked through: %s", out)
+	}
+	if !strings.Contains(out, `"name":"read"`) && !strings.Contains(out, `"name": "read"`) {
+		t.Fatalf("expected view_file restored to read in Anthropic stream: %s", out)
+	}
+
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:"+reqID]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session should be deleted once the stream sends [DONE]")
+	}
+}
+
+func TestReplaceInsensitiveWordBoundaries(t *testing.T) {
+	// "omp" alias should only match standalone word, not inside "prompt", "complete", "computer"
+	input := "Please complete the prompt using computer and omp."
+	got, changed := replaceInsensitive(input, "omp", "Antigravity")
+	if !changed {
+		t.Fatal("expected changed = true for standalone 'omp'")
+	}
+	want := "Please complete the prompt using computer and Antigravity."
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+
+	// Pure substring matches without word boundary must not change
+	corruptInput := "This is a prompt with complete components."
+	noChangeGot, noChanged := replaceInsensitive(corruptInput, "omp", "Antigravity")
+	if noChanged {
+		t.Fatalf("corrupted prose: got %q", noChangeGot)
+	}
+}
+
+func TestDetectClientOhMyPiRequiresSignatureOrThreshold(t *testing.T) {
+	// Generic tools (read, write) alone should NOT trigger Oh My Pi
+	if client := detectClient([]string{"read", "write"}); client != "" {
+		t.Fatalf("detectClient([read, write]) = %q, want empty string", client)
+	}
+	if client := detectClient([]string{"read", "write", "edit"}); client != "" {
+		t.Fatalf("detectClient([read, write, edit]) = %q, want empty string", client)
+	}
+
+	// 4 generic tools should trigger Oh My Pi
+	if client := detectClient([]string{"read", "write", "edit", "bash"}); client != "oh_my_pi" {
+		t.Fatalf("detectClient([read, write, edit, bash]) = %q, want 'oh_my_pi'", client)
+	}
+
+	// 2 tools including a distinctive harness tool should trigger Oh My Pi
+	if client := detectClient([]string{"read", "hub"}); client != "oh_my_pi" {
+		t.Fatalf("detectClient([read, hub]) = %q, want 'oh_my_pi'", client)
+	}
+	if client := detectClient([]string{"bash", "task"}); client != "oh_my_pi" {
+		t.Fatalf("detectClient([bash, task]) = %q, want 'oh_my_pi'", client)
+	}
+}
+
+func TestStreamSessionManagerHeaderInitSchemaV4(t *testing.T) {
+	mgr := newStreamSessionManager()
+	// In schema_version >= 3 (e.g. v4), OriginalRequest and RequestBody are
+	// only provided at ChunkIndex == StreamChunkHeaderInitIndex (-1).
+	// Subsequent payload chunks (ChunkIndex >= 0) have OriginalRequest/RequestBody = nil.
+	reqID := "stream-session-test-v4"
+	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
+
+	// Step 1: Header-init chunk (ChunkIndex == -1)
+	initReq := &pluginapi.StreamChunkInterceptRequest{
+		RequestID:       reqID,
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(reqBody),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}
+	resp := mgr.processChunk(initReq, "openai")
+	if resp.DropChunk || len(resp.Body) > 0 {
+		t.Fatalf("header-init should return empty no-op response, got resp=%v", resp)
+	}
+
+	// Step 2: Payload chunk 0 (ChunkIndex == 0, OriginalRequest = nil, RequestBody = nil)
+	payloadChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
+	chunkReq := &pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqID,
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte(payloadChunk),
+	}
+	chunkResp := mgr.processChunk(chunkReq, "openai")
+	if len(chunkResp.Body) == 0 {
+		t.Fatal("payload chunk was not uncloaked via cached session from header-init")
+	}
+	if !strings.Contains(string(chunkResp.Body), `"name":"Bash"`) && !strings.Contains(string(chunkResp.Body), `"name": "Bash"`) {
+		t.Fatalf("expected tool name 'Bash' in uncloaked body, got: %s", string(chunkResp.Body))
+	}
+}
+
+func TestStreamSessionManagerIsolatesByRequestID(t *testing.T) {
+	mgr := newStreamSessionManager()
+	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`
+	reqIDA := "stream-session-iso-A"
+	reqIDB := "stream-session-iso-B"
+
+	// Init session A
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:       reqIDA,
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(reqBody),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}, "openai")
+
+	// Init session B
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:       reqIDB,
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(reqBody),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}, "openai")
+
+	// Send split chunk to Stream A: "data: {\"name\": \"run_c" (incomplete)
+	respA1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqIDA,
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_c"),
+	}, "openai")
+
+	if !respA1.DropChunk {
+		t.Fatalf("Stream A chunk 1 should be buffered and dropped, got drop=%t", respA1.DropChunk)
+	}
+
+	// Send complete chunk to Stream B — should NOT be affected by Stream A's buffered tail
+	completeB := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
+	respB := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqIDB,
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte(completeB),
+	}, "openai")
+
+	if respB.DropChunk {
+		t.Fatal("Stream B chunk should be processed immediately")
+	}
+	if !strings.Contains(string(respB.Body), "Bash") {
+		t.Fatalf("Stream B should be uncloaked to Bash, got: %s", string(respB.Body))
+	}
+
+	// Complete Stream A with second chunk
+	respA2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqIDA,
+		SourceFormat: "openai",
+		ChunkIndex:   1,
+		Body:         []byte("ommand\"}}]}}]}\n\n"),
+	}, "openai")
+
+	if !strings.Contains(string(respA2.Body), "Bash") {
+		t.Fatalf("Stream A should be uncloaked to Bash after reassembly, got: %s", string(respA2.Body))
+	}
+}
+
+func TestAtomicFilterConfigConcurrentSafety(t *testing.T) {
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	// 8 readers
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					cfg := activeFilterConfig()
+					if cfg == nil {
+						t.Errorf("activeFilterConfig returned nil")
+						return
+					}
+					_ = cfg.ToolMappings
+					_ = cfg.ModelPrefixes
+					_ = cfg.UseDefaultKeywords
+				}
+			}
+		}()
+	}
+
+	// 1 writer
+	for i := range 50 {
+		applyFilterConfig(filterConfig{
+			UseDefaultKeywords: i%2 == 0,
+			ToolMappings:       copyToolMappings(defaultCloakTables),
+			ModelPrefixes:      []string{"agy/", "antigravity/"},
+		})
+	}
+
+	close(stop)
+	wg.Wait()
+	restoreDefaultFilterConfig(t)
+}
+
+func TestEffectiveMappingsCustomOverride(t *testing.T) {
+	cfg := filterConfig{
+		UseDefaultKeywords: true,
+		CustomMappings: []rewriteMapping{
+			{Match: "Codex", Replacement: "MyBrand"},
+		},
+		ToolMappings: copyToolMappings(defaultCloakTables),
+	}
+	applyFilterConfig(cfg)
+	defer restoreDefaultFilterConfig(t)
+
+	body := []byte(`{"system":"This is Codex testing"}`)
+	rewritten, changed := rewriteRequestBody(body, "openai")
+	if !changed {
+		t.Fatalf("expected changed = true")
+	}
+	if strings.Contains(string(rewritten), "Antigravity") {
+		t.Fatalf("expected custom mapping MyBrand to override Antigravity, got: %s", string(rewritten))
+	}
+	if !strings.Contains(string(rewritten), "MyBrand") {
+		t.Fatalf("expected MyBrand in rewritten body, got: %s", string(rewritten))
+	}
+}
+
+func TestStreamChunksWithoutCorrelationKeyPassThrough(t *testing.T) {
+	mgr := newStreamSessionManager()
+	// Schema_version >= 3 payload chunks carry neither RequestID nor the
+	// original request body. Such chunks cannot be attributed to a stream;
+	// sharing one slot between them would corrupt concurrent output, so they
+	// pass through unmolested and never create manager state.
+	initNoKey := &pluginapi.StreamChunkInterceptRequest{
+		RequestID:       "",
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(`{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`),
+		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
+	}
+	resp := mgr.processChunk(initNoKey, "openai")
+	if len(resp.Body) > 0 || resp.DropChunk {
+		t.Fatalf("header-init should stay a no-op, got %+v", resp)
+	}
+
+	payloadChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
+	chunkReq := &pluginapi.StreamChunkInterceptRequest{
+		RequestID:    "",
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte(payloadChunk),
+	}
+	countSessions := func() int {
+		mgr.mu.Lock()
+		defer mgr.mu.Unlock()
+		return len(mgr.sessions)
+	}
+	sessionsBefore := countSessions()
+
+	resp = mgr.processChunk(chunkReq, "openai")
+	if len(resp.Body) > 0 || resp.DropChunk {
+		t.Fatalf("expected pass-through of uncorrelated payload chunk, got body=%q drop=%t", string(resp.Body), resp.DropChunk)
+	}
+	if after := countSessions(); after != sessionsBefore {
+		t.Fatalf("expected no session created for correlation-less stream, before=%d after=%d", sessionsBefore, after)
+	}
+}
+
+func TestStreamSessionManagerCleanupStaleSessions(t *testing.T) {
+	mgr := newStreamSessionManager()
+	// Add an abandoned session with a stale timestamp (>5 mins ago)
+	staleTime := time.Now().Add(-10 * time.Minute)
+	mgr.mu.Lock()
+	mgr.sessions["req:stale-stream"] = &streamSession{
+		client:    "claude_code",
+		updatedAt: staleTime,
+	}
+	mgr.mu.Unlock()
+
+	// Trigger opportunistic cleanup via processChunk on any chunk
+	dummyReq := &pluginapi.StreamChunkInterceptRequest{
+		RequestID:    "req:active-stream",
+		SourceFormat: "openai",
+		ChunkIndex:   0,
+		Body:         []byte("data: {}\n\n"),
+	}
+	mgr.processChunk(dummyReq, "openai")
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if _, exists := mgr.sessions["req:stale-stream"]; exists {
+		t.Fatalf("expected stale session to be pruned by processChunk")
 	}
 }

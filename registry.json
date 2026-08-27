@@ -4,9 +4,9 @@
     {
       "id": "antigravity-cloak",
       "name": "Antigravity Cloak",
-      "description": "CLIProxyAPI v7 dynamic plugin that disguises coding-CLI traffic (Claude Code, Codex) as Antigravity: brand rewrite plus two-way tool-name cloaking with structured uncloak, gated by an optional model-prefix allowlist.",
+      "description": "CLIProxyAPI v7 dynamic plugin that disguises coding-CLI traffic (Claude Code, Codex, Oh My Pi) as Antigravity: brand rewrite plus two-way tool-name cloaking with structured uncloak, gated by an optional model-prefix allowlist.",
       "author": "monet88",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "repository": "https://github.com/monet88/antigravity-cloak",
       "homepage": "https://github.com/monet88/antigravity-cloak",
       "license": "MIT",

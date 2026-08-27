@@ -44,8 +44,11 @@ import (
 	"hash/fnv"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -91,7 +94,7 @@ const abiVersion = 1
 
 const (
 	pluginName       = "antigravity-cloak"
-	pluginVersion    = "0.2.0"
+	pluginVersion    = "0.3.0"
 	pluginRepository = "https://github.com/monet88/antigravity-cloak"
 )
 
@@ -224,7 +227,7 @@ func configFields() []pluginapi.ConfigField {
 		{
 			Name:        "use_default_keywords",
 			Type:        pluginapi.ConfigFieldTypeBoolean,
-			Description: "Enable the built-in rewrite mapping preset: OpenCode, Codex, Claude Code -> Antigravity.",
+			Description: "Enable the built-in coding software and agent keyword preset.",
 		},
 		{
 			Name:        "custom_mappings",
@@ -234,7 +237,7 @@ func configFields() []pluginapi.ConfigField {
 		{
 			Name:        "tool_mappings",
 			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Custom tool name mappings per client. Keys: client name (claude_code, codex). Values: map of original_tool_name → antigravity_target_name. Overrides defaults for matching keys.",
+			Description: "Custom tool name mappings per client. Keys: client name (claude_code, codex, oh_my_pi). Values: map of original_tool_name → antigravity_target_name. Overrides defaults for matching keys.",
 		},
 		{
 			Name:        "model_prefixes",
@@ -344,82 +347,9 @@ func handleStreamChunkIntercept(request []byte) []byte {
 		debugLog("handleStreamChunkIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 	}
-	_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
-	debugLog("handleStreamChunkIntercept: client=%s", client)
-	if client == "" {
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
-	}
 
-	cfg := activeFilterConfig()
-	cached := cfg.uncloakRegexCache[client]
-	if cached == nil || cached.re == nil {
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
-	}
-
-	// ── SSE Event-Level Reassembly Buffer ──────────────────────────────
-	// TCP can split a network chunk at ANY byte boundary, including inside
-	// a tool name like "run_command" → Chunk1: "run_c", Chunk2: "ommand".
-	// Regex on each chunk alone would miss the match entirely.
-	//
-	// Solution: Buffer at the SSE EVENT level. SSE events are delimited by
-	// "\n\n". Incomplete events (no \n\n terminator) are buffered until the
-	// next chunk completes them. Regex only runs on complete events where
-	// tool names are guaranteed to be unfragmented.
-	//
-	// Stream identity: the SDK exposes no per-stream ID on this request, so we
-	// derive a stable key from the (per-stream constant) request body. Each
-	// concurrent stream therefore owns its own buffer slot, preventing the
-	// cross-stream corruption a single shared slot would cause. ChunkIndex == 0
-	// marks a new stream → reset that key's slot.
-	key := streamBufferKey(&req)
-
-	// Reset buffer on new stream
-	if req.ChunkIndex == 0 {
-		resetStreamBuffer(key)
-	}
-
-	// Retrieve and clear buffered tail from previous chunk
-	buffered := popStreamBuffer(key)
-
-	// Combine buffered tail + current chunk
-	var combined []byte
-	if len(buffered) > 0 {
-		combined = make([]byte, len(buffered)+len(req.Body))
-		copy(combined, buffered)
-		copy(combined[len(buffered):], req.Body)
-	} else {
-		combined = req.Body
-	}
-
-	// Split into complete SSE events and incomplete tail
-	completeEvents, incompleteTail := splitSSEEvents(combined)
-
-	// Buffer the incomplete tail for next chunk
-	if len(incompleteTail) > 0 {
-		pushStreamBuffer(key, incompleteTail)
-		debugLog("handleStreamChunkIntercept: buffered %d bytes (incomplete event)", len(incompleteTail))
-	}
-
-	if len(completeEvents) == 0 {
-		// No complete events — entire chunk is buffered.
-		// Use DropChunk to suppress this chunk entirely. The buffered bytes
-		// will be prepended to the next chunk and delivered then.
-		debugLog("handleStreamChunkIntercept: no complete events, dropping chunk")
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{DropChunk: true})
-	}
-
-	// Run regex replacement on complete events only
-	modified, changed := uncloakStreamChunk(completeEvents, cached)
-	debugLog("handleStreamChunkIntercept: changed=%t Body=%s", changed, string(modified))
-	if !changed {
-		modified = completeEvents
-	}
-
-	// If the result equals the original chunk, report no changes
-	if bytes.Equal(modified, req.Body) {
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
-	}
-	return mustEnvelope(pluginapi.StreamChunkInterceptResponse{Body: modified})
+	resp := globalStreamManager.processChunk(&req, format)
+	return mustEnvelope(resp)
 }
 
 func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]string, string) {
@@ -535,7 +465,7 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 	return []byte(buf.String()), true
 }
 
-// ── SSE Event Reassembly Buffer ────────────────────────────────────────
+// ── Stream Session Manager & SSE Event Reassembly ────────────────────────
 //
 // Handles the "Split-String Chunk" attack: TCP can split a network chunk
 // at any byte boundary, including inside a tool name:
@@ -548,52 +478,233 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 // (those without a \n\n terminator) and only process/forward complete events
 // where all JSON content — including tool names — is guaranteed intact.
 //
-// The host runs each client request in its own goroutine, so multiple streams
-// can call the interceptor concurrently. A single shared slot would let one
-// stream pop, reset, or overwrite another stream's incomplete tail. We instead
-// key the buffers by a per-stream identifier so concurrent streams stay
-// isolated. ChunkIndex == 0 signals a new stream → that key's slot is reset.
+// In CLIProxyAPI schema_version >= 3, OriginalRequest and RequestBody are
+// delivered only on the header-init chunk (ChunkIndex == StreamChunkHeaderInitIndex).
+// StreamSessionManager caches the client uncloak pattern under a correlation
+// key (RequestID, metadata/headers ids, or for legacy schema < 3 chunks where
+// every chunk repeats the request body, an FNV hash of that body), isolating
+// concurrent streams. Payload chunks with NO correlation key cannot be
+// attributed to any stream: sharing one slot between them would let one
+// stream's state overwrite another's (cross-stream corruption), so such
+// chunks pass through unmolested instead of being buffered.
 
-var (
-	streamBufMu sync.Mutex
-	streamBufs  = make(map[uint64][]byte) // per-stream incomplete tails
-)
+type streamSession struct {
+	client    string
+	cached    *cachedUncloakPattern
+	tail      []byte
+	updatedAt time.Time
+}
 
-// streamBufferKey derives a stable per-stream key. The SDK exposes no stream
-// ID on StreamChunkInterceptRequest, but the request body is constant for the
-// lifetime of a single stream, so an FNV-1a hash of it (preferring the raw
-// client body) uniquely identifies the stream across its chunks.
-func streamBufferKey(req *pluginapi.StreamChunkInterceptRequest) uint64 {
-	src := req.OriginalRequest
-	if len(src) == 0 {
-		src = req.RequestBody
+type streamSessionManager struct {
+	mu       sync.Mutex
+	sessions map[string]*streamSession
+}
+
+var globalStreamManager = newStreamSessionManager()
+
+func newStreamSessionManager() *streamSessionManager {
+	return &streamSessionManager{
+		sessions: make(map[string]*streamSession),
 	}
-	h := fnv.New64a()
-	_, _ = h.Write(src)
-	return h.Sum64()
 }
 
-func resetStreamBuffer(key uint64) {
-	streamBufMu.Lock()
-	defer streamBufMu.Unlock()
-	delete(streamBufs, key)
+func (m *streamSessionManager) sessionKey(req *pluginapi.StreamChunkInterceptRequest) string {
+	if req.RequestID != "" {
+		return "req:" + req.RequestID
+	}
+	if req.Metadata != nil {
+		for _, k := range []string{"request_id", "stream_id", "session_id", "trace_id", "id"} {
+			if v, ok := req.Metadata[k].(string); ok && v != "" {
+				return "meta:" + k + ":" + v
+			}
+		}
+	}
+	if req.RequestHeaders != nil {
+		for _, h := range []string{"X-Request-Id", "X-Correlation-Id", "X-Amzn-Trace-Id"} {
+			if v := req.RequestHeaders.Get(h); v != "" {
+				return "req_hdr:" + h + ":" + v
+			}
+		}
+	}
+	if req.ResponseHeaders != nil {
+		for _, h := range []string{"X-Request-Id", "X-Correlation-Id"} {
+			if v := req.ResponseHeaders.Get(h); v != "" {
+				return "resp_hdr:" + h + ":" + v
+			}
+		}
+	}
+	// For legacy chunks (schema < 3, ChunkIndex >= 0) where OriginalRequest/RequestBody
+	// is populated on every chunk, use the FNV hash of the request body as session key.
+	if req.ChunkIndex >= 0 {
+		src := req.OriginalRequest
+		if len(src) == 0 {
+			src = req.RequestBody
+		}
+		if len(src) > 0 {
+			h := fnv.New64a()
+			_, _ = h.Write(src)
+			return fmt.Sprintf("fnv:%x", h.Sum64())
+		}
+	}
+	return ""
 }
 
-func popStreamBuffer(key uint64) []byte {
-	streamBufMu.Lock()
-	defer streamBufMu.Unlock()
-	data := streamBufs[key]
-	delete(streamBufs, key)
-	return data
+// resetSession (re)initializes the session for a fresh stream start, clearing
+// any stale tail left by an aborted previous incarnation of the same key.
+func (m *streamSessionManager) resetSession(key, client string, cached *cachedUncloakPattern) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.cleanupStaleLocked()
+	m.sessions[key] = &streamSession{
+		client:    client,
+		cached:    cached,
+		updatedAt: time.Now(),
+	}
 }
 
-func pushStreamBuffer(key uint64, data []byte) {
-	streamBufMu.Lock()
-	defer streamBufMu.Unlock()
-	// Copy to avoid retaining references to large chunk slices
-	buf := make([]byte, len(data))
-	copy(buf, data)
-	streamBufs[key] = buf
+// ensureSession registers a session only when none lives under key yet.
+// Losing a race to an already-registered session returns the incumbent;
+// both racers derive (client, cached) from the same request body, so either
+// outcome is correct.
+func (m *streamSessionManager) ensureSession(key, client string, cached *cachedUncloakPattern) *streamSession {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sess := m.sessions[key]; sess != nil {
+		return sess
+	}
+	sess := &streamSession{
+		client:    client,
+		cached:    cached,
+		updatedAt: time.Now(),
+	}
+	m.sessions[key] = sess
+	return sess
+}
+
+func (m *streamSessionManager) deleteSession(key string) {
+	if key == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.sessions, key)
+	m.mu.Unlock()
+}
+
+func (m *streamSessionManager) cleanupStaleLocked() {
+	cutoff := time.Now().Add(-5 * time.Minute)
+	for k, s := range m.sessions {
+		if s.updatedAt.Before(cutoff) {
+			delete(m.sessions, k)
+		}
+	}
+}
+
+func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptRequest, format string) pluginapi.StreamChunkInterceptResponse {
+	key := m.sessionKey(req)
+
+	// Header-init chunk: schema_version >= 3 delivers OriginalRequest/RequestBody
+	// here. Nothing to uncloak on this chunk; register the stream's session so
+	// payload chunks resolve their client from cache.
+	if req.ChunkIndex == pluginapi.StreamChunkHeaderInitIndex || req.ChunkIndex < 0 {
+		// Without a correlation key the future payload chunks cannot be
+		// attributed back to this session — detection would be wasted work.
+		if key == "" {
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
+		_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+		debugLog("StreamSessionManager: header-init key=%s client=%s", key, client)
+		if client != "" {
+			cached := activeFilterConfig().uncloakRegexCache[client]
+			if cached != nil && cached.re != nil {
+				m.resetSession(key, client, cached)
+			}
+		}
+		return pluginapi.StreamChunkInterceptResponse{}
+	}
+
+	// Payload chunks carrying no correlation key cannot be tied to a stream.
+	// They pass through unmolested rather than compete for shared state that
+	// would corrupt concurrent streams' buffered tails.
+	if key == "" {
+		return pluginapi.StreamChunkInterceptResponse{}
+	}
+
+	// Opportunistic cleanup runs on every payload chunk, matching the
+	// original behavior: a stream that dies between chunks must still be
+	// pruned by later traffic.
+	m.mu.Lock()
+	m.cleanupStaleLocked()
+	sess := m.sessions[key]
+	m.mu.Unlock()
+	if sess == nil {
+		sess = m.ensureFallbackSession(req, format, key)
+	}
+	if sess == nil || sess.cached == nil || sess.cached.re == nil {
+		return pluginapi.StreamChunkInterceptResponse{}
+	}
+	cached := sess.cached
+
+	// Reset buffer on first payload chunk (ChunkIndex == 0)
+	m.mu.Lock()
+	if req.ChunkIndex == 0 {
+		sess.tail = nil
+	}
+
+	var combined []byte
+	if len(sess.tail) > 0 {
+		combined = make([]byte, len(sess.tail)+len(req.Body))
+		copy(combined, sess.tail)
+		copy(combined[len(sess.tail):], req.Body)
+	} else {
+		combined = req.Body
+	}
+
+	completeEvents, incompleteTail := splitSSEEvents(combined)
+	sess.tail = incompleteTail
+	sess.updatedAt = time.Now()
+	m.mu.Unlock()
+
+	if len(completeEvents) == 0 {
+		debugLog("StreamSessionManager: no complete events, dropping chunk len=%d", len(incompleteTail))
+		return pluginapi.StreamChunkInterceptResponse{DropChunk: true}
+	}
+
+	modified, changed := uncloakStreamChunk(completeEvents, cached)
+	if !changed {
+		modified = completeEvents
+	}
+
+	// Cleanup session if stream reached [DONE]
+	if bytes.Contains(completeEvents, []byte("data: [DONE]")) {
+		m.deleteSession(key)
+	}
+
+	if bytes.Equal(modified, req.Body) {
+		return pluginapi.StreamChunkInterceptResponse{}
+	}
+	return pluginapi.StreamChunkInterceptResponse{Body: modified}
+}
+
+// ensureFallbackSession handles schema_version < 3 streams, where every payload
+// chunk repeats OriginalRequest/RequestBody, plus the lazy case where a keyed
+// header-init carried no detectable client but later chunks might. Detection
+// deliberately runs WITHOUT holding the manager lock: parsing a large request
+// body under the lock serialized every concurrent stream's chunk processing.
+func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkInterceptRequest, format, key string) *streamSession {
+	src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
+	if len(src) == 0 || key == "" {
+		return nil
+	}
+	_, client := buildUncloakTable(src, format)
+	debugLog("StreamSessionManager: fallback detect key=%s client=%s", key, client)
+	if client == "" {
+		return nil
+	}
+	cached := activeFilterConfig().uncloakRegexCache[client]
+	if cached == nil || cached.re == nil {
+		return nil
+	}
+	return m.ensureSession(key, client, cached)
 }
 
 // splitSSEEvents splits combined bytes into complete SSE events and an
@@ -742,9 +853,69 @@ func safeMarshal(v any) ([]byte, error) {
 }
 
 var defaultRewriteMappings = []rewriteMapping{
-	{Match: "opencode", Replacement: "Antigravity"},
-	{Match: "codex", Replacement: "Antigravity"},
-	{Match: "claude code", Replacement: "Antigravity"},
+	// Major AI code editors, assistants, and terminal coding agents.
+	{Match: "Claude Code", Replacement: "Antigravity"},
+	{Match: "OpenAI Codex", Replacement: "Antigravity"},
+	{Match: "Codex CLI", Replacement: "Antigravity"},
+	{Match: "Codex", Replacement: "Antigravity"},
+	{Match: "OpenCode", Replacement: "Antigravity"},
+	{Match: "GitHub Copilot CLI", Replacement: "Antigravity"},
+	{Match: "GitHub Copilot", Replacement: "Antigravity"},
+	{Match: "Gemini Code Assist", Replacement: "Antigravity"},
+	{Match: "Gemini CLI", Replacement: "Antigravity"},
+	{Match: "Cursor", Replacement: "Antigravity"},
+	{Match: "Windsurf", Replacement: "Antigravity"},
+	{Match: "Codeium", Replacement: "Antigravity"},
+	{Match: "Cline", Replacement: "Antigravity"},
+	{Match: "Roo Code", Replacement: "Antigravity"},
+	{Match: "Kilo Code", Replacement: "Antigravity"},
+	{Match: "Aider", Replacement: "Antigravity"},
+	{Match: "Continue.dev", Replacement: "Antigravity"},
+	{Match: "Amazon Q Developer", Replacement: "Antigravity"},
+	{Match: "Amazon CodeWhisperer", Replacement: "Antigravity"},
+	{Match: "JetBrains AI Assistant", Replacement: "Antigravity"},
+	{Match: "JetBrains Junie", Replacement: "Antigravity"},
+	{Match: "Kiro", Replacement: "Antigravity"},
+	{Match: "Qoder CLI", Replacement: "Antigravity"},
+	{Match: "Qoder", Replacement: "Antigravity"},
+	{Match: "Qwen Code", Replacement: "Antigravity"},
+	{Match: "Trae", Replacement: "Antigravity"},
+	{Match: "Tabnine", Replacement: "Antigravity"},
+	{Match: "Sourcegraph Cody", Replacement: "Antigravity"},
+	{Match: "Augment Code", Replacement: "Antigravity"},
+	{Match: "Replit Agent", Replacement: "Antigravity"},
+	{Match: "Replit Ghostwriter", Replacement: "Antigravity"},
+	{Match: "Devin", Replacement: "Antigravity"},
+	{Match: "OpenHands", Replacement: "Antigravity"},
+	{Match: "SWE-agent", Replacement: "Antigravity"},
+	{Match: "Goose", Replacement: "Antigravity"},
+	{Match: "Zed AI", Replacement: "Antigravity"},
+	{Match: "Void Editor", Replacement: "Antigravity"},
+	{Match: "PearAI", Replacement: "Antigravity"},
+	{Match: "Refact.ai", Replacement: "Antigravity"},
+	{Match: "Tabby", Replacement: "Antigravity"},
+	{Match: "GitLab Duo", Replacement: "Antigravity"},
+	{Match: "Visual Studio IntelliCode", Replacement: "Antigravity"},
+	{Match: "CodeBuddy", Replacement: "Antigravity"},
+	{Match: "Blackbox AI", Replacement: "Antigravity"},
+	{Match: "Pieces for Developers", Replacement: "Antigravity"},
+	{Match: "Qodo", Replacement: "Antigravity"},
+	{Match: "CodiumAI", Replacement: "Antigravity"},
+	{Match: "Rovo Dev CLI", Replacement: "Antigravity"},
+	{Match: "Factory Droid", Replacement: "Antigravity"},
+
+	// Oh My Pi coding agent & harness.
+	{Match: "Oh My Pi", Replacement: "Antigravity"},
+	{Match: "oh-my-pi", Replacement: "Antigravity"},
+	{Match: "omp", Replacement: "Antigravity"},
+
+	// General-purpose local agents that can generate and modify code.
+	{Match: "OpenClaw", Replacement: "Antigravity"},
+	{Match: "Clawdbot", Replacement: "Antigravity"},
+	{Match: "Moltbot", Replacement: "Antigravity"},
+	{Match: "Hermes Agent", Replacement: "Antigravity"},
+	{Match: "Hermes", Replacement: "Antigravity"},
+	{Match: "WorkBuddy", Replacement: "Antigravity"},
 }
 
 type rewriteMapping struct {
@@ -770,7 +941,47 @@ var defaultCloakTables = map[string]map[string]string{
 		"list_mcp_resource_templates": "list_permissions",
 		"read_mcp_resource":           "read_resource",
 	},
+	"oh_my_pi": {
+		"read":       "view_file",
+		"write":      "write_to_file",
+		"edit":       "replace_file_content",
+		"bash":       "run_command",
+		"grep":       "grep_search",
+		"glob":       "list_dir",
+		"task":       "invoke_subagent",
+		"ask":        "ask_question",
+		"todo":       "manage_task",
+		"hub":        "send_message",
+		"web_search": "search_web",
+		"eval":       "execute_code",
+	},
 }
+
+// clientDistinctiveTools lists harness-specific source tool names whose
+// presence alone identifies a client. Clients whose source names are mostly
+// common words ("read", "bash") collide with arbitrary user-defined tools,
+// so those names require several simultaneous matches instead.
+//
+// MUST stay in sync with the matching keys of defaultCloakTables; update both
+// together when a table changes.
+var clientDistinctiveTools = map[string]map[string]bool{
+	"oh_my_pi": {"hub": true, "task": true, "todo": true, "eval": true, "web_search": true},
+}
+
+const (
+	// minToolNameHits is the minimum number of tool-name hits required before
+	// any client is detected from original tool names at all.
+	minToolNameHits = 2
+
+	// minCollidingToolMatches is how many tool-name hits a client needs when
+	// none of its distinctive harness tools are present.
+	minCollidingToolMatches = 4
+
+	// minCloakTargetHitNum / minCloakTargetHitDen define the target-coverage
+	// threshold for cloaked-client detection: hits/total >= 4/5 (80%).
+	minCloakTargetHitNum = 4
+	minCloakTargetHitDen = 5
+)
 
 var defaultUncloakTables map[string]map[string]string
 
@@ -783,6 +994,8 @@ func init() {
 		}
 		defaultUncloakTables[client] = uncloaks
 	}
+	cfg := defaultFilterConfig()
+	globalFilterConfig.Store(&cfg)
 }
 
 func copyToolMappings(m map[string]map[string]string) map[string]map[string]string {
@@ -840,8 +1053,7 @@ type cachedUncloakPattern struct {
 }
 
 var (
-	filterConfigMu      sync.RWMutex
-	currentFilterConfig = defaultFilterConfig()
+	globalFilterConfig atomic.Pointer[filterConfig]
 )
 
 func defaultFilterConfig() filterConfig {
@@ -854,9 +1066,6 @@ func defaultFilterConfig() filterConfig {
 }
 
 func applyFilterConfig(cfg filterConfig) {
-	filterConfigMu.Lock()
-	defer filterConfigMu.Unlock()
-
 	newCfg := filterConfig{
 		UseDefaultKeywords: cfg.UseDefaultKeywords,
 		CustomMappings:     append([]rewriteMapping(nil), normalizeMappings(cfg.CustomMappings)...),
@@ -864,7 +1073,7 @@ func applyFilterConfig(cfg filterConfig) {
 		ModelPrefixes:      append([]string(nil), cfg.ModelPrefixes...),
 	}
 	rebuildCachedRegexes(&newCfg)
-	currentFilterConfig = newCfg
+	globalFilterConfig.Store(&newCfg)
 }
 
 // rebuildCachedRegexes pre-compiles all regex patterns from the current
@@ -927,18 +1136,14 @@ func rebuildCachedRegexes(cfg *filterConfig) {
 	}
 }
 
-func activeFilterConfig() filterConfig {
-	filterConfigMu.RLock()
-	defer filterConfigMu.RUnlock()
-
-	return filterConfig{
-		UseDefaultKeywords: currentFilterConfig.UseDefaultKeywords,
-		CustomMappings:     append([]rewriteMapping(nil), currentFilterConfig.CustomMappings...),
-		ToolMappings:       copyToolMappings(currentFilterConfig.ToolMappings),
-		ModelPrefixes:      append([]string(nil), currentFilterConfig.ModelPrefixes...),
-		cloakRegexCache:    currentFilterConfig.cloakRegexCache,
-		uncloakRegexCache:  currentFilterConfig.uncloakRegexCache,
+func activeFilterConfig() *filterConfig {
+	cfg := globalFilterConfig.Load()
+	if cfg == nil {
+		d := defaultFilterConfig()
+		globalFilterConfig.CompareAndSwap(nil, &d)
+		return globalFilterConfig.Load()
 	}
+	return cfg
 }
 
 type lifecycleRequest struct {
@@ -1037,6 +1242,19 @@ func parseModelPrefixes(value any) ([]string, error) {
 	return prefixes, nil
 }
 
+// normalizeClientKey canonicalizes a configured client id to the key space
+// used by defaultCloakTables and the detection logic: lowercase, with known
+// aliases folded onto their canonical table key.
+func normalizeClientKey(client string) string {
+	key := strings.ToLower(strings.TrimSpace(client))
+	switch key {
+	case "omp", "oh-my-pi":
+		return "oh_my_pi"
+	default:
+		return key
+	}
+}
+
 func parseToolMappings(value any) (map[string]map[string]string, error) {
 	typed, ok := value.(map[string]any)
 	if !ok {
@@ -1048,12 +1266,9 @@ func parseToolMappings(value any) (map[string]map[string]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("client %q: %w", client, err)
 		}
-		// Normalize client keys to lowercase so user config such as
-		// "Claude_Code" or "Codex" matches the lowercase keys used by the
-		// detection logic and default tables.
 		// Merge rather than overwrite so multiple case variants of the same
 		// client (e.g. "Claude_Code" and "claude_code") combine deterministically.
-		normalized := strings.ToLower(client)
+		normalized := normalizeClientKey(client)
 		if result[normalized] == nil {
 			result[normalized] = clientMap
 			continue
@@ -1135,12 +1350,17 @@ func parseMappingString(value string) ([]rewriteMapping, error) {
 	return mappings, nil
 }
 
-func effectiveMappings(cfg filterConfig) []rewriteMapping {
+func effectiveMappings(cfg *filterConfig) []rewriteMapping {
+	if cfg == nil {
+		return defaultRewriteMappings
+	}
 	mappings := make([]rewriteMapping, 0, len(defaultRewriteMappings)+len(cfg.CustomMappings))
 	if cfg.UseDefaultKeywords {
 		mappings = append(mappings, defaultRewriteMappings...)
 	}
-	mappings = append(mappings, cfg.CustomMappings...)
+	if len(cfg.CustomMappings) > 0 {
+		mappings = append(mappings, cfg.CustomMappings...)
+	}
 	return normalizeMappings(mappings)
 }
 
@@ -1495,12 +1715,20 @@ func rewriteSystemValue(value any, mappings []rewriteMapping) (any, bool) {
 	}
 }
 
+func isWordByte(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
+}
+
 func replaceInsensitive(value, match, replacement string) (string, bool) {
 	if match == "" {
 		return value, false
 	}
 	lowerValue := strings.ToLower(value)
 	lowerMatch := strings.ToLower(match)
+
+	firstIsWord := isWordByte(match[0])
+	lastIsWord := isWordByte(match[len(match)-1])
+
 	var builder strings.Builder
 	start := 0
 	changed := false
@@ -1510,10 +1738,21 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 			break
 		}
 		index += start
-		builder.WriteString(value[start:index])
-		builder.WriteString(replacement)
-		start = index + len(match)
-		changed = true
+		matchEnd := index + len(match)
+
+		// Check word boundaries if match starts/ends with a word character
+		hasLeftBoundary := !firstIsWord || index == 0 || !isWordByte(value[index-1])
+		hasRightBoundary := !lastIsWord || matchEnd == len(value) || !isWordByte(value[matchEnd])
+
+		if hasLeftBoundary && hasRightBoundary {
+			builder.WriteString(value[start:index])
+			builder.WriteString(replacement)
+			start = matchEnd
+			changed = true
+		} else {
+			builder.WriteString(value[start : index+1])
+			start = index + 1
+		}
 	}
 	if !changed {
 		return value, false
@@ -1755,22 +1994,60 @@ func detectClient(toolNames []string) string {
 				count++
 			}
 		}
+
+		// Validation rules per client: clients whose source names are mostly
+		// common words need either a distinctive harness tool or several
+		// simultaneous matches, per clientDistinctiveTools.
+		if distinctives := clientDistinctiveTools[client]; len(distinctives) > 0 {
+			hasDistinctive := false
+			for name := range distinctives {
+				if nameSet[name] {
+					hasDistinctive = true
+					break
+				}
+			}
+			if !hasDistinctive && count < minCollidingToolMatches {
+				continue
+			}
+		}
+
 		if count > bestCount {
 			bestCount = count
 			bestClient = client
 		}
 	}
 
-	if bestCount >= 2 {
+	if bestCount >= minToolNameHits {
 		return bestClient
 	}
 	return ""
 }
 
+// cloakTargetMatch records how many of one client's cloak targets appear in
+// an observed tool-name set.
+type cloakTargetMatch struct {
+	client string
+	hits   int
+	total  int
+}
+
+// higherRatioThan orders two matches by hit ratio (m > o), using exact integer
+// arithmetic. Equal ratios must be broken by the caller.
+func (m cloakTargetMatch) higherRatioThan(o cloakTargetMatch) bool {
+	return m.hits*o.total > o.hits*m.total
+}
+
+// atFullCoverage reports whether every one of the client's cloak targets matched.
+func (m cloakTargetMatch) atFullCoverage() bool {
+	return m.hits == m.total
+}
+
 // detectCloakedClient identifies which client's cloaking was applied by
 // checking cloak TARGET names against the provided tool names.
-// If exactly one client's targets match at >=80%, that client was cloaked.
-// If multiple clients match (native Antigravity has all targets), returns "".
+// A candidate qualifies when most of its targets are present
+// (>= minCloakTargetHitNum/minCloakTargetHitDen); the best-qualified candidate
+// wins. When candidates tie at 100% (native Antigravity serving every table),
+// no client can be distinguished and cloaking is skipped.
 func detectCloakedClient(toolNames []string) string {
 	cfg := activeFilterConfig()
 	nameSet := make(map[string]bool, len(toolNames))
@@ -1778,11 +2055,7 @@ func detectCloakedClient(toolNames []string) string {
 		nameSet[n] = true
 	}
 
-	type clientMatch struct {
-		client string
-		hits   int
-	}
-	var matches []clientMatch
+	var matches []cloakTargetMatch
 	for client, cloakTable := range cfg.ToolMappings {
 		if len(cloakTable) == 0 {
 			continue
@@ -1793,16 +2066,44 @@ func detectCloakedClient(toolNames []string) string {
 				hits++
 			}
 		}
-		// 80% threshold: most of the client's cloak targets are present
-		if hits*5 >= len(cloakTable)*4 {
-			matches = append(matches, clientMatch{client, hits})
+		if hits*minCloakTargetHitDen >= len(cloakTable)*minCloakTargetHitNum {
+			matches = append(matches, cloakTargetMatch{
+				client: client,
+				hits:   hits,
+				total:  len(cloakTable),
+			})
 		}
 	}
 
-	// Exactly one client's cloak targets match → that client was cloaked
-	// Multiple matches → likely native Antigravity (superset of all cloak targets)
-	if len(matches) == 1 {
+	switch len(matches) {
+	case 0:
+		return ""
+	case 1:
 		return matches[0].client
 	}
-	return ""
+
+	// Multiple qualifying clients: rank by target-hit ratio, breaking exact
+	// ties deterministically by absolute hit count and finally by client id,
+	// so repeated detections against identical input agree.
+	sort.Slice(matches, func(i, j int) bool {
+		a, b := matches[i], matches[j]
+		if a.higherRatioThan(b) || b.higherRatioThan(a) {
+			return a.higherRatioThan(b)
+		}
+		if a.hits != b.hits {
+			return a.hits > b.hits
+		}
+		return a.client < b.client
+	})
+
+	top, runnerUp := matches[0], matches[1]
+	if top.higherRatioThan(runnerUp) {
+		return top.client
+	}
+	// Full-coverage tie: every qualified client sees all its cloak targets in
+	// the names — indistinguishable native Antigravity traffic — so skip.
+	if top.atFullCoverage() && runnerUp.atFullCoverage() {
+		return ""
+	}
+	return top.client
 }
