@@ -1,0 +1,26 @@
+AGENTS.md
+  h_17f2fa2b92da6a 20-23,77-80,82,262
+CLAUDE.md
+  h_17f2fa2b92da6a 4
+CONTEXT.md
+  h_17f2fa2b92da6a 19-74
+README.md
+  h_17f2fa2b92da6a 19-22,24
+filter_test.go
+  h_17f2fa2b92da6a 1522-1533
+main.go
+  h_17f2fa2b92da6a 97,988-1008,1020-1024
+registry.json
+  h_17f2fa2b92da6a 9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "5f94eaf49babfe354f7d6144895323a62be7317a",
+  "prompts": {},
+  "humans": {
+    "h_17f2fa2b92da6a": {
+      "author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
