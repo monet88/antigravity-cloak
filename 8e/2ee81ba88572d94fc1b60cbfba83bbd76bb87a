@@ -1,0 +1,19 @@
+README.md
+  s_90be6915eb1452::t_66301f3bcf952c 1-76,80-81,86-91,93-94,96-97,99,102-103,106,108-111,113,119,121,123-124,126,131-133
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "8e2ee81ba88572d94fc1b60cbfba83bbd76bb87a",
+  "prompts": {},
+  "sessions": {
+    "s_90be6915eb1452": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0d1a-e55b-7962-ae3d-f2887fd63fa7",
+        "model": "unknown"
+      },
+      "human_author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
