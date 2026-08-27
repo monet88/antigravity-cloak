@@ -1,0 +1,14 @@
+filter_test.go
+  h_17f2fa2b92da6a 866,869,877,888,1433,1436,1444,1456,1473-1475,1525,1539,1552,1560,1562,1568,1576,1584,1597,1612,1689,1700,1713-1715,1719,1729,1732-1733,1737,1746,1748-1750
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.24",
+  "base_commit_sha": "4996add539e91d20360886547cce0f55a9b656ee",
+  "prompts": {},
+  "humans": {
+    "h_17f2fa2b92da6a": {
+      "author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
