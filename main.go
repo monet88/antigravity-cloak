@@ -402,6 +402,40 @@ func detectionRequestBody(originalRequest, requestBody []byte) []byte {
 	}
 	return requestBody
 }
+// splitToolNamespace separates an optional namespace prefix (e.g. "functions:", "default_api:")
+// from the base tool name. It returns (prefix, baseName). If no prefix is present, it returns ("", name).
+func splitToolNamespace(name string) (string, string) {
+	if idx := strings.LastIndex(name, ":"); idx >= 0 {
+		return name[:idx+1], name[idx+1:]
+	}
+	return "", name
+}
+
+// lookupCloak maps a tool name (with or without namespace prefix) to its cloaked equivalent.
+func lookupCloak(name string, cloakTable map[string]string) (string, bool) {
+	if target, exists := cloakTable[name]; exists {
+		return target, true
+	}
+	if prefix, base := splitToolNamespace(name); prefix != "" {
+		if target, exists := cloakTable[base]; exists {
+			return prefix + target, true
+		}
+	}
+	return "", false
+}
+
+// lookupUncloak maps a cloaked tool name (with or without namespace prefix) back to its original name.
+func lookupUncloak(name string, uncloakTable map[string]string) (string, bool) {
+	if orig, exists := uncloakTable[name]; exists {
+		return orig, true
+	}
+	if prefix, base := splitToolNamespace(name); prefix != "" {
+		if orig, exists := uncloakTable[base]; exists {
+			return prefix + orig, true
+		}
+	}
+	return "", false
+}
 
 func effectiveUncloakTable(client string) map[string]string {
 	cloakTable := activeFilterConfig().ToolMappings[client]
@@ -414,7 +448,6 @@ func effectiveUncloakTable(client string) map[string]string {
 	}
 	return uncloak
 }
-
 func uncloakResponseBody(body []byte, uncloakTable map[string]string, sourceFormat string) ([]byte, bool) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {
@@ -463,7 +496,7 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 		}
 		// loc[2]:loc[3] is capture group 1 (the tool name)
 		toolName := bodyStr[loc[2]:loc[3]]
-		if orig, ok := cached.lookup[toolName]; ok {
+		if orig, ok := lookupUncloak(toolName, cached.lookup); ok {
 			buf.WriteString(bodyStr[lastEnd:loc[2]])
 			buf.WriteString(orig)
 			lastEnd = loc[3]
@@ -792,7 +825,7 @@ func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat stri
 						if tc, ok := tcRaw.(map[string]any); ok {
 							if fn, ok := tc["function"].(map[string]any); ok {
 								if name, ok := fn["name"].(string); ok {
-									if orig, exists := uncloakTable[name]; exists {
+									if orig, exists := lookupUncloak(name, uncloakTable); exists {
 										fn["name"] = orig
 										changed = true
 									}
@@ -808,7 +841,7 @@ func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat stri
 						if tc, ok := tcRaw.(map[string]any); ok {
 							if fn, ok := tc["function"].(map[string]any); ok {
 								if name, ok := fn["name"].(string); ok {
-									if orig, exists := uncloakTable[name]; exists {
+									if orig, exists := lookupUncloak(name, uncloakTable); exists {
 										fn["name"] = orig
 										changed = true
 									}
@@ -821,7 +854,7 @@ func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat stri
 		} else if sourceFormat == "anthropic" {
 			if typeVal, ok := typed["type"].(string); ok && typeVal == "tool_use" {
 				if name, ok := typed["name"].(string); ok {
-					if orig, exists := uncloakTable[name]; exists {
+					if orig, exists := lookupUncloak(name, uncloakTable); exists {
 						typed["name"] = orig
 						changed = true
 					}
@@ -1097,6 +1130,7 @@ type cachedCloakPatterns struct {
 }
 
 type cachedAmbiguousRule struct {
+	orig     string
 	patterns []*regexp.Regexp
 	target   string
 }
@@ -1153,21 +1187,22 @@ func rebuildCachedRegexes(cfg *filterConfig) {
 				qOrig := regexp.QuoteMeta(orig)
 				var patterns []*regexp.Regexp
 				for _, p := range []string{
-					`(?i)(the\s+)` + qOrig + `(\s+(?:tool|function|command)\b)`,
-					`(?i)((?:use|call|run|invoke|with)\s+)` + qOrig + `(\b)`,
+					`(?i)\b(the\s+)((?:[a-zA-Z0-9_-]+:)?` + qOrig + `)(\s+(?:tool|function|command)\b)`,
+					`(?i)\b((?:use|call|run|invoke|with)\s+)((?:[a-zA-Z0-9_-]+:)?` + qOrig + `)(\b)`,
 				} {
 					if re, err := regexp.Compile(p); err == nil {
 						patterns = append(patterns, re)
 					}
 				}
 				cp.ambiguousRules = append(cp.ambiguousRules, cachedAmbiguousRule{
+					orig:     orig,
 					patterns: patterns,
 					target:   target,
 				})
 			}
 		}
 		if len(safeParts) > 0 {
-			pattern := `\b(` + strings.Join(safeParts, "|") + `)\b`
+			pattern := `\b((?:[a-zA-Z0-9_-]+:)?(?:` + strings.Join(safeParts, "|") + `))\b`
 			cp.safeRe, _ = regexp.Compile(pattern)
 		}
 		cfg.cloakRegexCache[client] = cp
@@ -1180,8 +1215,8 @@ func rebuildCachedRegexes(cfg *filterConfig) {
 			lookup[target] = orig
 		}
 		if len(targets) > 0 {
-			// Match "name" : "<target>" with flexible whitespace
-			pattern := `"name"\s*:\s*"(` + strings.Join(targets, "|") + `)"`
+			// Match "name" : "(?:[a-zA-Z0-9_-]+:)?<target>" with flexible whitespace
+			pattern := `"name"\s*:\s*"((?:[a-zA-Z0-9_-]+:)?(?:` + strings.Join(targets, "|") + `))"`
 			if re, err := regexp.Compile(pattern); err == nil {
 				cfg.uncloakRegexCache[client] = &cachedUncloakPattern{
 					re:     re,
@@ -1488,6 +1523,16 @@ func rewriteRequestBodyWithClient(body []byte, sourceFormat string) ([]byte, boo
 	sysMsgChanged := rewriteSystemMessages(rootMap, mappings, cachedCloak)
 	changed = changed || sysMsgChanged
 
+	// 5. Tool name replace in top-level system field (Anthropic system prompt)
+	if cachedCloak != nil {
+		if sysVal, ok := rootMap["system"]; ok {
+			next, sysToolChanged := replaceToolNamesInValue(sysVal, cachedCloak)
+			if sysToolChanged {
+				rootMap["system"] = next
+				changed = true
+			}
+		}
+	}
 	if !changed {
 		return nil, false, client
 	}
@@ -1518,14 +1563,14 @@ func cloakToolNames(body map[string]any, cloakTable map[string]string, sourceFor
 					continue
 				}
 				if name, ok := fn["name"].(string); ok {
-					if target, exists := cloakTable[name]; exists {
+					if target, exists := lookupCloak(name, cloakTable); exists {
 						fn["name"] = target
 						changed = true
 					}
 				}
 			} else if sourceFormat == "anthropic" {
 				if name, ok := tMap["name"].(string); ok {
-					if target, exists := cloakTable[name]; exists {
+					if target, exists := lookupCloak(name, cloakTable); exists {
 						tMap["name"] = target
 						changed = true
 					}
@@ -1555,7 +1600,7 @@ func cloakToolNames(body map[string]any, cloakTable map[string]string, sourceFor
 							continue
 						}
 						if name, ok := fn["name"].(string); ok {
-							if target, exists := cloakTable[name]; exists {
+							if target, exists := lookupCloak(name, cloakTable); exists {
 								fn["name"] = target
 								changed = true
 							}
@@ -1565,7 +1610,7 @@ func cloakToolNames(body map[string]any, cloakTable map[string]string, sourceFor
 				// tool result message: msg["name"]
 				if msg["role"] == "tool" {
 					if name, ok := msg["name"].(string); ok {
-						if target, exists := cloakTable[name]; exists {
+						if target, exists := lookupCloak(name, cloakTable); exists {
 							msg["name"] = target
 							changed = true
 						}
@@ -1581,7 +1626,7 @@ func cloakToolNames(body map[string]any, cloakTable map[string]string, sourceFor
 						}
 						if cnt["type"] == "tool_use" {
 							if name, ok := cnt["name"].(string); ok {
-								if target, exists := cloakTable[name]; exists {
+								if target, exists := lookupCloak(name, cloakTable); exists {
 									cnt["name"] = target
 									changed = true
 								}
@@ -1599,7 +1644,7 @@ func cloakToolNames(body map[string]any, cloakTable map[string]string, sourceFor
 			// {type: "function", function: {name: "..."}}
 			if fn, ok := tc["function"].(map[string]any); ok {
 				if name, ok := fn["name"].(string); ok {
-					if target, exists := cloakTable[name]; exists {
+					if target, exists := lookupCloak(name, cloakTable); exists {
 						fn["name"] = target
 						changed = true
 					}
@@ -1608,7 +1653,7 @@ func cloakToolNames(body map[string]any, cloakTable map[string]string, sourceFor
 		} else if sourceFormat == "anthropic" {
 			// {type: "tool", name: "..."}
 			if name, ok := tc["name"].(string); ok {
-				if target, exists := cloakTable[name]; exists {
+				if target, exists := lookupCloak(name, cloakTable); exists {
 					tc["name"] = target
 					changed = true
 				}
@@ -1822,6 +1867,11 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 	return builder.String(), true
 }
 
+var (
+	quotedNamespaceToolRe = regexp.MustCompile("([`\"])([a-zA-Z0-9_-]+:)([a-zA-Z0-9_]+)([`\"])")
+	namespacedToolIdentRe = regexp.MustCompile(`\b([a-zA-Z0-9_-]+:)([a-zA-Z0-9_]+)\b`)
+)
+
 // replaceToolNamesInText uses pre-compiled regex patterns from cachedCloakPatterns.
 // Patterns are compiled once on config change (rebuildCachedRegexes), not per call.
 func replaceToolNamesInText(text string, cached *cachedCloakPatterns) (string, bool) {
@@ -1844,11 +1894,45 @@ func replaceToolNamesInText(text string, cached *cachedCloakPatterns) (string, b
 			}
 		}
 	}
+	quotedWithNsResult := quotedNamespaceToolRe.ReplaceAllStringFunc(result, func(m string) string {
+		sub := quotedNamespaceToolRe.FindStringSubmatch(m)
+		if len(sub) == 5 && sub[1] == sub[4] {
+			q := sub[1]
+			prefix := sub[2]
+			base := sub[3]
+			if target, ok := cached.cloakTable[base]; ok {
+				return q + prefix + target + q
+			}
+		}
+		return m
+	})
+	if quotedWithNsResult != result {
+		result = quotedWithNsResult
+		changed = true
+	}
 
+	// Tier 1b: Namespaced identifier replacement — names with a namespace prefix
+	// (e.g. "functions:read", "default_api:todo") are qualified identifiers and
+	// safe to replace anywhere in prose without colliding with ordinary English words.
+	nsResult := namespacedToolIdentRe.ReplaceAllStringFunc(result, func(m string) string {
+		sub := namespacedToolIdentRe.FindStringSubmatch(m)
+		if len(sub) == 3 {
+			prefix := sub[1]
+			base := sub[2]
+			if target, ok := cached.cloakTable[base]; ok {
+				return prefix + target
+			}
+		}
+		return m
+	})
+	if nsResult != result {
+		result = nsResult
+		changed = true
+	}
 	// Tier 2: Word-boundary replacement for unambiguous names (pre-compiled)
 	if cached.safeRe != nil {
 		newResult := cached.safeRe.ReplaceAllStringFunc(result, func(match string) string {
-			if target, ok := cached.safeLookup[match]; ok {
+			if target, ok := lookupCloak(match, cached.safeLookup); ok {
 				return target
 			}
 			return match
@@ -1862,7 +1946,19 @@ func replaceToolNamesInText(text string, cached *cachedCloakPatterns) (string, b
 	// Tier 3: Pattern-based replacement for ambiguous names (pre-compiled)
 	for _, rule := range cached.ambiguousRules {
 		for _, re := range rule.patterns {
-			newResult := re.ReplaceAllString(result, "${1}"+rule.target+"${2}")
+			newResult := re.ReplaceAllStringFunc(result, func(match string) string {
+				sub := re.FindStringSubmatch(match)
+				if len(sub) >= 4 {
+					lead := sub[1]
+					tool := sub[2]
+					trail := sub[3]
+					prefix, _ := splitToolNamespace(tool)
+					return lead + prefix + rule.target + trail
+				} else if len(sub) == 3 {
+					return sub[1] + rule.target + sub[2]
+				}
+				return match
+			})
 			if newResult != result {
 				result = newResult
 				changed = true
@@ -2041,11 +2137,13 @@ func extractToolNames(body map[string]any, sourceFormat string) []string {
 // the provided tool name list. The client with the most key matches wins.
 func detectClient(toolNames []string) string {
 	cfg := activeFilterConfig()
-	nameSet := make(map[string]bool, len(toolNames))
+	nameSet := make(map[string]bool, len(toolNames)*2)
 	for _, n := range toolNames {
 		nameSet[n] = true
+		if _, base := splitToolNamespace(n); base != n {
+			nameSet[base] = true
+		}
 	}
-
 	bestClient := ""
 	bestCount := 0
 	for client, cloakTable := range cfg.ToolMappings {
@@ -2116,9 +2214,12 @@ func detectCloakedClient(toolNames []string) string {
 		return ""
 	}
 	cfg := activeFilterConfig()
-	nameSet := make(map[string]bool, len(toolNames))
+	nameSet := make(map[string]bool, len(toolNames)*2)
 	for _, n := range toolNames {
 		nameSet[n] = true
+		if _, base := splitToolNamespace(n); base != n {
+			nameSet[base] = true
+		}
 	}
 
 	totalObserved := len(nameSet)

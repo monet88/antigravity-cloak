@@ -26,3 +26,5 @@ test/
 .ref/
 .claude
 .agents
+__pycache__/
+*.pyc

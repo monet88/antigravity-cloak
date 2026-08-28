@@ -38,6 +38,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Validate Python test scripts syntax
+        run: python3 -m py_compile tests/*.py
+
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
     needs: test
@@ -110,7 +113,7 @@ jobs:
             -checksum "${ARCHIVE_NAME}.sha256"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ env.ARCHIVE_NAME }}
           path: |
@@ -171,7 +174,7 @@ jobs:
             -checksum "${ARCHIVE_NAME}.sha256"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ env.ARCHIVE_NAME }}
           path: |
@@ -243,7 +246,7 @@ jobs:
             -checksum "${ARCHIVE_NAME}.sha256"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ env.ARCHIVE_NAME }}
           path: |
@@ -261,7 +264,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           path: dist
           merge-multiple: true
