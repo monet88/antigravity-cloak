@@ -42,7 +42,7 @@ This document captures the architectural friction analysis and proposed **deepen
 * **Recommendation Strength**: **Strong**
 
 #### Friction
-In `rewriteRequestBodyWithClient`, a single request payload traverses the decoded JSON AST **5 consecutive times**:
+In `rewriteRequestBodyWithClient`, a single request payload traverses the decoded JSON AST **6 consecutive times**:
 1. `rewriteSystemFields` (recursive map/slice walk for `"system"`)
 2. `extractToolNames` (recursive walk to locate tool declarations/invocations)
 3. `cloakToolNames` (walks `tools[]`, `messages[]`, `tool_choice`)
@@ -50,7 +50,7 @@ In `rewriteRequestBodyWithClient`, a single request payload traverses the decode
 5. `rewriteSystemMessages` (walks `messages[]` where `role == "system"`)
 6. `replaceToolNamesInValue` (walks top-level `"system"`)
 
-Schema knowledge for `openai` and `anthropic` formats is duplicated and fragmented across 4 separate functions. Adding support for new message block types or parameter structures requires modifying multiple functions across 600 lines.
+Schema knowledge for `openai` and `anthropic` formats is duplicated and fragmented across 6 separate functions. Adding support for new message block types or parameter structures requires modifying multiple functions across 600 lines.
 
 #### Solution
 Introduce a deep `PayloadTranslator` interface with concrete format adapters:
@@ -174,6 +174,12 @@ flowchart LR
 
 ## 3. Incremental Implementation Plan
 
+> **Follow-up backlog, not implemented behavior.** The candidates and phases below
+> describe future deepening work and are NOT part of the current shipped
+> capability in this PR. The PR only fixes and tests the existing namespaced
+> cloaking, client classification, and offline lifecycle harness; nothing in this
+> section has landed yet.
+
 When ready to implement, execute in the following dependency order:
 
 1. **Phase 1: `TranslationRuleset` Engine (Candidate 2)**
@@ -184,11 +190,11 @@ When ready to implement, execute in the following dependency order:
 
 2. **Phase 2: Single-Pass `PayloadTranslator` (Candidate 1)**
    - Define `PayloadTranslator` interface with `AnthropicAdapter` and `OpenAIAdapter`.
-   - Consolidate the 5 separate AST passes into single recursive descent per adapter.
+   - Consolidate the 6 separate AST passes into a single recursive descent per adapter.
    - Update `handleRequestInterceptBefore` and `handleResponseIntercept` to use the translator.
    - *Impact*: Massive reduction in AST passes, centralized schema handling.
 
 3. **Phase 3: `StreamFrameAssembler` Seam (Candidate 3)**
    - Extract `StreamFrameAssembler` from `streamSessionManager`.
-   - Add unit tests for adversarial chunk splits (`tests/stream_frame_test.go`).
+   - Add unit tests for adversarial chunk splits at the repo root (`stream_frame_test.go`), consistent with the repo convention that `package main` `*_test.go` files live alongside `main.go` and `tests/` is reserved for `.py`/`.sh` integration/e2e scripts.
    - *Impact*: Clean testability for streaming edge cases without touching session manager.

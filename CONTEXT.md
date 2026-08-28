@@ -72,10 +72,19 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 - `list_mcp_resource_templates` $\to$ `list_permissions`
 - `read_mcp_resource` $\to$ `read_resource`
 
+
 ### 3. Activation Model (Two-Stage Gating)
 Every interceptor evaluates two sequential gates:
 1. **Model Gate (`modelAllowsCloak`)**: Evaluates `model_prefixes` against `Model` and `RequestedModel`. If empty, all models pass. If configured, non-matching models exit early with a no-op response.
 2. **Client Gate (`detectClient`)**: Counts tool name matches against known client cloak tables. If matches >= 2, the client is identified and cloaking proceeds.
+
+#### Client Classification Semantics
+- **Original-name detection (`detectClient`)** keys off source tool names. Clients whose source names are mostly common words (`read`, `bash`) require either a distinctive harness tool (`hub`, `task`, `todo`, `eval`, `web_search`, `vibe_*`, `*_experiment`) or at least `minCollidingToolMatches` (4) simultaneous matches.
+- **Cloaked-target detection (`detectCloakedClient`)** runs against the already-cloaked observed names. Namespace prefixes (`functions:view_file`, `default_api:bash`) are normalised away first, so each declared tool contributes exactly one observed base identity and the denominator is never inflated by an alias. A candidate qualifies only when it has at least 3 hits **and** covers at least 80% of the observed unique base identities (`hits*5 >= observed*4`). The static table length is not an alternative qualification path.
+- **Ties & native pass-through**: multiple candidates are ranked by exact integer ratio over observed identities, then by hit count, then by client id. When 2+ distinct tables each reach full-table coverage (`hits == tableSize`), the traffic is treated as a native Antigravity superset and cloaking is skipped.
+- **Namespace safety**: a namespaced reference whose prefix is itself a source tool name (`read:write`) is an access-mode / compound token, not a tool reference, and is left untouched.
+
+These semantics are recorded in [ADR 0002](docs/adr/0002-ratio-ranked-client-classification-and-session-pre-registration.md).
 
 ### 4. Stream Session Management (`StreamSessionManager`)
 - **Schema-Aware Caching**: In CLIProxyAPI schema_version >= 3, request bodies (`OriginalRequest`/`RequestBody`) are delivered only on the header-init chunk (`ChunkIndex == StreamChunkHeaderInitIndex`). The manager caches the uncloak regex pattern under the stream's correlation key - `RequestID`, a metadata/header id, or (schema < 3, where every chunk repeats the request body) an FNV hash of that body.

@@ -7,6 +7,7 @@ All operations must be performed via the management API (`/v0/management`) using
 ## Key Operational Facts
 - The official store registry is always loaded. Your own plugin is only visible after its registry is added as an extra store-source. If you skip this, install returns 404 (host does not know the plugin id).
 - The VPS config is NOT guaranteed to match the local `config.yaml`. The running VPS box may be missing both the custom store-source and the plugin config block even if local has them. Always read the live VPS config first.
+- The install / enable / configure calls (`plugin-store/<id>/install`, `plugins/<id>/enabled`, `plugins/<id>/config`) persist their own `plugins.configs.antigravity-cloak` block back into the remote config. You only have to hand-add the `store-sources` lines in step 2 — do NOT hand-edit or re-upload the plugin config block, or you will fight the host.
 - There is NO narrow endpoint for store-sources (`/v0/management/plugin-store/sources`, `/plugin-store-sources`, `/store-sources` all return 404). The only way to add a store-source is to edit the full config via `GET`/`PUT /v0/management/config.yaml`.
 - `config.yaml` GET returns raw YAML bytes. In PowerShell, read with `Invoke-WebRequest` and decode `.Content` as UTF-8 (it returns as `byte[]`, not `string`).
 
@@ -20,6 +21,8 @@ Set `$base` and `$key` to your VPS API endpoint and management key:
    $resp = Invoke-WebRequest -Uri "$base/v0/management/config.yaml" -Headers @{ Authorization = "Bearer $key" }
    [System.IO.File]::WriteAllBytes("config.backup.yaml", $resp.Content)
    ```
+
+   *Keep this backup. It is the rollback point: if an install or config change goes wrong on the remote, restore it with a single `PUT /v0/management/config.yaml` using the saved bytes (it must carry the same store-source configuration), then re-run the plugin install.*
 
 2. **Add store-source**:
    Build the new config by inserting ONLY the `store-sources` lines under `plugins:` (right after `enabled: true`, before `configs:`). Diff against the backup to confirm no other lines are modified.

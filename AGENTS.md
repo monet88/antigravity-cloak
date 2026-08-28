@@ -21,6 +21,12 @@ coding-CLI traffic as Antigravity. Two jobs:
   the repository root alongside `main.go` for `package main`, while `tests/` is
   dedicated to integration/e2e test scripts (`.py`, `.sh`). Upstream references
   are cloned under `.ref/` (gitignored workspace), not part of the module.
+- The root Go suite is the **offline lifecycle / unit harness**: an httptest-backed
+  round-trip that drives a rewritten request into a local mock upstream and back
+  through the stream interceptor. It uses no external network and proves the
+  cloak-to-stream round trip within the standard CI test job. The external
+  integration/e2e scripts in `tests/` (`.py`, `.sh`) are a separate, runnable
+  layer against a live CLIProxyAPI instance and are never invoked by `go test`.
 
 ## Activation model (important)
 
