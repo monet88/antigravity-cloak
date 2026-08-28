@@ -1751,6 +1751,66 @@ func TestDetectCloakedClientOhMyPiStandardNineTools(t *testing.T) {
 		t.Fatalf("detectCloakedClient(ompCloakedTools) = %q, want 'oh_my_pi'", got)
 	}
 }
+func TestDetectCloakedClientNamespaceNormalized(t *testing.T) {
+	// A namespaced (qualified) cloaked set must contribute one observed
+	// identity per declared tool and never inflate the denominator with aliases.
+	qualifiedNine := []string{
+		"functions:view_file", "functions:write_to_file", "functions:replace_file_content",
+		"functions:run_command", "functions:grep_search", "functions:list_dir",
+		"functions:invoke_subagent", "functions:ask_question", "functions:manage_task",
+	}
+	if got := detectCloakedClient(qualifiedNine); got != "oh_my_pi" {
+		t.Fatalf("qualified nine => %q, want oh_my_pi", got)
+	}
+
+	// Mixed qualified/unqualified forms of the same tool de-duplicate to one identity.
+	mixed := []string{
+		"view_file", "functions:write_to_file", "default_api:replace_file_content",
+		"run_command", "grep_search", "list_dir",
+		"invoke_subagent", "ask_question", "manage_task",
+	}
+	if got := detectCloakedClient(mixed); got != "oh_my_pi" {
+		t.Fatalf("mixed nine => %q, want oh_my_pi", got)
+	}
+
+	// A set of observed identities that is mostly non-targets (below the 80%
+	// observed-coverage threshold) must not qualify as any client.
+	belowThreshold := []string{
+		"functions:view_file", "functions:write_to_file", "functions:replace_file_content",
+		"functions:run_command", "functions:custom_a", "functions:custom_b",
+		"functions:custom_c", "functions:custom_d", "functions:custom_e",
+	}
+	if got := detectCloakedClient(belowThreshold); got != "" {
+		t.Fatalf("below-threshold set should not qualify, got %q", got)
+	}
+}
+
+func TestBuildUncloakTableFallbackQualified(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	// Request body is already cloaked with qualified names, and there is no
+	// RequestID pre-registration — the fallback path must still identify the
+	// client from the normalized observed identities.
+	body := `{
+		"tools":[
+			{"type":"function","function":{"name":"functions:view_file"}},
+			{"type":"function","function":{"name":"functions:write_to_file"}},
+			{"type":"function","function":{"name":"functions:replace_file_content"}},
+			{"type":"function","function":{"name":"functions:run_command"}},
+			{"type":"function","function":{"name":"functions:grep_search"}},
+			{"type":"function","function":{"name":"functions:list_dir"}},
+			{"type":"function","function":{"name":"functions:invoke_subagent"}},
+			{"type":"function","function":{"name":"functions:ask_question"}},
+			{"type":"function","function":{"name":"functions:manage_task"}}
+		]
+	}`
+	uncloakTable, client := buildUncloakTable([]byte(body), "openai")
+	if client != "oh_my_pi" {
+		t.Fatalf("client = %q, want oh_my_pi (uncloakTable=%v)", client, uncloakTable)
+	}
+	if uncloakTable == nil || uncloakTable["view_file"] != "read" {
+		t.Fatalf("expected oh_my_pi uncloak mapping view_file->read, got %v", uncloakTable)
+	}
+}
 
 func TestHandleRequestAndStreamUncloakRoundTripOhMyPi(t *testing.T) {
 	const reqID = "omp-roundtrip-test-1"

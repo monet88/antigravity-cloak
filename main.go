@@ -2251,26 +2251,27 @@ func (m cloakTargetMatch) atFullCoverage() bool {
 }
 
 // detectCloakedClient identifies which client's cloaking was applied by
-// checking cloak TARGET names against the provided tool names.
-// A candidate qualifies when at least minToolNameHits (2) tools match AND
-// it accounts for most of the observed tools (hits/observed >= 80%) OR
-// most of its own table (hits/tableSize >= 80%).
-// When candidates tie at 100% (native Antigravity serving every table),
-// no client can be distinguished and cloaking is skipped.
+// checking cloak TARGET names against the observed tool identities.
+// Namespace prefixes are normalised away so each declared tool contributes a
+// single observed identity and the observed denominator is never inflated by
+// an alias. A candidate qualifies when at least 3 tools match AND it covers
+// at least 80% of the observed unique identities (hits/observed). The static
+// table length is not an alternative qualification path.
+// When multiple distinct tables reach full coverage (hits == tableSize),
+// native Antigravity traffic serving every tool table is indistinguishable,
+// so cloaking is skipped.
 func detectCloakedClient(toolNames []string) string {
 	if len(toolNames) < 3 {
 		return ""
 	}
 	cfg := activeFilterConfig()
-	nameSet := make(map[string]bool, len(toolNames)*2)
+	observedSet := make(map[string]bool, len(toolNames))
 	for _, n := range toolNames {
-		nameSet[n] = true
-		if _, base := splitToolNamespace(n); base != n {
-			nameSet[base] = true
-		}
+		_, base := splitToolNamespace(n)
+		observedSet[base] = true
 	}
 
-	totalObserved := len(nameSet)
+	totalObserved := len(observedSet)
 	var matches []cloakTargetMatch
 	for client, cloakTable := range cfg.ToolMappings {
 		if len(cloakTable) == 0 {
@@ -2278,11 +2279,11 @@ func detectCloakedClient(toolNames []string) string {
 		}
 		hits := 0
 		for _, target := range cloakTable {
-			if nameSet[target] {
+			if observedSet[target] {
 				hits++
 			}
 		}
-		if hits >= 3 && (hits*minCloakTargetHitDen >= totalObserved*minCloakTargetHitNum || hits*minCloakTargetHitDen >= len(cloakTable)*minCloakTargetHitNum) {
+		if hits >= 3 && hits*minCloakTargetHitDen >= totalObserved*minCloakTargetHitNum {
 			matches = append(matches, cloakTargetMatch{
 				client:    client,
 				hits:      hits,

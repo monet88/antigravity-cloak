@@ -20,11 +20,12 @@ When integrating Oh My Pi (`oh_my_pi`) and handling streaming responses across v
 ## Decision
 
 1. **Ratio-Ranked Classification against Observed Tools**:
-   - Calculate detection ratios against the **observed unique tool count** rather than the static table length:
+   - Namespace prefixes are normalised away before scoring, so each declared tool contributes exactly one observed identity. The observed denominator is built from the **base tool identities only**, never inflated by the qualified aliases (e.g. `functions:view_file` and `view_file` count as one).
+   - Calculate detection ratios against the **observed unique base-tool count** rather than the static table length:
      $$\text{hits} \times 5 \ge \text{totalObserved} \times 4 \quad (\ge 80\%)$$
-   - Require a minimum threshold of $\text{hits} \ge 3$ to avoid spurious single-tool triggers.
-   - For native Antigravity superset requests where multiple distinct cloak tables reach $100\%$ match ($\text{fullCoverageCount} \ge 2$), explicitly return `""` (no-op passthrough) to prevent corrupting native Antigravity traffic.
-   - Use deterministic integer ratio comparison ($h_1 \times t_2 > h_2 \times t_1$) to rank candidate clients without floating-point inaccuracies.
+   - The static table length is **not an alternative qualification path**: a candidate qualifies only when $\text{hits} \ge 3$ **and** the observed-ratio test above passes.
+   - For native Antigravity superset requests where multiple distinct cloak tables reach $100\%$ full-table coverage ($\text{hits} = \text{tableSize}$ for $\ge 2$ tables, counted by `fullCoverageCount`), explicitly return `""` (no-op passthrough) to prevent corrupting native Antigravity traffic.
+   - Use deterministic integer ratio comparison ($h_1 \times o_2 > h_2 \times o_1$) to rank candidate clients without floating-point inaccuracies, breaking exact ties by absolute hit count and then by client id.
 
 2. **Request-Time Stream Session Pre-Registration**:
    - In `request.intercept_before`, as soon as client detection succeeds on the full request body, pre-register the detected client and its uncloak regex patterns in `StreamSessionManager` keyed by `RequestID` (and metadata correlation identifiers).
