@@ -1,0 +1,20 @@
+AGENTS.md
+  h_17f2fa2b92da6a 24-29
+CONTEXT.md
+  h_17f2fa2b92da6a 75,81-88
+docs/architecture-review.md
+  h_17f2fa2b92da6a 45,53,177-182,193,199
+docs/deployment/vps.md
+  h_17f2fa2b92da6a 10,25-26
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "50452ea8a8b2fe70c6238b37b37b1b1dceb2c552",
+  "prompts": {},
+  "humans": {
+    "h_17f2fa2b92da6a": {
+      "author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
