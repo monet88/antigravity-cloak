@@ -590,8 +590,16 @@ func TestIntegration_OfflineMockServer_CloakToStreamRoundtrip(t *testing.T) {
 	if !bytes.Contains(receivedBody, []byte("Antigravity")) {
 		t.Errorf("mock upstream did not receive Antigravity system identity: %s", string(receivedBody))
 	}
-	if !bytes.Contains(receivedBody, []byte(`"name":"run_command"`)) {
-		t.Errorf("mock upstream did not receive cloaked tool_choice: %s", string(receivedBody))
+	// tool_choice must be cloaked too — verify its exact JSON path, independent
+	// of the tool declarations which share the same "name" key.
+	var received map[string]any
+	if err := json.Unmarshal(receivedBody, &received); err != nil {
+		t.Fatalf("mock upstream body not JSON: %v", err)
+	}
+	tc, _ := received["tool_choice"].(map[string]any)
+	tcFn, _ := tc["function"].(map[string]any)
+	if tcName, _ := tcFn["name"].(string); tcName != "run_command" {
+		t.Errorf("tool_choice not cloaked to run_command, got %v", tc["function"])
 	}
 
 	// 5. Carry the mock's streamed response back through the plugin. The mock
