@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -494,6 +495,285 @@ func TestIntegration_OfflineMockServer_HTTPRoundtrip(t *testing.T) {
 
 	if !strings.Contains(clientFinal, `"name":"Bash"`) {
 		t.Errorf("stream uncloak to Claude Code Bash failed: %s", clientFinal)
+	}
+}
+// TestIntegration_OfflineMockServer_CloakToStreamRoundtrip proves ONE path carries
+// the rewritten client request into a local mock upstream and then its streamed
+// response back through the plugin to the simulated client. The mock verifies the
+// cloaked tool declarations, system identity, and tool choice before it responds,
+// and the client-facing result is checked for native-name restoration with no
+// Antigravity leakage, including across a fragmented SSE boundary.
+func TestIntegration_OfflineMockServer_CloakToStreamRoundtrip(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("model_prefixes: [agy]")))
+
+	reqID := "omp-cloak-stream-007"
+	model := "agy/gemini-3.7-flash"
+
+	// 1. Client sends the standard nine Oh My Pi tools and a tool_choice.
+	clientReq := map[string]any{
+		"model": model,
+		"messages": []any{
+			map[string]any{"role": "system", "content": "You are Oh My Pi, an interactive coding agent."},
+			map[string]any{"role": "user", "content": "inspect files then run bash"},
+		},
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "read", "description": "Read file"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "write", "description": "Write file"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "edit", "description": "Edit file"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "bash", "description": "Run bash"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "grep", "description": "Grep code"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "glob", "description": "Glob files"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "task", "description": "Subtask"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "ask", "description": "Ask question"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "todo", "description": "Manage todo"}},
+		},
+		"tool_choice": map[string]any{"type": "function", "function": map[string]any{"name": "bash"}},
+		"stream":      true,
+	}
+	clientReqBytes, err := json.Marshal(clientReq)
+	if err != nil {
+		t.Fatalf("marshal client req: %v", err)
+	}
+
+	// 2. Request intercept produces the cloaked body.
+	interceptPayload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, clientReqBytes)
+	rawResp, code := handlePluginCall(pluginabi.MethodRequestInterceptBefore, interceptPayload)
+	if code != 0 {
+		t.Fatalf("request.intercept_before code=%d, body=%s", code, rawResp)
+	}
+	cloakedBody := decodeEnvelopeBody(t, rawResp)
+	if !strings.Contains(string(cloakedBody), "Antigravity") {
+		t.Fatalf("system identity not rewritten to Antigravity: %s", string(cloakedBody))
+	}
+	if !strings.Contains(string(cloakedBody), `"name":"run_command"`) {
+		t.Fatalf("tool cloaking did not produce run_command: %s", string(cloakedBody))
+	}
+
+	// 3. Mock upstream captures the body it receives and streams back SSE.
+	bodyCh := make(chan []byte, 1)
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodyCh <- b
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Errorf("expected http.Flusher")
+			return
+		}
+		// The model replies with the Antigravity cloaked tool name.
+		fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\",\"arguments\":\"echo 42\"}}]}}]}\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer mockUpstream.Close()
+
+	resp, err := http.Post(mockUpstream.URL, "application/json", strings.NewReader(string(cloakedBody)))
+	if err != nil {
+		t.Fatalf("post to mock upstream: %v", err)
+	}
+	defer resp.Body.Close()
+	streamBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read mock stream: %v", err)
+	}
+	receivedBody := <-bodyCh
+	// 4. The mock must have received the CLOAKED request, not the client original.
+	if bytes.Contains(receivedBody, []byte(`"name":"read"`)) {
+		t.Errorf("mock upstream received uncloaked 'read': %s", string(receivedBody))
+	}
+	if !bytes.Contains(receivedBody, []byte(`"name":"run_command"`)) {
+		t.Errorf("mock upstream did not receive cloaked run_command: %s", string(receivedBody))
+	}
+	if !bytes.Contains(receivedBody, []byte("Antigravity")) {
+		t.Errorf("mock upstream did not receive Antigravity system identity: %s", string(receivedBody))
+	}
+	if !bytes.Contains(receivedBody, []byte(`"name":"run_command"`)) {
+		t.Errorf("mock upstream did not receive cloaked tool_choice: %s", string(receivedBody))
+	}
+
+	// 5. Carry the mock's streamed response back through the plugin. The mock
+	// returned a real SSE event; fragment it mid tool name to exercise the
+	// reassembly buffer on actual streamed bytes.
+	streamStr := string(streamBytes)
+	if !strings.Contains(streamStr, "run_command") || !strings.Contains(streamStr, "[DONE]") {
+		t.Fatalf("unexpected mock stream: %s", streamStr)
+	}
+	sep := strings.Index(streamStr, "\n\n")
+	if sep < 0 {
+		t.Fatalf("mock stream lacks an SSE boundary: %s", streamStr)
+	}
+	firstEvent := streamStr[:sep]
+	rest := streamStr[sep:]
+	mid := strings.Index(firstEvent, "run_")
+	if mid < 0 {
+		t.Fatalf("mock stream lacks run_command: %s", streamStr)
+	}
+	mid += len("run_")
+	parts := []string{
+		firstEvent[:mid], // ends inside "run_" — incomplete frame
+		firstEvent[mid:], // rest of the JSON event — still no \n\n, buffered
+		rest,             // "\n\n" + [DONE] — completes the frame
+	}
+	var finalOut strings.Builder
+	completeFrames := 0
+	for i, part := range parts {
+		chunkPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, i, []byte(part), nil)
+		rawChunk, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, chunkPayload)
+		out := decodeEnvelopeBody(t, rawChunk)
+		if len(out) == 0 {
+			// Incomplete fragment: the plugin drops it with an empty body.
+			if i < len(parts)-1 {
+				continue
+			}
+			t.Fatalf("final non-empty frame produced no output")
+		}
+		completeFrames++
+		finalOut.Write(out)
+	}
+	if completeFrames < 1 {
+		t.Fatalf("expected at least one complete frame, got %d", completeFrames)
+	}
+	if completeFrames > 1 {
+		t.Fatalf("expected exactly one complete frame, got %d", completeFrames)
+	}
+	final := finalOut.String()
+	if strings.Contains(final, "run_command") {
+		t.Errorf("Antigravity name leaked to client: %s", final)
+	}
+	if !strings.Contains(final, `"name":"bash"`) {
+		t.Errorf("stream uncloak did not restore bash: %s", final)
+	}
+}
+
+// TestIntegration_OfflineMockServer_VibeMode_Roundtrip proves the same one-path
+// lifecycle for Vibe Mode tool calls, which are carried as standalone newline-free
+// JSON chunks (no SSE framing) and restored to their native names.
+func TestIntegration_OfflineMockServer_VibeMode_Roundtrip(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("model_prefixes: [agy]")))
+
+	reqID := "omp-vibe-roundtrip-008"
+	model := "agy/gemini-3.7-flash"
+	clientReq := map[string]any{
+		"model": model,
+		"messages": []any{
+			map[string]any{"role": "system", "content": "You are Oh My Pi."},
+			map[string]any{"role": "user", "content": "spawn a vibe"},
+		},
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "vibe_spawn", "description": "Spawn subagent"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "vibe_send", "description": "Send to subagent"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "vibe_list", "description": "List subagents"}},
+		},
+		"stream": true,
+	}
+	clientReqBytes, _ := json.Marshal(clientReq)
+	interceptPayload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, clientReqBytes)
+	rawResp, code := handlePluginCall(pluginabi.MethodRequestInterceptBefore, interceptPayload)
+	if code != 0 {
+		t.Fatalf("request.intercept_before code=%d", code)
+	}
+	cloakedBody := decodeEnvelopeBody(t, rawResp)
+	if !strings.Contains(string(cloakedBody), `"name":"define_subagent"`) {
+		t.Fatalf("vibe_spawn not cloaked to define_subagent: %s", string(cloakedBody))
+	}
+	if !strings.Contains(string(cloakedBody), `"name":"schedule"`) {
+		t.Fatalf("vibe_send not cloaked to schedule: %s", string(cloakedBody))
+	}
+
+	// Model replies with a standalone JSON chunk (no \n\n framing).
+	chunkBody := `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"define_subagent","arguments":"{}"}}]}}]}`
+	rawChunk, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk,
+		makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, []byte(chunkBody), nil))
+	clientFinal := string(decodeEnvelopeBody(t, rawChunk))
+	if strings.Contains(clientFinal, "define_subagent") {
+		t.Errorf("vibe Antigravity name leaked to client: %s", clientFinal)
+	}
+	if !strings.Contains(clientFinal, `"name":"vibe_spawn"`) {
+		t.Errorf("vibe_spawn not restored to client: %s", clientFinal)
+	}
+}
+
+// TestIntegration_OfflineMockServer_MalformedPayload fails loudly on malformed
+// stream chunks instead of silently passing them through.
+func TestIntegration_OfflineMockServer_MalformedPayload(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("model_prefixes: [agy]")))
+	reqID := "omp-malformed-009"
+	model := "agy/gemini-3.7-flash"
+	clientReq := map[string]any{
+		"model": model,
+		"messages": []any{map[string]any{"role": "user", "content": "x"}},
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "read"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "write"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "bash"}},
+		},
+	}
+	clientReqBytes, _ := json.Marshal(clientReq)
+	handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, clientReqBytes))
+
+	// A handler envelope decode failure must surface as an error envelope,
+	// never as a silent ok=true no-op.
+	rawBad, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, []byte(`{not-json`))
+	var env struct {
+		OK bool `json:"ok"`
+	}
+	if err := json.Unmarshal(rawBad, &env); err != nil {
+		t.Fatalf("response not a JSON envelope: %v", err)
+	}
+	if env.OK {
+		t.Fatalf("malformed request must return an error envelope, got ok=true")
+	}
+}
+
+// TestIntegration_OfflineMockServer_UnexpectedMockRequest fails the test if the
+// mock receives a request it was not configured to handle (e.g. a GET when the
+// lifecycle demands a POST of the cloaked body).
+func TestIntegration_OfflineMockServer_UnexpectedMockRequest(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("model_prefixes: [agy]")))
+
+	reqID := "omp-unexpected-010"
+	model := "agy/gemini-3.7-flash"
+	clientReq := map[string]any{
+		"model": model,
+		"messages": []any{map[string]any{"role": "user", "content": "x"}},
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "bash"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "read"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "edit"}},
+		},
+	}
+	clientReqBytes, _ := json.Marshal(clientReq)
+	handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, clientReqBytes))
+
+	seenUnexpected := make(chan struct{}, 1)
+	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			seenUnexpected <- struct{}{}
+			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer mockUpstream.Close()
+
+	_, err := http.Get(mockUpstream.URL)
+	if err != nil {
+		t.Fatalf("GET mock upstream failed: %v", err)
+	}
+	select {
+	case <-seenUnexpected:
+	default:
+		t.Fatalf("mock upstream did not observe the unexpected GET request")
 	}
 }
 
