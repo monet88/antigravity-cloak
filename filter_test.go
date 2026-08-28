@@ -926,33 +926,8 @@ func TestSessionKeyFallsBackToBodyHash(t *testing.T) {
 func buildTestCloakPatterns(cloakTable map[string]string) *cachedCloakPatterns {
 	cp := &cachedCloakPatterns{
 		cloakTable: cloakTable,
-		safeLookup: make(map[string]string),
-	}
-	var safeParts []string
-	for orig, target := range cloakTable {
-		if isUnambiguousToolName(orig) {
-			safeParts = append(safeParts, regexp.QuoteMeta(orig))
-			cp.safeLookup[orig] = target
-		} else {
-			qOrig := regexp.QuoteMeta(orig)
-			var patterns []*regexp.Regexp
-			for _, p := range []string{
-				`(?i)\b(the\s+)((?:[a-zA-Z0-9_-]+:)?` + qOrig + `)(\s+(?:tool|function|command)\b)`,
-				`(?i)\b((?:use|call|run|invoke|with)\s+)((?:[a-zA-Z0-9_-]+:)?` + qOrig + `)(\b)`,
-			} {
-				if re, err := regexp.Compile(p); err == nil {
-					patterns = append(patterns, re)
-				}
-			}
-			cp.ambiguousRules = append(cp.ambiguousRules, cachedAmbiguousRule{
-				patterns: patterns,
-				target:   target,
-			})
-		}
-	}
-	if len(safeParts) > 0 {
-		pattern := `\b((?:[a-zA-Z0-9_-]+:)?(?:` + strings.Join(safeParts, "|") + `))\b`
-		cp.safeRe, _ = regexp.Compile(pattern)
+		identRe:    buildCloakIdentRe(cloakTable),
+		ambigRe:    buildCloakAmbiguousRe(cloakTable),
 	}
 	return cp
 }
@@ -2001,5 +1976,89 @@ func TestUncloakStreamChunkWithNamespacePrefix(t *testing.T) {
 	}
 	if !strings.Contains(string(got), `"name":"functions:read"`) {
 		t.Errorf("expected functions:read in stream chunk, got: %s", string(got))
+	}
+}
+func TestReplaceToolNamesInTextNamespaceSafety(t *testing.T) {
+	cloakTable := map[string]string{
+		"read":  "view_file",
+		"write": "write_to_file",
+		"todo":  "manage_task",
+		"bash":  "run_command",
+	}
+	cached := buildTestCloakPatterns(cloakTable)
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"qualified in prose", "use functions:read here", "use functions:view_file here"},
+		{"qualified todo", "manage functions:todo now", "manage functions:manage_task now"},
+		{"qualified bash", "call default_api:bash", "call default_api:run_command"},
+		{"access mode read:write", "the mode read:write", "the mode read:write"},
+		{"access mode write:read", "the mode write:read", "the mode write:read"},
+		{"bare ambiguous untouched", "read the file", "read the file"},
+		{"bare bash untouched", "bash around", "bash around"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := replaceToolNamesInText(tt.input, cached)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplaceToolNamesInTextExactlyOnceCustomMapping(t *testing.T) {
+	// A custom mapping whose target is also a source key must NOT cascade:
+	// read -> write -> edit must stop at write for a single "read" identity.
+	cloakTable := map[string]string{
+		"read":  "write",
+		"write": "edit",
+	}
+	cached := buildTestCloakPatterns(cloakTable)
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"quoted read", "use `read`", "use `write`"},
+		{"quoted write", "use `write`", "use `edit`"},
+		{"context read", "use read to go", "use write to go"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := replaceToolNamesInText(tt.input, cached)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplaceToolNamesInTextQuotedUnquotedConsistent(t *testing.T) {
+	cloakTable := map[string]string{
+		"read":  "view_file",
+		"write": "write_to_file",
+	}
+	cached := buildTestCloakPatterns(cloakTable)
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"quoted namespace", "`functions:read`", "`functions:view_file`"},
+		{"unquoted namespace", "functions:read", "functions:view_file"},
+		{"quoted base", "`read`", "`view_file`"},
+		{"unquoted bare ambiguous untouched", "read", "read"},
+		{"double quoted namespace", `"functions:write"`, `"functions:write_to_file"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := replaceToolNamesInText(tt.input, cached)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

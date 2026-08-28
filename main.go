@@ -1123,16 +1123,9 @@ type filterConfig struct {
 // cachedCloakPatterns holds pre-compiled regexes for tool name replacement
 // in descriptions and system messages (request cloaking path).
 type cachedCloakPatterns struct {
-	cloakTable     map[string]string     // orig → target (for Tier 1 quoted replacement)
-	safeRe         *regexp.Regexp        // Tier 2: word-boundary for unambiguous names
-	safeLookup     map[string]string     // match → replacement for safe names
-	ambiguousRules []cachedAmbiguousRule // Tier 3: pattern-based for short words
-}
-
-type cachedAmbiguousRule struct {
-	orig     string
-	patterns []*regexp.Regexp
-	target   string
+	cloakTable map[string]string     // orig → target (for identity replacement lookup)
+	identRe    *regexp.Regexp        // single-pass identity replacement (quoted, namespaced, unambiguous)
+	ambigRe    *regexp.Regexp        // single-pass contextual replacement for short/ambiguous words
 }
 
 // cachedUncloakPattern holds a pre-compiled regex for stream chunk uncloaking.
@@ -1176,35 +1169,9 @@ func rebuildCachedRegexes(cfg *filterConfig) {
 		// Build cloak patterns (for request path: tool name replacement in text)
 		cp := &cachedCloakPatterns{
 			cloakTable: cloakTable,
-			safeLookup: make(map[string]string),
+			identRe:    buildCloakIdentRe(cloakTable),
 		}
-		var safeParts []string
-		for orig, target := range cloakTable {
-			if isUnambiguousToolName(orig) {
-				safeParts = append(safeParts, regexp.QuoteMeta(orig))
-				cp.safeLookup[orig] = target
-			} else {
-				qOrig := regexp.QuoteMeta(orig)
-				var patterns []*regexp.Regexp
-				for _, p := range []string{
-					`(?i)\b(the\s+)((?:[a-zA-Z0-9_-]+:)?` + qOrig + `)(\s+(?:tool|function|command)\b)`,
-					`(?i)\b((?:use|call|run|invoke|with)\s+)((?:[a-zA-Z0-9_-]+:)?` + qOrig + `)(\b)`,
-				} {
-					if re, err := regexp.Compile(p); err == nil {
-						patterns = append(patterns, re)
-					}
-				}
-				cp.ambiguousRules = append(cp.ambiguousRules, cachedAmbiguousRule{
-					orig:     orig,
-					patterns: patterns,
-					target:   target,
-				})
-			}
-		}
-		if len(safeParts) > 0 {
-			pattern := `\b((?:[a-zA-Z0-9_-]+:)?(?:` + strings.Join(safeParts, "|") + `))\b`
-			cp.safeRe, _ = regexp.Compile(pattern)
-		}
+		cp.ambigRe = buildCloakAmbiguousRe(cloakTable)
 		cfg.cloakRegexCache[client] = cp
 
 		// Build uncloak pattern (for stream path: regex-based tool name restore)
@@ -1867,11 +1834,6 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 	return builder.String(), true
 }
 
-var (
-	quotedNamespaceToolRe = regexp.MustCompile("([`\"])([a-zA-Z0-9_-]+:)([a-zA-Z0-9_]+)([`\"])")
-	namespacedToolIdentRe = regexp.MustCompile(`\b([a-zA-Z0-9_-]+:)([a-zA-Z0-9_]+)\b`)
-)
-
 // replaceToolNamesInText uses pre-compiled regex patterns from cachedCloakPatterns.
 // Patterns are compiled once on config change (rebuildCachedRegexes), not per call.
 func replaceToolNamesInText(text string, cached *cachedCloakPatterns) (string, bool) {
@@ -1882,58 +1844,42 @@ func replaceToolNamesInText(text string, cached *cachedCloakPatterns) (string, b
 	result := text
 	changed := false
 
-	// Tier 1: Quoted replacement for ALL names — backticks and double-quotes
-	// are strong signals of a tool name reference regardless of word length.
-	for orig, target := range cached.cloakTable {
-		for _, q := range []string{"`", `"`} {
-			old := q + orig + q
-			repl := q + target + q
-			if strings.Contains(result, old) {
-				result = strings.ReplaceAll(result, old, repl)
-				changed = true
-			}
+	// Tier 1: single-pass identity replacement. A single regex covers quoted
+	// references, namespaced (qualified) identifiers, and unambiguous names.
+	// Running as ONE ReplaceAllStringFunc over the source means an inserted
+	// target is never rescanned, so a custom mapping whose target is also a
+	// source key is translated exactly once per identity and never cascades.
+	if cached.identRe != nil {
+		newResult := cached.identRe.ReplaceAllStringFunc(result, func(m string) string {
+			return replaceToolIdentity(m, cached)
+		})
+		if newResult != result {
+			result = newResult
+			changed = true
 		}
-	}
-	quotedWithNsResult := quotedNamespaceToolRe.ReplaceAllStringFunc(result, func(m string) string {
-		sub := quotedNamespaceToolRe.FindStringSubmatch(m)
-		if len(sub) == 5 && sub[1] == sub[4] {
-			q := sub[1]
-			prefix := sub[2]
-			base := sub[3]
-			if target, ok := cached.cloakTable[base]; ok {
-				return q + prefix + target + q
-			}
-		}
-		return m
-	})
-	if quotedWithNsResult != result {
-		result = quotedWithNsResult
-		changed = true
 	}
 
-	// Tier 1b: Namespaced identifier replacement — names with a namespace prefix
-	// (e.g. "functions:read", "default_api:todo") are qualified identifiers and
-	// safe to replace anywhere in prose without colliding with ordinary English words.
-	nsResult := namespacedToolIdentRe.ReplaceAllStringFunc(result, func(m string) string {
-		sub := namespacedToolIdentRe.FindStringSubmatch(m)
-		if len(sub) == 3 {
-			prefix := sub[1]
-			base := sub[2]
-			if target, ok := cached.cloakTable[base]; ok {
-				return prefix + target
-			}
-		}
-		return m
-	})
-	if nsResult != result {
-		result = nsResult
-		changed = true
-	}
-	// Tier 2: Word-boundary replacement for unambiguous names (pre-compiled)
-	if cached.safeRe != nil {
-		newResult := cached.safeRe.ReplaceAllStringFunc(result, func(match string) string {
-			if target, ok := lookupCloak(match, cached.safeLookup); ok {
-				return target
+	// Tier 3: Pattern-based replacement for ambiguous names in tool-reference
+	// contexts ("the bash tool", "use read"). Targets inserted by Tier 1 all
+	// contain underscores or camelCase, so they never collide with these
+	// context patterns.
+	if cached.ambigRe != nil {
+		newResult := cached.ambigRe.ReplaceAllStringFunc(result, func(match string) string {
+			sub := cached.ambigRe.FindStringSubmatch(match)
+			if len(sub) >= 6 {
+				var lead, tool, trail string
+				if sub[1] != "" {
+					lead, tool, trail = sub[1], sub[2], sub[3]
+				} else if sub[4] != "" {
+					lead, tool, trail = sub[4], sub[5], sub[6]
+				}
+				if tool == "" {
+					return match
+				}
+				prefix, base := splitToolNamespace(tool)
+				if target, ok := lookupCloakFold(base, cached.cloakTable); ok {
+					return lead + prefix + target + trail
+				}
 			}
 			return match
 		})
@@ -1943,30 +1889,132 @@ func replaceToolNamesInText(text string, cached *cachedCloakPatterns) (string, b
 		}
 	}
 
-	// Tier 3: Pattern-based replacement for ambiguous names (pre-compiled)
-	for _, rule := range cached.ambiguousRules {
-		for _, re := range rule.patterns {
-			newResult := re.ReplaceAllStringFunc(result, func(match string) string {
-				sub := re.FindStringSubmatch(match)
-				if len(sub) >= 4 {
-					lead := sub[1]
-					tool := sub[2]
-					trail := sub[3]
-					prefix, _ := splitToolNamespace(tool)
-					return lead + prefix + rule.target + trail
-				} else if len(sub) == 3 {
-					return sub[1] + rule.target + sub[2]
-				}
-				return match
-			})
-			if newResult != result {
-				result = newResult
-				changed = true
-			}
+	return result, changed
+}
+
+// isToolSourceName reports whether name is one of the cloak table's original
+// (source) tool names. Used to avoid mistaking an access-mode or compound
+// token such as "read:write" for a qualified tool reference.
+func isToolSourceName(name string, cloakTable map[string]string) bool {
+	_, ok := cloakTable[name]
+	return ok
+}
+
+// lookupCloakFold resolves a possibly different-cased tool base name to its
+// cloaked target. The ambiguous context patterns match case-insensitively
+// ("use Bash" matches the source key "bash"), so the base must be resolved
+// against the table with case folding.
+func lookupCloakFold(base string, cloakTable map[string]string) (string, bool) {
+	if target, ok := cloakTable[base]; ok {
+		return target, true
+	}
+	for orig, target := range cloakTable {
+		if strings.EqualFold(orig, base) {
+			return target, true
 		}
 	}
+	return "", false
+}
 
-	return result, changed
+// lookupCloakText maps a bare or qualified tool identity to its cloaked form,
+// preserving any namespace prefix. A namespaced reference whose prefix is
+// itself a source tool name (e.g. "read:write") is an access-mode / compound
+// token, not a tool reference, so it is left unchanged.
+func lookupCloakText(ident string, cloakTable map[string]string) (string, bool) {
+	if prefix, base := splitToolNamespace(ident); prefix != "" {
+		if isToolSourceName(strings.TrimSuffix(prefix, ":"), cloakTable) {
+			return "", false
+		}
+		if _, ok := cloakTable[base]; !ok {
+			return "", false
+		}
+	}
+	return lookupCloak(ident, cloakTable)
+}
+
+// replaceToolIdentity rewrites a single matched tool identity: it strips any
+// surrounding quote, maps the identity through the cloak table, and rebuilds
+// the identical quoted form so quoted and unquoted references stay consistent.
+func replaceToolIdentity(m string, cached *cachedCloakPatterns) string {
+	q := byte(0)
+	if len(m) >= 2 {
+		first, last := m[0], m[len(m)-1]
+		if (first == '`' || first == '"') && first == last {
+			q = first
+			m = m[1 : len(m)-1]
+		}
+	}
+	repl, ok := lookupCloakText(m, cached.cloakTable)
+	if !ok {
+		if q != 0 {
+			return string(q) + m + string(q)
+		}
+		return m
+	}
+	if q != 0 {
+		return string(q) + repl + string(q)
+	}
+	return repl
+}
+
+// buildCloakIdentRe compiles a single regex that matches any tool identity in
+// prose: quoted names, namespaced (qualified) identifiers, and unambiguous
+// names. The alternation order matters — quoted first, then namespaced, then
+// unambiguous — so the most specific form wins and bare ambiguous names are
+// never rewritten here (they are handled by the contextual Tier 3 rules).
+func buildCloakIdentRe(cloakTable map[string]string) *regexp.Regexp {
+	all := make([]string, 0, len(cloakTable))
+	unambig := make([]string, 0, len(cloakTable))
+	for orig := range cloakTable {
+		all = append(all, regexp.QuoteMeta(orig))
+		if isUnambiguousToolName(orig) {
+			unambig = append(unambig, regexp.QuoteMeta(orig))
+		}
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	sort.Strings(all)
+	sort.Strings(unambig)
+	allRe := strings.Join(all, "|")
+	pattern := "[`\"](?:[a-zA-Z0-9_-]+:)?(?:" + allRe + ")[`\"]|\\b(?:[a-zA-Z0-9_-]+:)(?:" + allRe + ")\\b"
+	if len(unambig) > 0 {
+		pattern += "|\\b(?:[a-zA-Z0-9_-]+:)?(?:" + strings.Join(unambig, "|") + ")\\b"
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil
+	}
+	return re
+}
+
+// buildCloakAmbiguousRe compiles a single regex that matches ambiguous tool
+// names only inside explicit tool-reference contexts ("the bash tool",
+// "use read", "call edit"). A single pass guarantees that a target which is
+// also a source key is never re-translated within one rewrite.
+func buildCloakAmbiguousRe(cloakTable map[string]string) *regexp.Regexp {
+	var ambig []string
+	for orig := range cloakTable {
+		if !isUnambiguousToolName(orig) {
+			ambig = append(ambig, regexp.QuoteMeta(orig))
+		}
+	}
+	if len(ambig) == 0 {
+		return nil
+	}
+	sort.Strings(ambig)
+	ambigRe := strings.Join(ambig, "|")
+	toolRe := `(?:[a-zA-Z0-9_-]+:)?(?:` + ambigRe + `)`
+	// "the X tool" requires a trailing tool/function/command word; the verb
+	// forms ("use X", "call X") only require a word boundary. Keep the capture
+	// groups consistent: 1=lead,2=tool,3=trail for the "the" branch and
+	// 4=verb,5=tool,6=trail for the verb branch.
+	pattern := `(?i)\b(?:(the\s+)(` + toolRe + `)(\s+(?:tool|function|command)\b)|((?:use|call|run|invoke|with)\s+)(` + toolRe + `)(\b))`
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil
+	}
+	return re
 }
 
 // isUnambiguousToolName returns true if a tool name is specific enough for
