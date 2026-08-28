@@ -1,0 +1,14 @@
+plugin_integration_test.go
+  h_17f2fa2b92da6a 4,500-778
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "514259838fdbc87c5b54a7842029e86d080c4584",
+  "prompts": {},
+  "humans": {
+    "h_17f2fa2b92da6a": {
+      "author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
