@@ -926,33 +926,8 @@ func TestSessionKeyFallsBackToBodyHash(t *testing.T) {
 func buildTestCloakPatterns(cloakTable map[string]string) *cachedCloakPatterns {
 	cp := &cachedCloakPatterns{
 		cloakTable: cloakTable,
-		safeLookup: make(map[string]string),
-	}
-	var safeParts []string
-	for orig, target := range cloakTable {
-		if isUnambiguousToolName(orig) {
-			safeParts = append(safeParts, regexp.QuoteMeta(orig))
-			cp.safeLookup[orig] = target
-		} else {
-			qOrig := regexp.QuoteMeta(orig)
-			var patterns []*regexp.Regexp
-			for _, p := range []string{
-				`(?i)(the\s+)` + qOrig + `(\s+(?:tool|function|command)\b)`,
-				`(?i)((?:use|call|run|invoke|with)\s+)` + qOrig + `(\b)`,
-			} {
-				if re, err := regexp.Compile(p); err == nil {
-					patterns = append(patterns, re)
-				}
-			}
-			cp.ambiguousRules = append(cp.ambiguousRules, cachedAmbiguousRule{
-				patterns: patterns,
-				target:   target,
-			})
-		}
-	}
-	if len(safeParts) > 0 {
-		pattern := `\b(` + strings.Join(safeParts, "|") + `)\b`
-		cp.safeRe, _ = regexp.Compile(pattern)
+		identRe:    buildCloakIdentRe(cloakTable),
+		ambigRe:    buildCloakAmbiguousRe(cloakTable),
 	}
 	return cp
 }
@@ -963,7 +938,7 @@ func buildTestUncloakPattern(uncloakTable map[string]string) *cachedUncloakPatte
 	for target := range uncloakTable {
 		targets = append(targets, regexp.QuoteMeta(target))
 	}
-	pattern := `"name"\s*:\s*"(` + strings.Join(targets, "|") + `)"`
+	pattern := `"name"\s*:\s*"((?:[a-zA-Z0-9_-]+:)?(?:` + strings.Join(targets, "|") + `))"`
 	re := regexp.MustCompile(pattern)
 	return &cachedUncloakPattern{re: re, lookup: uncloakTable}
 }
@@ -1776,6 +1751,66 @@ func TestDetectCloakedClientOhMyPiStandardNineTools(t *testing.T) {
 		t.Fatalf("detectCloakedClient(ompCloakedTools) = %q, want 'oh_my_pi'", got)
 	}
 }
+func TestDetectCloakedClientNamespaceNormalized(t *testing.T) {
+	// A namespaced (qualified) cloaked set must contribute one observed
+	// identity per declared tool and never inflate the denominator with aliases.
+	qualifiedNine := []string{
+		"functions:view_file", "functions:write_to_file", "functions:replace_file_content",
+		"functions:run_command", "functions:grep_search", "functions:list_dir",
+		"functions:invoke_subagent", "functions:ask_question", "functions:manage_task",
+	}
+	if got := detectCloakedClient(qualifiedNine); got != "oh_my_pi" {
+		t.Fatalf("qualified nine => %q, want oh_my_pi", got)
+	}
+
+	// Mixed qualified/unqualified forms of the same tool de-duplicate to one identity.
+	mixed := []string{
+		"view_file", "functions:write_to_file", "default_api:replace_file_content",
+		"run_command", "grep_search", "list_dir",
+		"invoke_subagent", "ask_question", "manage_task",
+	}
+	if got := detectCloakedClient(mixed); got != "oh_my_pi" {
+		t.Fatalf("mixed nine => %q, want oh_my_pi", got)
+	}
+
+	// A set of observed identities that is mostly non-targets (below the 80%
+	// observed-coverage threshold) must not qualify as any client.
+	belowThreshold := []string{
+		"functions:view_file", "functions:write_to_file", "functions:replace_file_content",
+		"functions:run_command", "functions:custom_a", "functions:custom_b",
+		"functions:custom_c", "functions:custom_d", "functions:custom_e",
+	}
+	if got := detectCloakedClient(belowThreshold); got != "" {
+		t.Fatalf("below-threshold set should not qualify, got %q", got)
+	}
+}
+
+func TestBuildUncloakTableFallbackQualified(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	// Request body is already cloaked with qualified names, and there is no
+	// RequestID pre-registration — the fallback path must still identify the
+	// client from the normalized observed identities.
+	body := `{
+		"tools":[
+			{"type":"function","function":{"name":"functions:view_file"}},
+			{"type":"function","function":{"name":"functions:write_to_file"}},
+			{"type":"function","function":{"name":"functions:replace_file_content"}},
+			{"type":"function","function":{"name":"functions:run_command"}},
+			{"type":"function","function":{"name":"functions:grep_search"}},
+			{"type":"function","function":{"name":"functions:list_dir"}},
+			{"type":"function","function":{"name":"functions:invoke_subagent"}},
+			{"type":"function","function":{"name":"functions:ask_question"}},
+			{"type":"function","function":{"name":"functions:manage_task"}}
+		]
+	}`
+	uncloakTable, client := buildUncloakTable([]byte(body), "openai")
+	if client != "oh_my_pi" {
+		t.Fatalf("client = %q, want oh_my_pi (uncloakTable=%v)", client, uncloakTable)
+	}
+	if uncloakTable == nil || uncloakTable["view_file"] != "read" {
+		t.Fatalf("expected oh_my_pi uncloak mapping view_file->read, got %v", uncloakTable)
+	}
+}
 
 func TestHandleRequestAndStreamUncloakRoundTripOhMyPi(t *testing.T) {
 	const reqID = "omp-roundtrip-test-1"
@@ -1842,5 +1877,252 @@ func TestHandleRequestAndStreamUncloakRoundTripOhMyPi(t *testing.T) {
 	}
 	if !strings.Contains(streamOut, `"name":"bash"`) && !strings.Contains(streamOut, `"name": "bash"`) {
 		t.Fatalf("expected run_command uncloaked to bash: %s", streamOut)
+	}
+}
+
+func TestDetectClientWithNamespacePrefix(t *testing.T) {
+	tests := []struct {
+		name       string
+		toolNames  []string
+		wantClient string
+	}{
+		{
+			name:       "oh_my_pi with functions prefix",
+			toolNames:  []string{"functions:read", "functions:write", "functions:bash", "functions:todo"},
+			wantClient: "oh_my_pi",
+		},
+		{
+			name:       "oh_my_pi with default_api prefix",
+			toolNames:  []string{"default_api:read", "default_api:write", "default_api:bash", "default_api:todo"},
+			wantClient: "oh_my_pi",
+		},
+		{
+			name:       "claude_code with functions prefix",
+			toolNames:  []string{"functions:Bash", "functions:Edit", "functions:Read", "functions:Write"},
+			wantClient: "claude_code",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detectClient(tt.toolNames)
+			if got != tt.wantClient {
+				t.Fatalf("detectClient(%v) = %q, want %q", tt.toolNames, got, tt.wantClient)
+			}
+		})
+	}
+}
+
+func TestRewriteRequestBodyWithNamespacePrefix(t *testing.T) {
+	body := `{
+		"system": "You have access to functions:read and functions:todo.",
+		"tools": [
+			{"type": "function", "function": {"name": "functions:read", "description": "Read file"}},
+			{"type": "function", "function": {"name": "functions:todo", "description": "Manage tasks"}},
+			{"type": "function", "function": {"name": "default_api:bash", "description": "Execute command"}}
+		],
+		"messages": [
+			{
+				"role": "assistant",
+				"tool_calls": [
+					{"id": "call_1", "type": "function", "function": {"name": "functions:read", "arguments": "{\"path\":\"file.txt\"}"}}
+				]
+			},
+			{
+				"role": "tool",
+				"name": "functions:read",
+				"content": "file contents"
+			}
+		]
+	}`
+
+	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	if !rewritten {
+		t.Fatal("expected rewritten = true")
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(got, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	// Verify tools were cloaked with namespace preserved
+	tools := parsed["tools"].([]any)
+	t0 := tools[0].(map[string]any)["function"].(map[string]any)["name"].(string)
+	t1 := tools[1].(map[string]any)["function"].(map[string]any)["name"].(string)
+	t2 := tools[2].(map[string]any)["function"].(map[string]any)["name"].(string)
+
+	if t0 != "functions:view_file" {
+		t.Errorf("t0 name = %q, want functions:view_file", t0)
+	}
+	if t1 != "functions:manage_task" {
+		t.Errorf("t1 name = %q, want functions:manage_task", t1)
+	}
+	if t2 != "default_api:run_command" {
+		t.Errorf("t2 name = %q, want default_api:run_command", t2)
+	}
+
+	// Verify messages tool calls and tool result
+	msgs := parsed["messages"].([]any)
+	tc := msgs[0].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)["name"].(string)
+	if tc != "functions:view_file" {
+		t.Errorf("msg[0] tool_call name = %q, want functions:view_file", tc)
+	}
+	trName := msgs[1].(map[string]any)["name"].(string)
+	if trName != "functions:view_file" {
+		t.Errorf("msg[1] tool result name = %q, want functions:view_file", trName)
+	}
+
+	// Verify system prompt tool replacement
+	sys := parsed["system"].(string)
+	if strings.Contains(sys, "functions:read") || strings.Contains(sys, "functions:todo") {
+		t.Errorf("system prompt leaked original names: %s", sys)
+	}
+}
+
+func TestUncloakResponseBodyWithNamespacePrefix(t *testing.T) {
+	uncloakTable := map[string]string{
+		"view_file":    "read",
+		"manage_task":  "todo",
+		"run_command":  "bash",
+	}
+
+	body := `{
+		"choices": [
+			{
+				"message": {
+					"role": "assistant",
+					"tool_calls": [
+						{"id": "call_1", "type": "function", "function": {"name": "functions:view_file", "arguments": "{\"path\":\"a.txt\"}"}},
+						{"id": "call_2", "type": "function", "function": {"name": "default_api:manage_task", "arguments": "{\"op\":\"view\"}"}}
+					]
+				}
+			}
+		]
+	}`
+
+	got, changed := uncloakResponseBody([]byte(body), uncloakTable, "openai")
+	if !changed {
+		t.Fatal("expected changed = true")
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(got, &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	calls := parsed["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["tool_calls"].([]any)
+	c0 := calls[0].(map[string]any)["function"].(map[string]any)["name"].(string)
+	c1 := calls[1].(map[string]any)["function"].(map[string]any)["name"].(string)
+
+	if c0 != "functions:read" {
+		t.Errorf("c0 name = %q, want functions:read", c0)
+	}
+	if c1 != "default_api:todo" {
+		t.Errorf("c1 name = %q, want default_api:todo", c1)
+	}
+}
+
+func TestUncloakStreamChunkWithNamespacePrefix(t *testing.T) {
+	uncloakTable := map[string]string{
+		"view_file":   "read",
+		"manage_task": "todo",
+	}
+	cached := buildTestUncloakPattern(uncloakTable)
+
+	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"functions:view_file\",\"arguments\":\"{}\"}}]}}]}\n\n"
+	got, changed := uncloakStreamChunk([]byte(chunk), cached)
+	if !changed {
+		t.Fatal("expected changed = true")
+	}
+	if !strings.Contains(string(got), `"name":"functions:read"`) {
+		t.Errorf("expected functions:read in stream chunk, got: %s", string(got))
+	}
+}
+func TestReplaceToolNamesInTextNamespaceSafety(t *testing.T) {
+	cloakTable := map[string]string{
+		"read":  "view_file",
+		"write": "write_to_file",
+		"todo":  "manage_task",
+		"bash":  "run_command",
+	}
+	cached := buildTestCloakPatterns(cloakTable)
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"qualified in prose", "use functions:read here", "use functions:view_file here"},
+		{"qualified todo", "manage functions:todo now", "manage functions:manage_task now"},
+		{"qualified bash", "call default_api:bash", "call default_api:run_command"},
+		{"access mode read:write", "the mode read:write", "the mode read:write"},
+		{"access mode in explicit tool context", "the read:write tool", "the read:write tool"},
+		{"access mode write:read", "the mode write:read", "the mode write:read"},
+		{"bare ambiguous untouched", "read the file", "read the file"},
+		{"bare bash untouched", "bash around", "bash around"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := replaceToolNamesInText(tt.input, cached)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplaceToolNamesInTextExactlyOnceCustomMapping(t *testing.T) {
+	// A custom mapping whose target is also a source key must NOT cascade:
+	// read -> write -> edit must stop at write for a single "read" identity.
+	// foo_bar -> read must stop at read and not cascade to write in "use foo_bar".
+	cloakTable := map[string]string{
+		"read":    "write",
+		"write":   "edit",
+		"foo_bar": "read",
+	}
+	cached := buildTestCloakPatterns(cloakTable)
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"quoted read", "use `read`", "use `write`"},
+		{"quoted write", "use `write`", "use `edit`"},
+		{"context read", "use read to go", "use write to go"},
+		{"unambiguous to ambiguous no cascade", "use foo_bar", "use read"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := replaceToolNamesInText(tt.input, cached)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReplaceToolNamesInTextQuotedUnquotedConsistent(t *testing.T) {
+	cloakTable := map[string]string{
+		"read":  "view_file",
+		"write": "write_to_file",
+	}
+	cached := buildTestCloakPatterns(cloakTable)
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"quoted namespace", "`functions:read`", "`functions:view_file`"},
+		{"unquoted namespace", "functions:read", "functions:view_file"},
+		{"quoted base", "`read`", "`view_file`"},
+		{"unquoted bare ambiguous untouched", "read", "read"},
+		{"double quoted namespace", `"functions:write"`, `"functions:write_to_file"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := replaceToolNamesInText(tt.input, cached)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

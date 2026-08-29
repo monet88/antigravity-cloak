@@ -17,10 +17,17 @@ coding-CLI traffic as Antigravity. Two jobs:
 - Module: github.com/monet88/antigravity-cloak
 - Go: 1.26.0. Depends on github.com/router-for-me/CLIProxyAPI/v7 v7.2.143
   (SDK sdk/pluginapi, sdk/pluginabi). Plugin ABI version is 1.
-- Source layout: `main.go` (plugin core). All test files MUST be placed in
-  the `tests/` directory (e.g. `tests/filter_test.go`, `tests/plugin_test.go`),
-  NEVER at the repository root. Upstream references are cloned under `.ref/`
-  (gitignored workspace), not part of the module.
+- Source layout: `main.go` (plugin core). Go unit tests (`*_test.go`) reside at
+  the repository root alongside `main.go` for `package main`, while `tests/` is
+  dedicated to integration/e2e test scripts (`.py`, `.sh`). Upstream references
+  are cloned under `.ref/` (gitignored workspace), not part of the module.
+- The root Go suite is the **offline lifecycle / unit harness**: an httptest-backed
+  round-trip that drives a rewritten request into a local mock upstream and back
+  through the stream interceptor. It uses no external network and proves the
+  cloak-to-stream round trip within the standard CI test job. The external
+  integration/e2e scripts in `tests/` (`.py`, `.sh`) are a separate, runnable
+  layer against a live CLIProxyAPI instance and are never invoked by `go test`.
+
 ## Activation model (important)
 
 Two gates decide whether cloaking runs, checked in this order in every handler:
@@ -29,8 +36,8 @@ Two gates decide whether cloaking runs, checked in this order in every handler:
    This runs FIRST in all three handlers; if it returns false the handler
    returns an empty (no-op) envelope before any detection or rewrite.
 2. Client gate (detectClient). rewriteRequestBody keys purely off request
-   content: detectClient(toolNames) counts how many tool names match a client's
-   cloak table; >= 2 matches => that client is detected and cloaking runs.
+   content: detectClient(toolNames) matches tool names against known client
+   cloak tables (common-word clients like oh_my_pi require distinctive tools or >= 4 matches; distinctive clients require >= 2 matches). Once identified, cloaking runs.
    Brand replace on `system` runs unconditionally once the model gate passes
    (independent of client detect).
 
@@ -80,6 +87,7 @@ Supported clients:
 - `oh_my_pi` (lowercase: standard tools `read`, `write`, `edit`, `bash`, `grep`, `glob`, `task`, `ask`, `todo`, `hub`, `web_search`, `eval`, plus Vibe Mode `vibe_*` and Autoresearch Mode `*_experiment`, `update_notes`)
 
 > Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
+> Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
 
 ### Two casing rules that bite
 1. sourceFormat normalization. The proxy sends SourceFormat="claude" for
@@ -192,66 +200,10 @@ line, when separating input bodies from changed=true output bodies.
 
 ## Installing a custom (non-official) plugin onto a remote VPS
 
-This is for the production CLIProxyAPI on the GCP VM (compose dir ~/cliproxy on
-chang-gateway-vm), reached only through the reverse-proxied management API at
-https://vps.monet.uno/api-cli. Do everything through the management API - no
-SSH, no editing files on the box directly. Management key goes in the
-Authorization: Bearer <key> header; the panel/API lives under /v0/management.
-
-Key facts learned the hard way:
-- The official store registry is always loaded. Your own plugin is only
-  visible after its registry is added as an extra store-source. If you skip
-  this, install returns 404 (host does not know the plugin id).
-- The VPS config is NOT guaranteed to match the local config.yaml. The running
-  VPS box was missing both the custom store-source and the antigravity-cloak
-  block even though local had them. Always read the live VPS config first.
-- There is NO narrow endpoint for store-sources (tried
-  /v0/management/plugin-store/sources, /plugin-store-sources, /store-sources -
-  all 404). The only way to add a store-source is to edit the full config via
-  GET/PUT /v0/management/config.yaml.
-- config.yaml GET returns raw YAML bytes; in PowerShell read with
-  Invoke-WebRequest and decode .Content as UTF-8 (it comes back as a byte[],
-  not a string - .Substring fails on it).
-
-Procedure (PowerShell, $base/$key set to the VPS API + management key):
-1. Back up the live config to a local file FIRST:
-   GET /v0/management/config.yaml -> save bytes verbatim (LF, no CRLF).
-2. Build the new config by inserting ONLY the store-sources lines under
-   `plugins:` (right after `enabled: true`, before `configs:`). Diff against the
-   backup and confirm the ONLY additions are those 2 lines. Do not touch
-   anything else.
-   ```yaml
-   plugins:
-     enabled: true
-     store-sources:
-       - https://raw.githubusercontent.com/monet88/antigravity-cloak/main/registry.json
-     configs:
-       ...
-   ```
-3. PUT /v0/management/config.yaml with the new YAML. Expect
-   {"ok":true,"changed":["config"]}. Config reloads live, no restart.
-4. GET /v0/management/plugin-store and confirm the new source + the
-   antigravity-cloak entry appear (installed:false).
-5. POST /v0/management/plugin-store/antigravity-cloak/install
-   (body {"version":"0.2.0"} or omit for latest). Host downloads the matching
-   GOOS/GOARCH .so from the GitHub release into
-   plugins/linux/amd64/antigravity-cloak-v<ver>.so. Expect
-   restart_required:false.
-6. PATCH /v0/management/plugins/antigravity-cloak/enabled body {"enabled":true}.
-7. PATCH /v0/management/plugins/antigravity-cloak/config to set fields, e.g.
-   {"model_prefixes":["agy"]}. (GET .../config to read first; PUT replaces,
-   PATCH merges.)
-8. Verify: GET /v0/management/plugins, find antigravity-cloak with
-   registered:true, effective_enabled:true, and path pointing at the v<ver> .so.
-
-The install/enable/patch calls persist their own plugins.configs.antigravity-cloak
-block (enabled, model_prefixes, store metadata) back into the VPS config - you
-only had to hand-add the store-source. Keep the local backup for rollback.
+The step-by-step procedure for deploying custom plugin binaries to remote VPS instances via the CLIProxyAPI management API (`/v0/management`) is documented in **[docs/deployment/vps.md](docs/deployment/vps.md)**.
 
 ## Gotchas recap
 
-- Dependency is pinned to CLIProxyAPI v7.2.42 while the container ran v7.2.43.
-  ABI is 1 so load/register works, but watch this if behavior looks off.
 - Build, deploy, and file ops are one-shell-each on Windows PowerShell; avoid
   piping host paths into docker exec for file deletion. Truncate inside the
   container or while it is stopped.
@@ -259,7 +211,7 @@ only had to hand-add the store-source. Keep the local backup for rollback.
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **antigravity-cloak** (413 symbols, 1138 relationships, 36 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **antigravity-cloak** (430 symbols, 1189 relationships, 37 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
 
