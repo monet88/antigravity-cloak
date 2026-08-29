@@ -1,0 +1,16 @@
+main.go
+  h_17f2fa2b92da6a 97
+registry.json
+  h_17f2fa2b92da6a 9
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "7b850f6f401025317884bea29286af5135bde5ff",
+  "prompts": {},
+  "humans": {
+    "h_17f2fa2b92da6a": {
+      "author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
