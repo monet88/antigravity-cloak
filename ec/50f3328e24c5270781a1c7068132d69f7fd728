@@ -1,0 +1,19 @@
+.github/workflows/build.yml
+  s_90be6915eb1452::t_c0cbb54c1d055e 42
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.0",
+  "base_commit_sha": "ec50f3328e24c5270781a1c7068132d69f7fd728",
+  "prompts": {},
+  "sessions": {
+    "s_90be6915eb1452": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0d1a-e55b-7962-ae3d-f2887fd63fa7",
+        "model": "unknown"
+      },
+      "human_author": "monet88 <minhthang421992@gmail.com>"
+    }
+  }
+}
