@@ -81,6 +81,39 @@ func decodeEnvelopeBody(t *testing.T, rawEnvelope []byte) []byte {
 	return decoded
 }
 
+// Helper to decode Base64 result body and DropChunk from stream chunk interceptor envelope
+func decodeEnvelopeStreamChunk(t *testing.T, rawEnvelope []byte) ([]byte, bool) {
+	t.Helper()
+	var env struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			DropChunk bool   `json:"DropChunk"`
+			Body      string `json:"Body"`
+		} `json:"result"`
+		Error *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rawEnvelope, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v (raw: %s)", err, string(rawEnvelope))
+	}
+	if !env.OK {
+		if env.Error != nil {
+			t.Fatalf("envelope returned error: %s - %s", env.Error.Code, env.Error.Message)
+		}
+		t.Fatalf("envelope returned ok=false")
+	}
+	if env.Result.Body == "" {
+		return nil, env.Result.DropChunk
+	}
+	decoded, err := base64.StdEncoding.DecodeString(env.Result.Body)
+	if err != nil {
+		t.Fatalf("base64 decode envelope body: %v", err)
+	}
+	return decoded, env.Result.DropChunk
+}
+
 // TestIntegration_OhMyPi_DefaultTools_SSEStreamLifecycle tests the full lifecycle of an Oh My Pi
 // session using standard 9 default tools with SSE stream chunk uncloaking.
 func TestIntegration_OhMyPi_DefaultTools_SSEStreamLifecycle(t *testing.T) {
@@ -392,28 +425,30 @@ func TestIntegration_SSEChunkFragmentation(t *testing.T) {
 	part2 := "command\",\"arguments\":\"{\\\"cmd\\\":\\\"pwd\\\"}\"}}]}}]}"
 	part3 := "\n\n"
 
-	// Send part 1: incomplete frame -> buffer holds fragment
+	// Send part 1: incomplete frame -> buffer holds fragment, must drop chunk with empty body
 	p1Payload := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, []byte(part1), nil)
 	raw1, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p1Payload)
-	var env1 struct {
-		Result struct {
-			DropChunk bool   `json:"DropChunk"`
-			Body      string `json:"Body"`
-		} `json:"result"`
-	}
-	json.Unmarshal(raw1, &env1)
-	if !env1.Result.DropChunk && env1.Result.Body != "" {
-		t.Logf("part 1 response: DropChunk=%v, Body=%s", env1.Result.DropChunk, env1.Result.Body)
+	out1, drop1 := decodeEnvelopeStreamChunk(t, raw1)
+	if !drop1 || len(out1) > 0 {
+		t.Fatalf("part 1: expected DropChunk=true and empty body, got DropChunk=%v body=%q", drop1, string(out1))
 	}
 
-	// Send part 2: still no \n\n boundary
+	// Send part 2: still no \n\n boundary -> must drop chunk with empty body
 	p2Payload := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 1, []byte(part2), nil)
-	handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p2Payload)
+	raw2, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p2Payload)
+	out2, drop2 := decodeEnvelopeStreamChunk(t, raw2)
+	if !drop2 || len(out2) > 0 {
+		t.Fatalf("part 2: expected DropChunk=true and empty body, got DropChunk=%v body=%q", drop2, string(out2))
+	}
 
 	// Send part 3: arrives with \n\n -> full frame completes and uncloaks
 	p3Payload := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 2, []byte(part3), nil)
 	raw3, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p3Payload)
-	out3 := string(decodeEnvelopeBody(t, raw3))
+	out3Bytes, drop3 := decodeEnvelopeStreamChunk(t, raw3)
+	if drop3 {
+		t.Fatalf("part 3: expected DropChunk=false for completed frame, got DropChunk=true")
+	}
+	out3 := string(out3Bytes)
 
 	if !strings.Contains(out3, `"name":"bash"`) {
 		t.Errorf("fragmented chunk reassembly failed to uncloak to bash: %s", out3)
@@ -550,16 +585,47 @@ func TestIntegration_OfflineMockServer_CloakToStreamRoundtrip(t *testing.T) {
 		t.Fatalf("tool cloaking did not produce run_command: %s", string(cloakedBody))
 	}
 
-	// 3. Mock upstream captures the body it receives and streams back SSE.
+	// 3. Mock upstream validates incoming requests, captures body, and streams back SSE.
 	bodyCh := make(chan []byte, 1)
+	mockErrCh := make(chan error, 1)
 	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
+		if r.Method != http.MethodPost {
+			err := fmt.Errorf("unexpected method: %s", r.Method)
+			select {
+			case mockErrCh <- err:
+			default:
+			}
+			http.Error(w, err.Error(), http.StatusMethodNotAllowed)
+			return
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			err := fmt.Errorf("unexpected Content-Type: %s", ct)
+			select {
+			case mockErrCh <- err:
+			default:
+			}
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			select {
+			case mockErrCh <- err:
+			default:
+			}
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		bodyCh <- b
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher, ok := w.(http.Flusher)
 		if !ok {
-			t.Errorf("expected http.Flusher")
+			err := fmt.Errorf("expected http.Flusher")
+			select {
+			case mockErrCh <- err:
+			default:
+			}
 			return
 		}
 		// The model replies with the Antigravity cloaked tool name.
@@ -575,6 +641,11 @@ func TestIntegration_OfflineMockServer_CloakToStreamRoundtrip(t *testing.T) {
 		t.Fatalf("post to mock upstream: %v", err)
 	}
 	defer resp.Body.Close()
+	select {
+	case mockErr := <-mockErrCh:
+		t.Fatalf("mock upstream received unexpected request: %v", mockErr)
+	default:
+	}
 	streamBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("read mock stream: %v", err)
@@ -630,12 +701,19 @@ func TestIntegration_OfflineMockServer_CloakToStreamRoundtrip(t *testing.T) {
 	for i, part := range parts {
 		chunkPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, i, []byte(part), nil)
 		rawChunk, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, chunkPayload)
-		out := decodeEnvelopeBody(t, rawChunk)
-		if len(out) == 0 {
-			// Incomplete fragment: the plugin drops it with an empty body.
-			if i < len(parts)-1 {
-				continue
+		out, dropChunk := decodeEnvelopeStreamChunk(t, rawChunk)
+		if i < len(parts)-1 {
+			// Incomplete fragment: must be dropped with DropChunk=true and empty body
+			if !dropChunk || len(out) > 0 {
+				t.Fatalf("fragment %d: expected DropChunk=true and empty body, got DropChunk=%v, body=%q", i, dropChunk, string(out))
 			}
+			continue
+		}
+		// Final completed frame
+		if dropChunk {
+			t.Fatalf("final frame had DropChunk=true")
+		}
+		if len(out) == 0 {
 			t.Fatalf("final non-empty frame produced no output")
 		}
 		completeFrames++
@@ -761,11 +839,15 @@ func TestIntegration_OfflineMockServer_UnexpectedMockRequest(t *testing.T) {
 	handlePluginCall(pluginabi.MethodRequestInterceptBefore,
 		makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, clientReqBytes))
 
-	seenUnexpected := make(chan struct{}, 1)
+	mockErrCh := make(chan error, 1)
 	mockUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
-			seenUnexpected <- struct{}{}
-			http.Error(w, "unexpected method", http.StatusMethodNotAllowed)
+			err := fmt.Errorf("unexpected method: %s", r.Method)
+			select {
+			case mockErrCh <- err:
+			default:
+			}
+			http.Error(w, err.Error(), http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -774,14 +856,22 @@ func TestIntegration_OfflineMockServer_UnexpectedMockRequest(t *testing.T) {
 	}))
 	defer mockUpstream.Close()
 
-	_, err := http.Get(mockUpstream.URL)
+	resp, err := http.Get(mockUpstream.URL)
 	if err != nil {
 		t.Fatalf("GET mock upstream failed: %v", err)
 	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("expected status 405 Method Not Allowed for unexpected mock request, got %d", resp.StatusCode)
+	}
 	select {
-	case <-seenUnexpected:
+	case err := <-mockErrCh:
+		if !strings.Contains(err.Error(), "unexpected method: GET") {
+			t.Errorf("unexpected error received: %v", err)
+		}
 	default:
-		t.Fatalf("mock upstream did not observe the unexpected GET request")
+		t.Fatalf("mock upstream did not record error for unexpected GET request")
 	}
 }
 

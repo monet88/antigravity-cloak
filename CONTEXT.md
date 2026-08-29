@@ -76,7 +76,7 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 ### 3. Activation Model (Two-Stage Gating)
 Every interceptor evaluates two sequential gates:
 1. **Model Gate (`modelAllowsCloak`)**: Evaluates `model_prefixes` against `Model` and `RequestedModel`. If empty, all models pass. If configured, non-matching models exit early with a no-op response.
-2. **Client Gate (`detectClient`)**: Counts tool name matches against known client cloak tables. If matches >= 2, the client is identified and cloaking proceeds.
+2. **Client Gate (`detectClient`)**: Matches tool names against known client cloak tables using tiered detection (distinctive tools or threshold counts per client profile). If identified, cloaking proceeds.
 
 #### Client Classification Semantics
 - **Original-name detection (`detectClient`)** keys off source tool names. Clients whose source names are mostly common words (`read`, `bash`) require either a distinctive harness tool (`hub`, `task`, `todo`, `eval`, `web_search`, `vibe_*`, `*_experiment`) or at least `minCollidingToolMatches` (4) simultaneous matches.

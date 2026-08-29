@@ -1,8 +1,8 @@
 # Architecture Review & Deepening Proposals
 
-> **Document Status**: Accepted Roadmap / Backlog  
-> **Source Target**: `main.go` (2,294 LOC)  
-> **Vocabulary Standard**: `codebase-design` (`Module`, `Interface`, `Depth`, `Seam`, `Adapter`, `Leverage`, `Locality`)  
+> **Document Status**: Accepted Roadmap / Backlog
+> **Source Target**: `main.go` (2,294 LOC)
+> **Vocabulary Standard**: `codebase-design` (`Module`, `Interface`, `Depth`, `Seam`, `Adapter`, `Leverage`, `Locality`)
 > **Domain Alignment**: [CONTEXT.md](../CONTEXT.md), [ADR 0001](adr/0001-stream-session-manager-and-atomic-config.md)
 
 ---
@@ -71,9 +71,9 @@ flowchart LR
 
 #### Benefits & Metrics
 * **Locality**: Schema-specific navigation is isolated inside its respective protocol adapter.
-* **Leverage**: 1 pass instead of 5 reduces JSON map lookups, slice copies, and garbage collection overhead by ~60%.
+* **Leverage**: 1 pass instead of 6 reduces JSON map lookups, slice copies, and garbage collection overhead by ~60%.
 * **Testability**: Protocol adapters can be tested with fine-grained JSON fragments without invoking C-ABI envelopes.
-* **Deletion Test**: Deleting the 5 standalone walkers removes hundreds of lines of fragmented tree-walking logic and concentrates complexity behind two clean adapters.
+* **Deletion Test**: Deleting the 6 standalone walkers removes hundreds of lines of fragmented tree-walking logic and concentrates complexity behind two clean adapters.
 
 ---
 

@@ -36,8 +36,8 @@ Two gates decide whether cloaking runs, checked in this order in every handler:
    This runs FIRST in all three handlers; if it returns false the handler
    returns an empty (no-op) envelope before any detection or rewrite.
 2. Client gate (detectClient). rewriteRequestBody keys purely off request
-   content: detectClient(toolNames) counts how many tool names match a client's
-   cloak table; >= 2 matches => that client is detected and cloaking runs.
+   content: detectClient(toolNames) matches tool names against known client
+   cloak tables (common-word clients like oh_my_pi require distinctive tools or >= 4 matches; distinctive clients require >= 2 matches). Once identified, cloaking runs.
    Brand replace on `system` runs unconditionally once the model gate passes
    (independent of client detect).
 
@@ -86,7 +86,7 @@ Supported clients:
 - `codex` (snake_case: `shell_command`, `apply_patch`, `request_user_input`, `view_image`, `update_plan`, `tool_search`, `get_goal`, `create_goal`, `update_goal`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`)
 - `oh_my_pi` (lowercase: standard tools `read`, `write`, `edit`, `bash`, `grep`, `glob`, `task`, `ask`, `todo`, `hub`, `web_search`, `eval`, plus Vibe Mode `vibe_*` and Autoresearch Mode `*_experiment`, `update_notes`)
 
-> Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.  
+> Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 > Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
 
 ### Two casing rules that bite

@@ -22,7 +22,7 @@ Set `$base` and `$key` to your VPS API endpoint and management key:
    [System.IO.File]::WriteAllBytes("config.backup.yaml", $resp.Content)
    ```
 
-   *Keep this backup. It is the rollback point: if an install or config change goes wrong on the remote, restore it with a single `PUT /v0/management/config.yaml` using the saved bytes (it must carry the same store-source configuration), then re-run the plugin install.*
+   *Keep this backup. It is your clean rollback point to restore the pre-deployment state with `PUT /v0/management/config.yaml`. Note: if you restore this initial backup after a failed deployment, re-apply the store-source configuration (Steps 2–3) before attempting to reinstall the plugin.*
 
 2. **Add store-source**:
    Build the new config by inserting ONLY the `store-sources` lines under `plugins:` (right after `enabled: true`, before `configs:`). Diff against the backup to confirm no other lines are modified.

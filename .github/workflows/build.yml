@@ -39,7 +39,7 @@ jobs:
         run: go vet ./...
 
       - name: Validate Python test scripts syntax
-        run: python3 -m py_compile tests/*.py
+        run: python3 -m compileall -q tests
 
   build:
     name: Build ${{ matrix.goos }}/${{ matrix.goarch }}

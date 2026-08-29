@@ -2055,6 +2055,7 @@ func TestReplaceToolNamesInTextNamespaceSafety(t *testing.T) {
 		{"qualified todo", "manage functions:todo now", "manage functions:manage_task now"},
 		{"qualified bash", "call default_api:bash", "call default_api:run_command"},
 		{"access mode read:write", "the mode read:write", "the mode read:write"},
+		{"access mode in explicit tool context", "the read:write tool", "the read:write tool"},
 		{"access mode write:read", "the mode write:read", "the mode write:read"},
 		{"bare ambiguous untouched", "read the file", "read the file"},
 		{"bare bash untouched", "bash around", "bash around"},
@@ -2072,9 +2073,11 @@ func TestReplaceToolNamesInTextNamespaceSafety(t *testing.T) {
 func TestReplaceToolNamesInTextExactlyOnceCustomMapping(t *testing.T) {
 	// A custom mapping whose target is also a source key must NOT cascade:
 	// read -> write -> edit must stop at write for a single "read" identity.
+	// foo_bar -> read must stop at read and not cascade to write in "use foo_bar".
 	cloakTable := map[string]string{
-		"read":  "write",
-		"write": "edit",
+		"read":    "write",
+		"write":   "edit",
+		"foo_bar": "read",
 	}
 	cached := buildTestCloakPatterns(cloakTable)
 	tests := []struct {
@@ -2085,6 +2088,7 @@ func TestReplaceToolNamesInTextExactlyOnceCustomMapping(t *testing.T) {
 		{"quoted read", "use `read`", "use `write`"},
 		{"quoted write", "use `write`", "use `edit`"},
 		{"context read", "use read to go", "use write to go"},
+		{"unambiguous to ambiguous no cascade", "use foo_bar", "use read"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

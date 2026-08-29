@@ -1834,70 +1834,128 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 	return builder.String(), true
 }
 
+type textSpanReplacement struct {
+	start int
+	end   int
+	repl  string
+}
+
 // replaceToolNamesInText uses pre-compiled regex patterns from cachedCloakPatterns.
 // Patterns are compiled once on config change (rebuildCachedRegexes), not per call.
+// It executes a single-pass reconstruction from non-overlapping match spans
+// evaluated against the original text, ensuring that a target which is also a
+// source key is translated exactly once per token and never cascades across tiers.
 func replaceToolNamesInText(text string, cached *cachedCloakPatterns) (string, bool) {
 	if cached == nil || len(cached.cloakTable) == 0 {
 		return text, false
 	}
 
-	result := text
-	changed := false
+	var replacements []textSpanReplacement
 
 	// Tier 1: single-pass identity replacement. A single regex covers quoted
 	// references, namespaced (qualified) identifiers, and unambiguous names.
-	// Running as ONE ReplaceAllStringFunc over the source means an inserted
-	// target is never rescanned, so a custom mapping whose target is also a
-	// source key is translated exactly once per identity and never cascades.
 	if cached.identRe != nil {
-		newResult := cached.identRe.ReplaceAllStringFunc(result, func(m string) string {
-			return replaceToolIdentity(m, cached)
-		})
-		if newResult != result {
-			result = newResult
-			changed = true
+		matches := cached.identRe.FindAllStringIndex(text, -1)
+		for _, m := range matches {
+			sub := text[m[0]:m[1]]
+			repl := replaceToolIdentity(sub, cached)
+			if repl != sub {
+				replacements = append(replacements, textSpanReplacement{
+					start: m[0],
+					end:   m[1],
+					repl:  repl,
+				})
+			}
 		}
 	}
 
 	// Tier 3: Pattern-based replacement for ambiguous names in tool-reference
-	// contexts ("the bash tool", "use read"). Targets inserted by Tier 1 all
-	// contain underscores or camelCase, so they never collide with these
-	// context patterns.
+	// contexts ("the bash tool", "use read"). Evaluated against original text
+	// and skipped if overlapping with Tier 1.
 	if cached.ambigRe != nil {
-		newResult := cached.ambigRe.ReplaceAllStringFunc(result, func(match string) string {
-			sub := cached.ambigRe.FindStringSubmatch(match)
-			if len(sub) >= 6 {
-				var lead, tool, trail string
-				if sub[1] != "" {
-					lead, tool, trail = sub[1], sub[2], sub[3]
-				} else if sub[4] != "" {
-					lead, tool, trail = sub[4], sub[5], sub[6]
-				}
-				if tool == "" {
-					return match
-				}
-				prefix, base := splitToolNamespace(tool)
-				if target, ok := lookupCloakFold(base, cached.cloakTable); ok {
-					return lead + prefix + target + trail
+		matches := cached.ambigRe.FindAllStringSubmatchIndex(text, -1)
+		for _, sub := range matches {
+			if len(sub) < 14 {
+				continue
+			}
+			fullStart, fullEnd := sub[0], sub[1]
+			var lead, tool, trail string
+			if sub[2] >= 0 && sub[3] >= 0 {
+				lead = text[sub[2]:sub[3]]
+				tool = text[sub[4]:sub[5]]
+				trail = text[sub[6]:sub[7]]
+			} else if sub[8] >= 0 && sub[9] >= 0 {
+				lead = text[sub[8]:sub[9]]
+				tool = text[sub[10]:sub[11]]
+				trail = text[sub[12]:sub[13]]
+			}
+			if tool == "" {
+				continue
+			}
+			prefix, base := splitToolNamespace(tool)
+			if prefix != "" && isToolSourceName(strings.TrimSuffix(prefix, ":"), cached.cloakTable) {
+				// Access-mode / compound token like "read:write", do not cloak.
+				continue
+			}
+			if target, ok := lookupCloakFold(base, cached.cloakTable); ok {
+				newStr := lead + prefix + target + trail
+				if newStr != text[fullStart:fullEnd] {
+					overlaps := false
+					for _, r := range replacements {
+						if fullStart < r.end && fullEnd > r.start {
+							overlaps = true
+							break
+						}
+					}
+					if !overlaps {
+						replacements = append(replacements, textSpanReplacement{
+							start: fullStart,
+							end:   fullEnd,
+							repl:  newStr,
+						})
+					}
 				}
 			}
-			return match
-		})
-		if newResult != result {
-			result = newResult
-			changed = true
 		}
 	}
 
-	return result, changed
+	if len(replacements) == 0 {
+		return text, false
+	}
+
+	sort.Slice(replacements, func(i, j int) bool {
+		return replacements[i].start < replacements[j].start
+	})
+
+	var builder strings.Builder
+	builder.Grow(len(text))
+	last := 0
+	for _, r := range replacements {
+		if r.start < last {
+			continue
+		}
+		builder.WriteString(text[last:r.start])
+		builder.WriteString(r.repl)
+		last = r.end
+	}
+	builder.WriteString(text[last:])
+
+	return builder.String(), true
 }
 
 // isToolSourceName reports whether name is one of the cloak table's original
 // (source) tool names. Used to avoid mistaking an access-mode or compound
 // token such as "read:write" for a qualified tool reference.
 func isToolSourceName(name string, cloakTable map[string]string) bool {
-	_, ok := cloakTable[name]
-	return ok
+	if _, ok := cloakTable[name]; ok {
+		return true
+	}
+	for orig := range cloakTable {
+		if strings.EqualFold(orig, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // lookupCloakFold resolves a possibly different-cased tool base name to its
