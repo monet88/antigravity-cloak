@@ -105,6 +105,15 @@ const (
 // never forwarded upstream, whether its value is valid or not.
 const explicitClientHeader = "X-Cloak-Client"
 
+// negativeClientResolution is a sentinel client id recorded under a request's
+// correlation key when request-time precedence ran to completion but resolved
+// no client (an invalid explicit X-Cloak-Client suppressed User-Agent evidence
+// and body classification found nothing). Its presence is authoritative:
+// response and stream paths must not reclassify the request from a weaker
+// signal that survived after the control header was consumed. It is distinct
+// from a missing session, which leaves conservative recovery available.
+const negativeClientResolution = "__none__"
+
 // userAgentEvidence lists conservative User-Agent prefixes that may resolve a
 // client. Each entry is verified against active ToolMappings; an entry without
 // a usable mapping (e.g. opencode before any table exists) stays inert and
@@ -352,10 +361,19 @@ func handleRequestInterceptBefore(request []byte) []byte {
 	}
 	body, rewritten, client := rewriteRequestBodyWithClient(req.Body, format, forcedClient)
 	debugLog("handleRequestInterceptBefore: rewritten=%t client=%s Body=%s", rewritten, client, string(body))
-	if client != "" && req.RequestID != "" {
-		cached := activeFilterConfig().uncloakRegexCache[client]
-		if cached != nil && cached.re != nil {
-			globalStreamManager.resetSession("req:"+req.RequestID, client, cached, requestChoiceCount(req.Body))
+	if req.RequestID != "" {
+		if client != "" {
+			cached := activeFilterConfig().uncloakRegexCache[client]
+			if cached != nil && cached.re != nil {
+				globalStreamManager.resetSession("req:"+req.RequestID, client, cached, requestChoiceCount(req.Body))
+			}
+		} else if explicitPresent && !explicitValid {
+			// Precedence ran to completion with UA suppressed and the body
+			// classifying nothing: record the authoritative negative so the
+			// response/stream paths cannot re-infer a weaker client from the
+			// surviving User-Agent after this interceptor consumed the header.
+			debugLog("handleRequestInterceptBefore: negative client resolution recorded for RequestID=%s", req.RequestID)
+			globalStreamManager.resetSession("req:"+req.RequestID, negativeClientResolution, nil, requestChoiceCount(req.Body))
 		}
 	}
 	if !rewritten {
@@ -379,13 +397,19 @@ func handleResponseIntercept(request []byte) []byte {
 	}
 	var client string
 	var uncloakTable map[string]string
+	correlated := false
 	if req.RequestID != "" {
 		if c := globalStreamManager.getClient("req:" + req.RequestID); c != "" {
-			client = c
-			uncloakTable = effectiveUncloakTable(c)
+			correlated = true
+			if c != negativeClientResolution {
+				client = c
+				uncloakTable = effectiveUncloakTable(c)
+			}
 		}
 	}
-	if uncloakTable == nil {
+	// Weaker-evidence recovery runs only when request-time correlation is
+	// genuinely unavailable; a recorded negative resolution suppresses it.
+	if !correlated && uncloakTable == nil {
 		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
 			uncloakTable = effectiveUncloakTable(uaClient)
 			if client == "" {
@@ -394,7 +418,7 @@ func handleResponseIntercept(request []byte) []byte {
 			debugLog("handleResponseIntercept: UA evidence client=%q", uaClient)
 		}
 	}
-	if uncloakTable == nil {
+	if !correlated && uncloakTable == nil {
 		var detectedClient string
 		uncloakTable, detectedClient = buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
 		if client == "" {
