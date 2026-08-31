@@ -10,6 +10,7 @@
 Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `Oh My Pi`) with `Antigravity` in the request's `system` field and `system`-role messages.
 - **Default Keywords**: Preconfigured built-in rewrite mappings for known coding assistants.
 - **Custom Mappings**: User-defined rewrite mappings (`custom_mappings`) that can add new keywords or override built-in defaults.
+- **Reverse Restoration (`oh_my_pi` only)**: On the response and stream paths, assistant-visible `Antigravity` mentions are restored to `omp` (Issue #18). Scope is strictly assistant text: non-streaming `message.content` / Anthropic `text` blocks, and streaming deltas on indexed semantic lanes. Fragmented matches are held in a per-lane carry and flushed at stream completion (`data: [DONE]`, terminal `finish_reason`, `message_stop`, or bare `[DONE]` on the standalone path) in deterministic lane-index order; unmatched buffered text is delivered verbatim, never dropped. Tool arguments, reasoning/control/data parts, and non-assistant roles keep literal `Antigravity`.
 
 ### 2. Tool Cloaking & Uncloaking
 - **Cloaking (Request Path)**: Translates client-native tool names (e.g., `Bash`, `read`, `shell_command`) into Antigravity-native tool names (e.g., `run_command`, `view_file`) before the request reaches the upstream LLM.
@@ -76,7 +77,7 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 ### 3. Activation Model (Two-Stage Gating)
 Every interceptor evaluates two sequential gates:
 1. **Model Gate (`modelAllowsCloak`)**: Evaluates `model_prefixes` against `Model` and `RequestedModel`. If empty, all models pass. If configured, non-matching models exit early with a no-op response.
-2. **Client Gate (`detectClient`)**: Matches tool names against known client cloak tables using tiered detection (distinctive tools or threshold counts per client profile). If identified, cloaking proceeds.
+2. **Client Gate**: Resolves the client identity by precedence (Issue #16, #17): a valid explicit `X-Cloak-Client` control header (consumed, never forwarded upstream) > verified positive User-Agent evidence (`omp/` prefix, gated on a usable active ToolMappings entry) > body-based tool-name classification. An invalid explicit value bypasses UA evidence and falls directly to body detection, so a weaker signal cannot mask operator misconfiguration. Once identified, cloaking proceeds.
 
 #### Client Classification Semantics
 - **Original-name detection (`detectClient`)** keys off source tool names. Clients whose source names are mostly common words (`read`, `bash`) require either a distinctive harness tool (`hub`, `task`, `todo`, `eval`, `web_search`, `vibe_*`, `*_experiment`) or at least `minCollidingToolMatches` (4) simultaneous matches.
@@ -90,7 +91,7 @@ These semantics are recorded in [ADR 0002](docs/adr/0002-ratio-ranked-client-cla
 - **Schema-Aware Caching**: In CLIProxyAPI schema_version >= 3, request bodies (`OriginalRequest`/`RequestBody`) are delivered only on the header-init chunk (`ChunkIndex == StreamChunkHeaderInitIndex`). The manager caches the uncloak regex pattern under the stream's correlation key - `RequestID`, a metadata/header id, or (schema < 3, where every chunk repeats the request body) an FNV hash of that body.
 - **Uncorrelated Chunks**: Payload chunks carrying no correlation key cannot be attributed to any stream and pass through unmolested rather than compete for shared state (which would corrupt concurrent streams).
 - **SSE Event Reassembly**: Buffers incomplete TCP fragments (`\n\n` boundaries) and uncloaks complete SSE events without cross-stream pollution.
-- **Lifecycle & Cleanup**: Automatically frees sessions on `data: [DONE]` and cleans up abandoned/interrupted streams via opportunistic pruning on chunk arrival.
+- **Lifecycle & Cleanup**: Frees sessions on `data: [DONE]` (SSE) and on terminal standalone chunks (`finish_reason`, `message_stop`, bare `[DONE]`), flushing held reverse-brand carries into the terminal event before deletion so buffered text is never lost; abandoned/interrupted streams are pruned opportunistically on chunk arrival.
 
 ### 5. Configuration Lifecycle
 Managed via `atomic.Pointer[filterConfig]`, enabling lock-free, zero-copy configuration reads on hot request and streaming paths with thread-safe live reconfiguration.

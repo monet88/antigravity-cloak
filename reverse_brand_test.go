@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
 // Helpers duplicated to avoid import cycles: use same as existing tests
@@ -762,5 +765,202 @@ func TestReverseBrand_Streaming_AnthropicToolArgsPreserved(t *testing.T) {
 	// If body2 is nil, it means no modification (correct), otherwise it should still contain Antigravity
 	if body2 != nil && !strings.Contains(string(body2), "Antigravity") {
 		t.Fatalf("anthropic tool input lost: %q", string(body2))
+	}
+}
+
+// ── Spec #15 review remediation regressions ──────────────────────────────
+
+func ompUncloakCache(t *testing.T) *cachedUncloakPattern {
+	t.Helper()
+	cached := activeFilterConfig().uncloakRegexCache["oh_my_pi"]
+	if cached == nil || cached.re == nil {
+		t.Fatal("missing oh_my_pi uncloak regex cache")
+	}
+	return cached
+}
+
+// Review finding 1: a standalone (non-SSE) stream ending on a terminal chunk
+// (finish_reason or bare [DONE]) must flush held reverse-brand carries into
+// that chunk and clean up the session — unmatched buffered text is never lost.
+func TestReviewFix_StandaloneCarryFlushAtFinishReason(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:sa-finish", "oh_my_pi", ompUncloakCache(t))
+
+	resp0 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-finish", SourceFormat: "openai", ChunkIndex: 0,
+		Body: []byte(`{"choices":[{"index":0,"delta":{"content":"Hello Anti"}}]}`),
+	}, "openai")
+	if len(resp0.Body) == 0 {
+		t.Fatal("expected rewritten standalone chunk (held carry stripped)")
+	}
+	if bytes.Contains(resp0.Body, []byte("Anti")) {
+		t.Fatalf("held carry leaked before terminal chunk: %s", resp0.Body)
+	}
+
+	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-finish", SourceFormat: "openai", ChunkIndex: 1,
+		Body: []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`),
+	}, "openai")
+	if !bytes.Contains(resp1.Body, []byte("Anti")) {
+		t.Fatalf("terminal flush lost unmatched carry: %s", resp1.Body)
+	}
+	if bytes.Contains(resp1.Body, []byte("omp")) {
+		t.Fatalf("unmatched carry falsely replaced: %s", resp1.Body)
+	}
+	if !bytes.Contains(resp1.Body, []byte("finish_reason")) {
+		t.Fatalf("terminal chunk truth (finish_reason) dropped: %s", resp1.Body)
+	}
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:sa-finish"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be deleted after terminal standalone chunk")
+	}
+}
+
+func TestReviewFix_StandaloneCarryFlushAtBareDone(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:sa-done", "oh_my_pi", ompUncloakCache(t))
+
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-done", SourceFormat: "openai", ChunkIndex: 0,
+		Body: []byte(`{"choices":[{"index":0,"delta":{"content":"tail Antigravit"}}]}`),
+	}, "openai")
+
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-done", SourceFormat: "openai", ChunkIndex: 1,
+		Body: []byte(`[DONE]`),
+	}, "openai")
+	if !bytes.Contains(resp.Body, []byte("Antigravit")) {
+		t.Fatalf("bare [DONE] flush lost partial carry: %s", resp.Body)
+	}
+	if !bytes.Contains(resp.Body, []byte("[DONE]")) {
+		t.Fatalf("bare [DONE] marker swallowed: %s", resp.Body)
+	}
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:sa-done"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be deleted after bare [DONE] standalone chunk")
+	}
+}
+
+// Review finding 2: cross-lane flush ordering must be deterministic (numeric
+// lane index ascending), not Go map iteration order. Distinct lanes stay
+// isolated (covered by TestReverseBrand_InterleavedLanesIsolated).
+func TestReviewFix_DeterministicMultiLaneFlushOrder(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	cached := ompUncloakCache(t)
+	for iter := range 25 {
+		reqID := fmt.Sprintf("order-%d", iter)
+		mgr := newStreamSessionManager()
+		mgr.resetSession("req:"+reqID, "oh_my_pi", cached)
+		mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+			RequestID: reqID, SourceFormat: "openai", ChunkIndex: 0,
+			Body: []byte("data: {\"choices\":[" +
+				"{\"index\":2,\"delta\":{\"content\":\"a2 Anti\"}}," +
+				"{\"index\":10,\"delta\":{\"content\":\"a10 Anti\"}}," +
+				"{\"index\":1,\"delta\":{\"content\":\"a1 Anti\"}}," +
+				"{\"index\":7,\"delta\":{\"content\":\"a7 Ant\"}}]}\n\n"),
+		}, "openai")
+		resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+			RequestID: reqID, SourceFormat: "openai", ChunkIndex: 1,
+			Body: []byte("data: [DONE]\n\n"),
+		}, "openai")
+		got := flushLaneOrder(t, resp.Body)
+		want := []int{1, 2, 7, 10}
+		if len(got) != len(want) {
+			t.Fatalf("iter %d: expected %d flush events, got %v (body=%q)", iter, len(want), got, resp.Body)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("iter %d: flush order %v, want %v (body=%q)", iter, got, want, resp.Body)
+			}
+		}
+	}
+}
+
+// flushLaneOrder extracts choice indexes of flush events preceding [DONE].
+func flushLaneOrder(t *testing.T, body []byte) []int {
+	t.Helper()
+	var order []int
+	for _, ev := range strings.Split(string(body), "\n\n") {
+		ev = strings.TrimSpace(ev)
+		if !strings.HasPrefix(ev, "data: {") {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(ev, "data: ")), &m); err != nil {
+			t.Fatalf("unparseable flush event %q: %v", ev, err)
+		}
+		choices, ok := m["choices"].([]any)
+		if !ok {
+			continue
+		}
+		for _, cRaw := range choices {
+			c, ok := cRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if idx, ok := c["index"].(float64); ok {
+				order = append(order, int(idx))
+			}
+		}
+	}
+	return order
+}
+
+// Review finding 3: OpenAI streaming content arrays must honor the
+// assistant-text allowlist (text/output_text/untyped) like the non-stream
+// path; excluded data/control/tool/reasoning parts keep literal Antigravity.
+func TestReviewFix_OpenAIStreamingContentArrayAllowlist(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	arr := `[` +
+		`{"type":"text","text":"a Antigravity b"},` +
+		`{"type":"output_text","text":"c Antigravity d"},` +
+		`{"type":"refusal","text":"e Antigravity f"},` +
+		`{"type":"reasoning_text","text":"g Antigravity h"},` +
+		`{"type":"tool_call_part","text":"i Antigravity j"},` +
+		`{"type":"data","data":{"text":"k Antigravity l"}},` +
+		`{"text":"m Antigravity n"}` +
+		`]`
+	wantRewritten := []string{"a omp b", "c omp d", "m omp n"}
+	wantLiteral := []string{"e Antigravity f", "g Antigravity h", "i Antigravity j", "k Antigravity l"}
+
+	// SSE-framed event
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:arr-sse", "oh_my_pi", ompUncloakCache(t))
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "arr-sse", SourceFormat: "openai", ChunkIndex: 0,
+		Body: []byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":" + arr + "}}]}\n\n"),
+	}, "openai")
+	checkArrayAllowlist(t, "sse", resp.Body, wantRewritten, wantLiteral)
+
+	// Standalone (non-SSE) chunk
+	mgr2 := newStreamSessionManager()
+	mgr2.resetSession("req:arr-sa", "oh_my_pi", ompUncloakCache(t))
+	resp2 := mgr2.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "arr-sa", SourceFormat: "openai", ChunkIndex: 0,
+		Body: []byte("{\"choices\":[{\"index\":0,\"delta\":{\"content\":" + arr + "}}]}"),
+	}, "openai")
+	checkArrayAllowlist(t, "standalone", resp2.Body, wantRewritten, wantLiteral)
+}
+
+func checkArrayAllowlist(t *testing.T, label string, body []byte, rewritten, literal []string) {
+	t.Helper()
+	if len(body) == 0 {
+		t.Fatalf("%s: expected rewritten body", label)
+	}
+	for _, s := range rewritten {
+		if !strings.Contains(string(body), s) {
+			t.Fatalf("%s: allowed assistant text %q not rewritten: %s", label, s, body)
+		}
+	}
+	for _, s := range literal {
+		if !strings.Contains(string(body), s) {
+			t.Fatalf("%s: excluded part text %q was mangled: %s", label, s, body)
+		}
 	}
 }

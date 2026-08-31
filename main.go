@@ -46,6 +46,7 @@ import (
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -874,11 +875,28 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 				c2 := false
 				for _, partRaw := range v {
 					if part, ok := partRaw.(map[string]any); ok {
+						// Assistant-text allowlist (mirrors reverseBrandInOpenAIContent):
+						// only text/output_text/untyped parts are assistant-visible.
+						// data/control/tool/reasoning parts keep literal Antigravity.
+						if typ, _ := part["type"].(string); typ != "text" && typ != "output_text" && typ != "" {
+							continue
+						}
 						if txt, ok := part["text"].(string); ok {
 							newTxt, _ := applyBrandLane(txt, lane, isFinal)
 							if newTxt != txt {
 								part["text"] = newTxt
 								c2 = true
+							}
+						}
+					} else if s, ok := partRaw.(string); ok {
+						newStr, _ := applyBrandLane(s, lane, isFinal)
+						if newStr != s {
+							for i, elem := range v {
+								if elem == partRaw {
+									v[i] = newStr
+									c2 = true
+									break
+								}
 							}
 						}
 					}
@@ -958,31 +976,92 @@ func (m *streamSessionManager) reverseBrandAnthropicStreamingMap(data map[string
 	return false
 }
 
-func (m *streamSessionManager) generateBrandFlushEvents(sess *streamSession, format string) [][]byte {
-	var out [][]byte
-	for key, lane := range sess.brandCarries {
-		if lane.carry == "" {
+type brandFlush struct {
+	key  string
+	text string
+}
+
+// laneIndexNum parses the numeric lane index from a "format:N" carry key.
+func laneIndexNum(key string) (int, bool) {
+	i := strings.LastIndexByte(key, ':')
+	if i < 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(key[i+1:])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// orderedBrandFlushes resolves the final text of every held carry in
+// deterministic lane order: numeric lane indices ascending, non-numeric lanes
+// last, tie-broken by key. Go map iteration would otherwise randomise the
+// cross-lane flush sequence; Issue #18 requires stable event/lane ordering
+// while keeping distinct indexed lanes isolated. This does not mutate lane
+// state — callers drain only once the flushed text is safely delivered.
+func orderedBrandFlushes(sess *streamSession) []brandFlush {
+	keys := make([]string, 0, len(sess.brandCarries))
+	for k, lane := range sess.brandCarries {
+		if lane == nil || lane.carry == "" {
 			continue
 		}
+		keys = append(keys, k)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		ni, okI := laneIndexNum(keys[i])
+		nj, okJ := laneIndexNum(keys[j])
+		if okI != okJ {
+			return okI
+		}
+		if ni != nj {
+			return ni < nj
+		}
+		return keys[i] < keys[j]
+	})
+	flushes := make([]brandFlush, 0, len(keys))
+	for _, k := range keys {
+		lane := sess.brandCarries[k]
 		finalOut, _ := replaceInsensitiveWithPrev(lane.carry, lane.lastIsWord, reverseBrandMatch, reverseBrandReplacement)
 		if finalOut == "" {
 			finalOut = lane.carry
 		}
-		lane.carry = ""
 		if finalOut == "" {
 			continue
 		}
+		flushes = append(flushes, brandFlush{key: k, text: finalOut})
+	}
+	return flushes
+}
+
+func drainBrandFlushes(sess *streamSession, flushes []brandFlush) {
+	for _, f := range flushes {
+		lane := sess.brandCarries[f.key]
+		if lane == nil {
+			continue
+		}
+		lane.carry = ""
+		lane.lastIsWord = isWordByte(f.text[len(f.text)-1])
+	}
+}
+
+func (m *streamSessionManager) generateBrandFlushEvents(sess *streamSession, format string) [][]byte {
+	flushes := orderedBrandFlushes(sess)
+	if len(flushes) == 0 {
+		return nil
+	}
+	drainBrandFlushes(sess, flushes)
+	var out [][]byte
+	for _, f := range flushes {
+		idx, _ := laneIndexNum(f.key)
 		var ev []byte
 		if format == "openai" {
-			idxStr := strings.TrimPrefix(key, "openai:")
-			var idxInt int
-			fmt.Sscan(idxStr, &idxInt)
 			dataMap := map[string]any{
 				"choices": []any{
 					map[string]any{
-						"index": idxInt,
+						"index": idx,
 						"delta": map[string]any{
-							"content": finalOut,
+							"content": f.text,
 						},
 					},
 				},
@@ -990,15 +1069,12 @@ func (m *streamSessionManager) generateBrandFlushEvents(sess *streamSession, for
 			jb, _ := safeMarshal(dataMap)
 			ev = []byte("data: " + string(jb) + "\n\n")
 		} else if format == "anthropic" {
-			idxStr := strings.TrimPrefix(key, "anthropic:")
-			var idxInt int
-			fmt.Sscan(idxStr, &idxInt)
 			dataMap := map[string]any{
 				"type":  "content_block_delta",
-				"index": idxInt,
+				"index": idx,
 				"delta": map[string]any{
 					"type": "text_delta",
-					"text": finalOut,
+					"text": f.text,
 				},
 			}
 			jb, _ := safeMarshal(dataMap)
@@ -1007,11 +1083,166 @@ func (m *streamSessionManager) generateBrandFlushEvents(sess *streamSession, for
 			continue
 		}
 		out = append(out, ev)
-		if finalOut != "" {
-			lane.lastIsWord = isWordByte(finalOut[len(finalOut)-1])
-		}
 	}
 	return out
+}
+
+// standaloneChunkDone reports whether a standalone (non-SSE) chunk is the
+// stream's terminal chunk: a bare [DONE] payload, an OpenAI choice carrying a
+// non-null finish_reason, or an Anthropic message_stop event.
+func standaloneChunkDone(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return false
+	}
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return true
+	}
+	var root map[string]any
+	if err := safeUnmarshal(trimmed, &root); err != nil || root == nil {
+		return false
+	}
+	if t, _ := root["type"].(string); t == "message_stop" {
+		return true
+	}
+	choices, ok := root["choices"].([]any)
+	if !ok {
+		return false
+	}
+	for _, chRaw := range choices {
+		ch, ok := chRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if fr, has := ch["finish_reason"]; has && fr != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// flushBrandStandalone drains held reverse-brand carries into the terminal
+// standalone chunk so unmatched buffered text reaches the client instead of
+// dying with the session. OpenAI terminal chunks merge per choice index (a
+// new choice entry is appended when the chunk omits that lane). Anthropic
+// standalone chunks carry at most one delta, so a single flush merges into
+// delta.text when present; the host delivers Anthropic streams as SSE, so
+// any other Anthropic standalone shape drops the carry with the session.
+func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []byte, format string) ([]byte, bool) {
+	if sess == nil || sess.client != "oh_my_pi" || len(sess.brandCarries) == 0 {
+		return nil, false
+	}
+	var root map[string]any
+	trimmed := bytes.TrimSpace(body)
+	bareDone := bytes.Equal(trimmed, []byte("[DONE]"))
+	if err := safeUnmarshal(body, &root); err != nil || root == nil {
+		if !bareDone {
+			return nil, false
+		}
+		root = map[string]any{}
+	}
+	flushes := orderedBrandFlushes(sess)
+	if len(flushes) == 0 {
+		return nil, false
+	}
+	var merged bool
+	switch format {
+	case "openai":
+		merged = mergeOpenAIStandaloneFlush(root, flushes)
+	case "anthropic":
+		merged = mergeAnthropicStandaloneFlush(root, flushes)
+	}
+	if !merged {
+		return nil, false
+	}
+	drainBrandFlushes(sess, flushes)
+	raw, err := safeMarshal(root)
+	if err != nil {
+		return nil, false
+	}
+	if bareDone {
+		// The host frames the whole payload as one SSE data line, so keep
+		// the terminal marker as its own event after the flush content.
+		return append(raw, []byte("\n\ndata: [DONE]")...), true
+	}
+	return raw, true
+}
+
+func mergeOpenAIStandaloneFlush(root map[string]any, flushes []brandFlush) bool {
+	choices, _ := root["choices"].([]any)
+	for _, f := range flushes {
+		idx, ok := laneIndexNum(f.key)
+		if !ok {
+			idx = 0
+		}
+		target := openAIChoiceAt(choices, idx)
+		if target == nil {
+			target = map[string]any{"index": idx}
+			choices = append(choices, target)
+		}
+		delta, _ := target["delta"].(map[string]any)
+		if delta == nil {
+			if msg, ok := target["message"].(map[string]any); ok {
+				delta = msg
+			} else {
+				delta = map[string]any{}
+				target["delta"] = delta
+			}
+		}
+		if s, ok := delta["content"].(string); ok {
+			delta["content"] = s + f.text
+		} else {
+			delta["content"] = f.text
+		}
+	}
+	root["choices"] = choices
+	return true
+}
+
+func openAIChoiceAt(choices []any, idx int) map[string]any {
+	for _, chRaw := range choices {
+		ch, ok := chRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ci := 0
+		if v, has := ch["index"]; has {
+			if n, ok := jsonIndexValue(v); ok {
+				ci = n
+			}
+		}
+		if ci == idx {
+			return ch
+		}
+	}
+	return nil
+}
+
+// jsonIndexValue reads an integer lane index from a safeUnmarshal-produced
+// value (UseNumber guarantees json.Number for every JSON number).
+func jsonIndexValue(v any) (int, bool) {
+	n, ok := v.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	i, err := n.Int64()
+	return int(i), err == nil
+}
+
+func mergeAnthropicStandaloneFlush(root map[string]any, flushes []brandFlush) bool {
+	if len(flushes) != 1 {
+		return false
+	}
+	delta, ok := root["delta"].(map[string]any)
+	if !ok {
+		return false
+	}
+	txt, ok := delta["text"].(string)
+	if !ok {
+		return false
+	}
+	delta["text"] = txt + flushes[0].text
+	return true
 }
 
 func (m *streamSessionManager) reverseBrandStandalone(sess *streamSession, body []byte, format string) ([]byte, bool) {
@@ -1308,29 +1539,30 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			}
 		}
 		overallChanged := changed || brandChanged
-
 		if bytes.Contains(completeEvents, []byte("data: [DONE]")) || bytes.Contains(modified, []byte("data: [DONE]")) {
+			// Safety net for [DONE] embedded in a multi-line event that
+			// reverseBrandSSE's per-event check misses. generateBrandFlushEvents
+			// drains each lane as it emits, so the common case (flush events
+			// already written before the [DONE] frame) is a no-op here — no
+			// double emission.
 			if sess.client == "oh_my_pi" {
 				if flush := m.generateBrandFlushEvents(sess, format); len(flush) > 0 {
 					doneIdx := bytes.Index(modified, []byte("data: [DONE]"))
+					var tmp bytes.Buffer
 					if doneIdx >= 0 {
-						var tmp bytes.Buffer
 						tmp.Write(modified[:doneIdx])
 						for _, fe := range flush {
 							tmp.Write(fe)
 						}
 						tmp.Write(modified[doneIdx:])
-						modified = tmp.Bytes()
-						overallChanged = true
 					} else {
-						var tmp bytes.Buffer
 						for _, fe := range flush {
 							tmp.Write(fe)
 						}
 						tmp.Write(modified)
-						modified = tmp.Bytes()
-						overallChanged = true
 					}
+					modified = tmp.Bytes()
+					overallChanged = true
 				}
 			}
 			m.deleteSession(key)
@@ -1355,6 +1587,17 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		if bm, bc := m.reverseBrandStandalone(sess, modified, format); bc {
 			modified = bm
 			changed = true
+		}
+		// Terminal standalone chunk (finish_reason / message_stop / bare
+		// [DONE]): drain held reverse-brand carries into this chunk so
+		// unmatched buffered text is delivered, then free the session —
+		// the standalone path has no SSE [DONE] cleanup point.
+		if standaloneChunkDone(modified) {
+			if bm, fc := m.flushBrandStandalone(sess, modified, format); fc {
+				modified = bm
+				changed = true
+			}
+			m.deleteSession(key)
 		}
 	}
 	if !changed {
