@@ -76,7 +76,7 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 
 ### 3. Activation Model (Two-Stage Gating)
 Every interceptor evaluates two sequential gates:
-1. **Model Gate (`modelAllowsCloak`)**: Evaluates `model_prefixes` against `Model` and `RequestedModel`. If empty, all models pass. If configured, non-matching models exit early with a no-op response.
+1. **Model Gate (`modelAllowsCloak`)**: Evaluates `model_prefixes` against `Model` and `RequestedModel`. If empty, all models pass. If configured, non-matching models skip all cloaking/body mutation. Transport sanitation is independent of the gate (Spec #15): `handleRequestInterceptBefore` consumes/clears the plugin-owned `X-Cloak-Client` header before the gate runs, so a gate-skipped request still never leaks the control header upstream.
 2. **Client Gate**: Resolves the client identity by precedence (Issue #16, #17): a valid explicit `X-Cloak-Client` control header (consumed, never forwarded upstream) > verified positive User-Agent evidence (`omp/` prefix, gated on a usable active ToolMappings entry) > body-based tool-name classification. An invalid explicit value bypasses UA evidence and falls directly to body detection, so a weaker signal cannot mask operator misconfiguration. Once identified, cloaking proceeds.
 
 #### Client Classification Semantics

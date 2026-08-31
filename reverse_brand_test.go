@@ -1026,3 +1026,35 @@ func TestReviewFix_StandalonePartialFinishKeepsOtherLane(t *testing.T) {
 		t.Fatal("session must be deleted after every lane finishes")
 	}
 }
+
+// Spec #15 finding: the singleton-map branch of reverseBrandInOpenAIContent
+// must honor the same assistant-text allowlist (text/output_text/untyped) as
+// the array branch — an explicit non-text part (refusal/reasoning/tool/data)
+// keeps the literal Antigravity brand.
+func TestReviewFix_OpenAIContentSingletonMapAllowlist(t *testing.T) {
+	literal := []map[string]any{
+		{"type": "refusal", "text": "a Antigravity b"},
+		{"type": "reasoning", "text": "c Antigravity d"},
+		{"type": "tool_call", "text": "e Antigravity f"},
+		{"type": "data", "text": "g Antigravity h"},
+	}
+	for _, part := range literal {
+		got, changed := reverseBrandInOpenAIContent(part)
+		if changed {
+			t.Fatalf("explicit non-text part was rewritten: %v", got)
+		}
+		if txt, _ := part["text"].(string); !strings.Contains(txt, "Antigravity") {
+			t.Fatalf("literal brand mangled in %v", part)
+		}
+	}
+	rewritten := []map[string]any{
+		{"type": "text", "text": "a Antigravity b"},
+		{"type": "output_text", "text": "c Antigravity d"},
+		{"text": "e Antigravity f"},
+	}
+	for _, part := range rewritten {
+		if _, changed := reverseBrandInOpenAIContent(part); !changed {
+			t.Fatalf("assistant text part not rewritten: %v", part)
+		}
+	}
+}

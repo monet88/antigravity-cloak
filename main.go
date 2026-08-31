@@ -651,6 +651,11 @@ func reverseBrandInOpenAIContent(content any) (any, bool) {
 		}
 		return v, changed
 	case map[string]any:
+		// Assistant-text allowlist (same as the array branch): an explicit
+		// non-text type (refusal/reasoning/tool/data) keeps literal brand.
+		if typ, _ := v["type"].(string); typ != "text" && typ != "output_text" && typ != "" {
+			return content, false
+		}
 		if txt, ok := v["text"].(string); ok {
 			if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
 				v["text"] = next
