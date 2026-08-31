@@ -355,7 +355,7 @@ func handleRequestInterceptBefore(request []byte) []byte {
 	if client != "" && req.RequestID != "" {
 		cached := activeFilterConfig().uncloakRegexCache[client]
 		if cached != nil && cached.re != nil {
-			globalStreamManager.resetSession("req:"+req.RequestID, client, cached)
+			globalStreamManager.resetSession("req:"+req.RequestID, client, cached, requestChoiceCount(req.Body))
 		}
 	}
 	if !rewritten {
@@ -836,23 +836,7 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 		if !ok {
 			continue
 		}
-		laneKey := "openai:0"
-		if idxVal, ok := ch["index"]; ok {
-			switch v := idxVal.(type) {
-			case json.Number:
-				if i, err := v.Int64(); err == nil {
-					laneKey = fmt.Sprintf("openai:%d", i)
-				}
-			case float64:
-				laneKey = fmt.Sprintf("openai:%d", int(v))
-			case int:
-				laneKey = fmt.Sprintf("openai:%d", v)
-			case int64:
-				laneKey = fmt.Sprintf("openai:%d", v)
-			default:
-				laneKey = fmt.Sprintf("openai:%v", v)
-			}
-		}
+		laneKey := openAIChoiceLaneKey(ch)
 		lane := getBrandLane(sess, laneKey)
 		var delta map[string]any
 		if d, ok := ch["delta"].(map[string]any); ok {
@@ -1087,48 +1071,76 @@ func (m *streamSessionManager) generateBrandFlushEvents(sess *streamSession, for
 	return out
 }
 
-// standaloneChunkDone reports whether a standalone (non-SSE) chunk is the
-// stream's terminal chunk: a bare [DONE] payload, an OpenAI choice carrying a
-// non-null finish_reason, or an Anthropic message_stop event.
-func standaloneChunkDone(body []byte) bool {
+// markStandaloneFinishes records the choices a standalone (non-SSE) chunk
+// finished: a non-null finish_reason ends ONLY its own choice lane, never the
+// whole stream (with n > 1 other choices keep streaming). It reports the lanes
+// finished by this chunk and whether the stream as a whole is done: a global
+// terminal payload (bare [DONE] or Anthropic message_stop), or finish_reasons
+// covering every expected choice lane.
+func markStandaloneFinishes(sess *streamSession, body []byte) (finished []string, done bool) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
-		return false
+		return nil, false
 	}
 	if bytes.Equal(trimmed, []byte("[DONE]")) {
-		return true
+		return nil, true
 	}
 	var root map[string]any
 	if err := safeUnmarshal(trimmed, &root); err != nil || root == nil {
-		return false
+		return nil, false
 	}
 	if t, _ := root["type"].(string); t == "message_stop" {
-		return true
+		return nil, true
 	}
-	choices, ok := root["choices"].([]any)
-	if !ok {
-		return false
-	}
+	choices, _ := root["choices"].([]any)
 	for _, chRaw := range choices {
 		ch, ok := chRaw.(map[string]any)
 		if !ok {
 			continue
 		}
 		if fr, has := ch["finish_reason"]; has && fr != nil {
-			return true
+			laneKey := openAIChoiceLaneKey(ch)
+			getBrandLane(sess, laneKey).finished = true
+			finished = append(finished, laneKey)
 		}
 	}
-	return false
+	if len(finished) == 0 || len(sess.brandCarries) < sess.expected {
+		return finished, false
+	}
+	for _, lane := range sess.brandCarries {
+		if !lane.finished {
+			return finished, false
+		}
+	}
+	return finished, true
 }
 
-// flushBrandStandalone drains held reverse-brand carries into the terminal
-// standalone chunk so unmatched buffered text reaches the client instead of
-// dying with the session. OpenAI terminal chunks merge per choice index (a
-// new choice entry is appended when the chunk omits that lane). Anthropic
-// standalone chunks carry at most one delta, so a single flush merges into
-// delta.text when present; the host delivers Anthropic streams as SSE, so
-// any other Anthropic standalone shape drops the carry with the session.
-func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []byte, format string) ([]byte, bool) {
+// openAIChoiceLaneKey derives the brand lane key for a choice map, matching
+// the keys produced by reverseBrandOpenAIStreamingMap.
+func openAIChoiceLaneKey(ch map[string]any) string {
+	if idxVal, ok := ch["index"]; ok {
+		if n, ok := jsonIndexValue(idxVal); ok {
+			return fmt.Sprintf("openai:%d", n)
+		}
+		return fmt.Sprintf("openai:%v", idxVal)
+	}
+	return "openai:0"
+}
+
+// requestChoiceCount reads the OpenAI "n" (choices per completion) from a
+// request body; absent/invalid means 1.
+func requestChoiceCount(body []byte) int {
+	var root map[string]any
+	if err := safeUnmarshal(body, &root); err != nil || root == nil {
+		return 1
+	}
+	if n, ok := jsonIndexValue(root["n"]); ok && n > 1 {
+		return n
+	}
+	return 1
+}
+
+func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []byte, format string, only []string) ([]byte, bool) {
 	if sess == nil || sess.client != "oh_my_pi" || len(sess.brandCarries) == 0 {
 		return nil, false
 	}
@@ -1142,6 +1154,18 @@ func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []
 		root = map[string]any{}
 	}
 	flushes := orderedBrandFlushes(sess)
+	if only != nil {
+		selected := flushes[:0:0]
+		for _, f := range flushes {
+			for _, k := range only {
+				if k == f.key {
+					selected = append(selected, f)
+					break
+				}
+			}
+		}
+		flushes = selected
+	}
 	if len(flushes) == 0 {
 		return nil, false
 	}
@@ -1309,6 +1333,10 @@ func (m *streamSessionManager) reverseBrandStandalone(sess *streamSession, body 
 type brandLane struct {
 	carry      string
 	lastIsWord bool
+	// finished marks the lane's choice as ended by a non-null
+	// finish_reason on the standalone path; the whole session is freed
+	// only once every expected lane is finished.
+	finished bool
 }
 
 type streamSession struct {
@@ -1317,6 +1345,9 @@ type streamSession struct {
 	tail         []byte
 	updatedAt    time.Time
 	brandCarries map[string]*brandLane
+	// expected is the request's OpenAI "n" (choices per completion),
+	// minimum 1; gates standalone stream-end detection.
+	expected int
 }
 
 const (
@@ -1380,15 +1411,25 @@ func (m *streamSessionManager) sessionKey(req *pluginapi.StreamChunkInterceptReq
 
 // resetSession (re)initializes the session for a fresh stream start, clearing
 // any stale tail left by an aborted previous incarnation of the same key.
-func (m *streamSessionManager) resetSession(key, client string, cached *cachedUncloakPattern) {
+// expected is the request's choice count ("n"); omitted means 1.
+func (m *streamSessionManager) resetSession(key, client string, cached *cachedUncloakPattern, expected ...int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cleanupStaleLocked()
-	m.sessions[key] = &streamSession{
+	m.sessions[key] = newStreamSession(client, cached, expected...)
+}
+
+func newStreamSession(client string, cached *cachedUncloakPattern, expected ...int) *streamSession {
+	n := 1
+	if len(expected) > 0 && expected[0] > 1 {
+		n = expected[0]
+	}
+	return &streamSession{
 		client:       client,
 		cached:       cached,
 		updatedAt:    time.Now(),
 		brandCarries: make(map[string]*brandLane),
+		expected:     n,
 	}
 }
 
@@ -1396,18 +1437,13 @@ func (m *streamSessionManager) resetSession(key, client string, cached *cachedUn
 // Losing a race to an already-registered session returns the incumbent;
 // both racers derive (client, cached) from the same request body, so either
 // outcome is correct.
-func (m *streamSessionManager) ensureSession(key, client string, cached *cachedUncloakPattern) *streamSession {
+func (m *streamSessionManager) ensureSession(key, client string, cached *cachedUncloakPattern, expected ...int) *streamSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if sess := m.sessions[key]; sess != nil {
 		return sess
 	}
-	sess := &streamSession{
-		client:       client,
-		cached:       cached,
-		updatedAt:    time.Now(),
-		brandCarries: make(map[string]*brandLane),
-	}
+	sess := newStreamSession(client, cached, expected...)
 	m.sessions[key] = sess
 	return sess
 }
@@ -1456,19 +1492,21 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			debugLog("StreamSessionManager: header-init using pre-registered session key=%s client=%s", key, sessClient)
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
+		detectSrc := detectionRequestBody(req.OriginalRequest, req.RequestBody)
+		n := requestChoiceCount(detectSrc)
 		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
 			debugLog("StreamSessionManager: header-init UA evidence key=%s client=%s", key, uaClient)
 			if cached := activeFilterConfig().uncloakRegexCache[uaClient]; cached != nil && cached.re != nil {
-				m.resetSession(key, uaClient, cached)
+				m.resetSession(key, uaClient, cached, n)
 			}
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
-		_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+		_, client := buildUncloakTable(detectSrc, format)
 		debugLog("StreamSessionManager: header-init key=%s client=%s", key, client)
 		if client != "" {
 			cached := activeFilterConfig().uncloakRegexCache[client]
 			if cached != nil && cached.re != nil {
-				m.resetSession(key, client, cached)
+				m.resetSession(key, client, cached, n)
 			}
 		}
 		return pluginapi.StreamChunkInterceptResponse{}
@@ -1588,15 +1626,23 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			modified = bm
 			changed = true
 		}
-		// Terminal standalone chunk (finish_reason / message_stop / bare
-		// [DONE]): drain held reverse-brand carries into this chunk so
-		// unmatched buffered text is delivered, then free the session —
-		// the standalone path has no SSE [DONE] cleanup point.
-		if standaloneChunkDone(modified) {
-			if bm, fc := m.flushBrandStandalone(sess, modified, format); fc {
+		// A non-null finish_reason ends ONLY its own choice lane: flush that
+		// lane's held carry into this chunk. The session is freed — and every
+		// remaining carry flushed — only at true stream completion (bare
+		// [DONE], message_stop, or finish_reasons covering every expected
+		// lane); unfinished lanes keep streaming.
+		finished, done := markStandaloneFinishes(sess, modified)
+		if done || len(finished) > 0 {
+			only := finished
+			if done {
+				only = nil
+			}
+			if bm, fc := m.flushBrandStandalone(sess, modified, format, only); fc {
 				modified = bm
 				changed = true
 			}
+		}
+		if done {
 			m.deleteSession(key)
 		}
 	}
@@ -1617,13 +1663,14 @@ func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkI
 	if key == "" {
 		return nil
 	}
+	src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
+	n := requestChoiceCount(src)
 	if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
 		if cached := activeFilterConfig().uncloakRegexCache[uaClient]; cached != nil && cached.re != nil {
 			debugLog("StreamSessionManager: fallback UA evidence key=%s client=%s", key, uaClient)
-			return m.ensureSession(key, uaClient, cached)
+			return m.ensureSession(key, uaClient, cached, n)
 		}
 	}
-	src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
 	if len(src) == 0 {
 		return nil
 	}
@@ -1636,7 +1683,7 @@ func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkI
 	if cached == nil || cached.re == nil {
 		return nil
 	}
-	return m.ensureSession(key, client, cached)
+	return m.ensureSession(key, client, cached, n)
 }
 
 // splitSSEEvents splits combined bytes into complete SSE events and an

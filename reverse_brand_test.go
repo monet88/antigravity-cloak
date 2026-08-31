@@ -964,3 +964,65 @@ func checkArrayAllowlist(t *testing.T, label string, body []byte, rewritten, lit
 		}
 	}
 }
+
+// Review finding (Spec #15 follow-up): in a standalone OpenAI stream with
+// multiple choices, a finish_reason on choice 0 must NOT flush choice 1's
+// held carry or delete the session — choice 1 is still streaming. Only a
+// bare [DONE] / message_stop, or finish_reasons covering every known lane,
+// ends the stream. Per-lane isolation must hold and the split token must
+// still be rewritten when its continuation arrives.
+func TestReviewFix_StandalonePartialFinishKeepsOtherLane(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:sa-partial", "oh_my_pi", ompUncloakCache(t))
+
+	// Chunk 0: choice 1 holds a split "Anti" carry (stripped from output).
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-partial", SourceFormat: "openai", ChunkIndex: 0,
+		Body: []byte(`{"choices":[{"index":0,"delta":{"content":"A"}},{"index":1,"delta":{"content":"Hello Anti"}}]}`),
+	}, "openai")
+
+	// Chunk 1: ONLY choice 0 finishes. Choice 1's carry must stay held and
+	// the session must survive.
+	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-partial", SourceFormat: "openai", ChunkIndex: 1,
+		Body: []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`),
+	}, "openai")
+	if bytes.Contains(resp1.Body, []byte("Anti")) {
+		t.Fatalf("unfinished choice 1 carry flushed by choice 0 finish: %s", resp1.Body)
+	}
+	mgr.mu.Lock()
+	sess, alive := mgr.sessions["req:sa-partial"]
+	var carry string
+	if alive {
+		if lane := sess.brandCarries["openai:1"]; lane != nil {
+			carry = lane.carry
+		}
+	}
+	mgr.mu.Unlock()
+	if !alive {
+		t.Fatal("session deleted while choice 1 still streaming")
+	}
+	if carry != "Anti" {
+		t.Fatalf("choice 1 carry lost on partial finish: %q", carry)
+	}
+	// Chunk 2: choice 1 continues the split token and finishes — the full
+	// "Antigravity" must be rewritten across the finish boundary, then the
+	// session freed at true stream completion.
+	resp2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-partial", SourceFormat: "openai", ChunkIndex: 2,
+		Body: []byte(`{"choices":[{"index":1,"delta":{"content":"gravity world"},"finish_reason":"stop"}]}`),
+	}, "openai")
+	if !bytes.Contains(resp2.Body, []byte("omp world")) {
+		t.Fatalf("split token across partial finish not rewritten: %s", resp2.Body)
+	}
+	if bytes.Contains(resp2.Body, []byte("Anti")) {
+		t.Fatalf("literal brand leaked: %s", resp2.Body)
+	}
+	mgr.mu.Lock()
+	_, alive = mgr.sessions["req:sa-partial"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be deleted after every lane finishes")
+	}
+}
