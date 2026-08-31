@@ -376,27 +376,49 @@ func handleResponseIntercept(request []byte) []byte {
 		debugLog("handleResponseIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
+	var client string
 	var uncloakTable map[string]string
 	if req.RequestID != "" {
-		if client := globalStreamManager.getClient("req:" + req.RequestID); client != "" {
-			uncloakTable = effectiveUncloakTable(client)
+		if c := globalStreamManager.getClient("req:" + req.RequestID); c != "" {
+			client = c
+			uncloakTable = effectiveUncloakTable(c)
 		}
 	}
 	if uncloakTable == nil {
 		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
 			uncloakTable = effectiveUncloakTable(uaClient)
+			if client == "" {
+				client = uaClient
+			}
 			debugLog("handleResponseIntercept: UA evidence client=%q", uaClient)
 		}
 	}
 	if uncloakTable == nil {
-		uncloakTable, _ = buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+		var detectedClient string
+		uncloakTable, detectedClient = buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+		if client == "" {
+			client = detectedClient
+		}
 	}
-	debugLog("handleResponseIntercept: uncloakTable=%v", uncloakTable)
-	if uncloakTable == nil {
+	debugLog("handleResponseIntercept: client=%s uncloakTable=%v", client, uncloakTable)
+	if uncloakTable == nil && client != "oh_my_pi" {
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
 
-	modified, changed := uncloakResponseBody(req.Body, uncloakTable, format)
+	modified := req.Body
+	changed := false
+	if uncloakTable != nil {
+		if m, c := uncloakResponseBody(req.Body, uncloakTable, format); c {
+			modified = m
+			changed = true
+		}
+	}
+	if client == "oh_my_pi" {
+		if rev, c := reverseBrandInResponseBody(modified, format); c {
+			modified = rev
+			changed = true
+		}
+	}
 	debugLog("handleResponseIntercept: changed=%t Body=%s", changed, string(modified))
 	if !changed {
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
@@ -521,6 +543,123 @@ func uncloakResponseBody(body []byte, uncloakTable map[string]string, sourceForm
 	return raw, true
 }
 
+func reverseBrandInResponseBody(body []byte, format string) ([]byte, bool) {
+	var root any
+	if err := safeUnmarshal(body, &root); err != nil {
+		return nil, false
+	}
+	if !reverseAssistantBrandInJSON(root, format) {
+		return nil, false
+	}
+	raw, err := safeMarshal(root)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+func reverseAssistantBrandInJSON(root any, format string) bool {
+	changed := false
+	switch format {
+	case "openai":
+		m, ok := root.(map[string]any)
+		if !ok {
+			return false
+		}
+		choices, ok := m["choices"].([]any)
+		if !ok {
+			return false
+		}
+		for _, chRaw := range choices {
+			ch, ok := chRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if msg, ok := ch["message"].(map[string]any); ok {
+				if content, exists := msg["content"]; exists {
+					if next, c := reverseBrandInOpenAIContent(content); c {
+						msg["content"] = next
+						changed = true
+					}
+				}
+			}
+			if delta, ok := ch["delta"].(map[string]any); ok {
+				if content, exists := delta["content"]; exists {
+					if next, c := reverseBrandInOpenAIContent(content); c {
+						delta["content"] = next
+						changed = true
+					}
+				}
+			}
+		}
+	case "anthropic":
+		m, ok := root.(map[string]any)
+		if !ok {
+			return false
+		}
+		contentArr, ok := m["content"].([]any)
+		if !ok {
+			return false
+		}
+		for _, blockRaw := range contentArr {
+			block, ok := blockRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if block["type"] != "text" {
+				continue
+			}
+			if txt, ok := block["text"].(string); ok {
+				if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
+					block["text"] = next
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
+}
+
+func reverseBrandInOpenAIContent(content any) (any, bool) {
+	switch v := content.(type) {
+	case string:
+		return replaceInsensitive(v, reverseBrandMatch, reverseBrandReplacement)
+	case []any:
+		changed := false
+		for _, partRaw := range v {
+			if part, ok := partRaw.(map[string]any); ok {
+				if typ, _ := part["type"].(string); typ == "text" || typ == "output_text" || typ == "" {
+					if txt, ok := part["text"].(string); ok {
+						if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
+							part["text"] = next
+							changed = true
+						}
+					}
+				}
+			} else if s, ok := partRaw.(string); ok {
+				if next, c := replaceInsensitive(s, reverseBrandMatch, reverseBrandReplacement); c {
+					for i, elem := range v {
+						if elem == partRaw {
+							v[i] = next
+							changed = true
+							break
+						}
+					}
+				}
+			}
+		}
+		return v, changed
+	case map[string]any:
+		if txt, ok := v["text"].(string); ok {
+			if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
+				v["text"] = next
+				return v, true
+			}
+		}
+	}
+	return content, false
+}
+
 // uncloakStreamChunk uses pre-compiled regex to replace tool names directly in
 // raw SSE bytes. Callers MUST pass complete SSE events (assembled by the event
 // reassembly buffer) to guarantee that tool names are never split across calls.
@@ -568,6 +707,351 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 	return []byte(buf.String()), true
 }
 
+func (m *streamSessionManager) reverseBrandSSE(sess *streamSession, sseBytes []byte, format string) ([]byte, bool) {
+	if sess == nil || sess.client != "oh_my_pi" {
+		return nil, false
+	}
+	isDone := bytes.Contains(sseBytes, []byte("data: [DONE]")) || bytes.Contains(sseBytes, []byte("data:[DONE]"))
+	events := splitSSEEventsForBrand(sseBytes)
+	var out bytes.Buffer
+	changedOverall := false
+	for _, ev := range events {
+		trimmed := bytes.TrimSpace(ev)
+		isDoneEvent := bytes.HasPrefix(trimmed, []byte("data: [DONE]")) || bytes.HasPrefix(trimmed, []byte("data:[DONE]")) || (bytes.Contains(trimmed, []byte("[DONE]")) && bytes.HasPrefix(trimmed, []byte("data:")))
+		if isDoneEvent {
+			if isDone {
+				flushEvents := m.generateBrandFlushEvents(sess, format)
+				for _, fe := range flushEvents {
+					out.Write(fe)
+					changedOverall = true
+				}
+			}
+			out.Write(ev)
+			continue
+		}
+		modifiedEv, changed := m.reverseBrandSingleSSEEvent(sess, ev, format, false)
+		if changed {
+			out.Write(modifiedEv)
+			changedOverall = true
+		} else {
+			out.Write(ev)
+		}
+	}
+	return out.Bytes(), changedOverall
+}
+
+func splitSSEEventsForBrand(data []byte) [][]byte {
+	var events [][]byte
+	start := 0
+	for i := 0; i < len(data); {
+		idx1 := bytes.Index(data[i:], []byte("\n\n"))
+		idx2 := bytes.Index(data[i:], []byte("\r\n\r\n"))
+		var idx int
+		var blen int
+		if idx1 >= 0 && idx2 >= 0 {
+			if idx1 < idx2 {
+				idx = idx1
+				blen = 2
+			} else {
+				idx = idx2
+				blen = 4
+			}
+		} else if idx1 >= 0 {
+			idx = idx1
+			blen = 2
+		} else if idx2 >= 0 {
+			idx = idx2
+			blen = 4
+		} else {
+			events = append(events, data[start:])
+			break
+		}
+		end := i + idx + blen
+		events = append(events, data[start:end])
+		start = end
+		i = end
+	}
+	return events
+}
+
+func (m *streamSessionManager) reverseBrandSingleSSEEvent(sess *streamSession, ev []byte, format string, isFinal bool) ([]byte, bool) {
+	evStr := string(ev)
+	lines := strings.Split(strings.ReplaceAll(evStr, "\r\n", "\n"), "\n")
+	changed := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var dataMap map[string]any
+		if err := safeUnmarshal([]byte(payload), &dataMap); err != nil {
+			continue
+		}
+		didChange := false
+		if format == "openai" {
+			didChange = m.reverseBrandOpenAIStreamingMap(dataMap, sess, isFinal)
+		} else if format == "anthropic" {
+			didChange = m.reverseBrandAnthropicStreamingMap(dataMap, sess, isFinal)
+		}
+		if didChange {
+			newPayload, err := safeMarshal(dataMap)
+			if err == nil {
+				lines[i] = "data: " + string(newPayload)
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return ev, false
+	}
+	rebuilt := strings.Join(lines, "\n")
+	if !strings.HasSuffix(rebuilt, "\n\n") {
+		if strings.HasSuffix(evStr, "\r\n\r\n") {
+			rebuilt += "\r\n"
+		}
+		if !strings.HasSuffix(rebuilt, "\n\n") {
+			if strings.HasSuffix(rebuilt, "\n") {
+				rebuilt += "\n"
+			} else {
+				rebuilt += "\n\n"
+			}
+		}
+	}
+	return []byte(rebuilt), true
+}
+
+func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]any, sess *streamSession, isFinal bool) bool {
+	choices, ok := data["choices"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, chRaw := range choices {
+		ch, ok := chRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		laneKey := "openai:0"
+		if idxVal, ok := ch["index"]; ok {
+			switch v := idxVal.(type) {
+			case json.Number:
+				if i, err := v.Int64(); err == nil {
+					laneKey = fmt.Sprintf("openai:%d", i)
+				}
+			case float64:
+				laneKey = fmt.Sprintf("openai:%d", int(v))
+			case int:
+				laneKey = fmt.Sprintf("openai:%d", v)
+			case int64:
+				laneKey = fmt.Sprintf("openai:%d", v)
+			default:
+				laneKey = fmt.Sprintf("openai:%v", v)
+			}
+		}
+		lane := getBrandLane(sess, laneKey)
+		var delta map[string]any
+		if d, ok := ch["delta"].(map[string]any); ok {
+			delta = d
+		} else if d, ok := ch["message"].(map[string]any); ok {
+			delta = d
+		}
+		if delta == nil {
+			continue
+		}
+		if content, exists := delta["content"]; exists {
+			switch v := content.(type) {
+			case string:
+				newStr, _ := applyBrandLane(v, lane, isFinal)
+				if newStr != v {
+					delta["content"] = newStr
+					changed = true
+				}
+			case []any:
+				c2 := false
+				for _, partRaw := range v {
+					if part, ok := partRaw.(map[string]any); ok {
+						if txt, ok := part["text"].(string); ok {
+							newTxt, _ := applyBrandLane(txt, lane, isFinal)
+							if newTxt != txt {
+								part["text"] = newTxt
+								c2 = true
+							}
+						}
+					}
+				}
+				if c2 {
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
+}
+
+func (m *streamSessionManager) reverseBrandAnthropicStreamingMap(data map[string]any, sess *streamSession, isFinal bool) bool {
+	idxVal, hasIdx := data["index"]
+	laneKey := "anthropic:0"
+	if hasIdx {
+		switch v := idxVal.(type) {
+		case json.Number:
+			if i, err := v.Int64(); err == nil {
+				laneKey = fmt.Sprintf("anthropic:%d", i)
+			}
+		case float64:
+			laneKey = fmt.Sprintf("anthropic:%d", int(v))
+		case int:
+			laneKey = fmt.Sprintf("anthropic:%d", v)
+		default:
+			laneKey = fmt.Sprintf("anthropic:%v", v)
+		}
+	}
+	lane := getBrandLane(sess, laneKey)
+	typ, _ := data["type"].(string)
+	switch typ {
+	case "content_block_start":
+		cb, ok := data["content_block"].(map[string]any)
+		if !ok {
+			return false
+		}
+		if cb["type"] != "text" {
+			return false
+		}
+		if txt, ok := cb["text"].(string); ok {
+			newTxt, _ := applyBrandLane(txt, lane, isFinal)
+			if newTxt != txt {
+				cb["text"] = newTxt
+				return true
+			}
+		}
+	case "content_block_delta":
+		delta, ok := data["delta"].(map[string]any)
+		if !ok {
+			return false
+		}
+		if delta["type"] != "text_delta" {
+			return false
+		}
+		if txt, ok := delta["text"].(string); ok {
+			newTxt, _ := applyBrandLane(txt, lane, isFinal)
+			if newTxt != txt {
+				delta["text"] = newTxt
+				return true
+			}
+		}
+	default:
+		if delta, ok := data["delta"].(map[string]any); ok {
+			if delta["type"] == "text_delta" {
+				if txt, ok := delta["text"].(string); ok {
+					newTxt, _ := applyBrandLane(txt, lane, isFinal)
+					if newTxt != txt {
+						delta["text"] = newTxt
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func (m *streamSessionManager) generateBrandFlushEvents(sess *streamSession, format string) [][]byte {
+	var out [][]byte
+	for key, lane := range sess.brandCarries {
+		if lane.carry == "" {
+			continue
+		}
+		finalOut, _ := replaceInsensitiveWithPrev(lane.carry, lane.lastIsWord, reverseBrandMatch, reverseBrandReplacement)
+		if finalOut == "" {
+			finalOut = lane.carry
+		}
+		lane.carry = ""
+		if finalOut == "" {
+			continue
+		}
+		var ev []byte
+		if format == "openai" {
+			idxStr := strings.TrimPrefix(key, "openai:")
+			var idxInt int
+			fmt.Sscan(idxStr, &idxInt)
+			dataMap := map[string]any{
+				"choices": []any{
+					map[string]any{
+						"index": idxInt,
+						"delta": map[string]any{
+							"content": finalOut,
+						},
+					},
+				},
+			}
+			jb, _ := safeMarshal(dataMap)
+			ev = []byte("data: " + string(jb) + "\n\n")
+		} else if format == "anthropic" {
+			idxStr := strings.TrimPrefix(key, "anthropic:")
+			var idxInt int
+			fmt.Sscan(idxStr, &idxInt)
+			dataMap := map[string]any{
+				"type":  "content_block_delta",
+				"index": idxInt,
+				"delta": map[string]any{
+					"type": "text_delta",
+					"text": finalOut,
+				},
+			}
+			jb, _ := safeMarshal(dataMap)
+			ev = []byte("data: " + string(jb) + "\n\n")
+		} else {
+			continue
+		}
+		out = append(out, ev)
+		if finalOut != "" {
+			lane.lastIsWord = isWordByte(finalOut[len(finalOut)-1])
+		}
+	}
+	return out
+}
+
+func (m *streamSessionManager) reverseBrandStandalone(sess *streamSession, body []byte, format string) ([]byte, bool) {
+	if sess == nil {
+		return nil, false
+	}
+	if sess.client != "oh_my_pi" {
+		return nil, false
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, false
+	}
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return nil, false
+	}
+	var root map[string]any
+	if err := safeUnmarshal(body, &root); err != nil {
+		return nil, false
+	}
+	changed := false
+	if format == "openai" {
+		changed = m.reverseBrandOpenAIStreamingMap(root, sess, false)
+	} else if format == "anthropic" {
+		if _, ok := root["delta"]; ok || root["type"] == "content_block_delta" || root["type"] == "content_block_start" {
+			changed = m.reverseBrandAnthropicStreamingMap(root, sess, false)
+		} else {
+			changed = m.reverseBrandOpenAIStreamingMap(root, sess, false)
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	raw, err := safeMarshal(root)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
 // ── Stream Session Manager & SSE Event Reassembly ────────────────────────
 //
 // Handles the "Split-String Chunk" attack: TCP can split a network chunk
@@ -591,12 +1075,23 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 // stream's state overwrite another's (cross-stream corruption), so such
 // chunks pass through unmolested instead of being buffered.
 
-type streamSession struct {
-	client    string
-	cached    *cachedUncloakPattern
-	tail      []byte
-	updatedAt time.Time
+type brandLane struct {
+	carry      string
+	lastIsWord bool
 }
+
+type streamSession struct {
+	client       string
+	cached       *cachedUncloakPattern
+	tail         []byte
+	updatedAt    time.Time
+	brandCarries map[string]*brandLane
+}
+
+const (
+	reverseBrandMatch       = "Antigravity"
+	reverseBrandReplacement = "omp"
+)
 
 type streamSessionManager struct {
 	mu       sync.Mutex
@@ -659,9 +1154,10 @@ func (m *streamSessionManager) resetSession(key, client string, cached *cachedUn
 	defer m.mu.Unlock()
 	m.cleanupStaleLocked()
 	m.sessions[key] = &streamSession{
-		client:    client,
-		cached:    cached,
-		updatedAt: time.Now(),
+		client:       client,
+		cached:       cached,
+		updatedAt:    time.Now(),
+		brandCarries: make(map[string]*brandLane),
 	}
 }
 
@@ -676,9 +1172,10 @@ func (m *streamSessionManager) ensureSession(key, client string, cached *cachedU
 		return sess
 	}
 	sess := &streamSession{
-		client:    client,
-		cached:    cached,
-		updatedAt: time.Now(),
+		client:       client,
+		cached:       cached,
+		updatedAt:    time.Now(),
+		brandCarries: make(map[string]*brandLane),
 	}
 	m.sessions[key] = sess
 	return sess
@@ -800,13 +1297,46 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		if !changed {
 			modified = completeEvents
 		}
+		brandChanged := false
+		if sess.client == "oh_my_pi" {
+			if bm, bc := m.reverseBrandSSE(sess, modified, format); bc {
+				modified = bm
+				brandChanged = true
+			} else if bm != nil && !bytes.Equal(bm, modified) {
+				modified = bm
+				brandChanged = true
+			}
+		}
+		overallChanged := changed || brandChanged
 
-		// Cleanup session if stream reached [DONE]
-		if bytes.Contains(completeEvents, []byte("data: [DONE]")) {
+		if bytes.Contains(completeEvents, []byte("data: [DONE]")) || bytes.Contains(modified, []byte("data: [DONE]")) {
+			if sess.client == "oh_my_pi" {
+				if flush := m.generateBrandFlushEvents(sess, format); len(flush) > 0 {
+					doneIdx := bytes.Index(modified, []byte("data: [DONE]"))
+					if doneIdx >= 0 {
+						var tmp bytes.Buffer
+						tmp.Write(modified[:doneIdx])
+						for _, fe := range flush {
+							tmp.Write(fe)
+						}
+						tmp.Write(modified[doneIdx:])
+						modified = tmp.Bytes()
+						overallChanged = true
+					} else {
+						var tmp bytes.Buffer
+						for _, fe := range flush {
+							tmp.Write(fe)
+						}
+						tmp.Write(modified)
+						modified = tmp.Bytes()
+						overallChanged = true
+					}
+				}
+			}
 			m.deleteSession(key)
 		}
 
-		if bytes.Equal(modified, req.Body) {
+		if !overallChanged {
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
 		return pluginapi.StreamChunkInterceptResponse{Body: modified}
@@ -819,7 +1349,18 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 
 	modified, changed := uncloakStreamChunk(req.Body, cached)
 	if !changed {
-		return pluginapi.StreamChunkInterceptResponse{}
+		modified = req.Body
+	}
+	if sess.client == "oh_my_pi" {
+		if bm, bc := m.reverseBrandStandalone(sess, modified, format); bc {
+			modified = bm
+			changed = true
+		}
+	}
+	if !changed {
+		if bytes.Equal(modified, req.Body) {
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
 	}
 	return pluginapi.StreamChunkInterceptResponse{Body: modified}
 }
@@ -2010,6 +2551,118 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 	}
 	builder.WriteString(value[start:])
 	return builder.String(), true
+}
+
+func replaceInsensitiveWithPrev(value string, prevIsWord bool, match, replacement string) (string, bool) {
+	if match == "" {
+		return value, false
+	}
+	lowerValue := strings.ToLower(value)
+	lowerMatch := strings.ToLower(match)
+	firstIsWord := isWordByte(match[0])
+	lastIsWord := isWordByte(match[len(match)-1])
+	var builder strings.Builder
+	start := 0
+	changed := false
+	for {
+		index := strings.Index(lowerValue[start:], lowerMatch)
+		if index < 0 {
+			break
+		}
+		index += start
+		matchEnd := index + len(match)
+		hasLeftBoundary := !firstIsWord
+		if firstIsWord {
+			if index == 0 {
+				hasLeftBoundary = !prevIsWord
+			} else {
+				hasLeftBoundary = !isWordByte(value[index-1])
+			}
+		}
+		hasRightBoundary := !lastIsWord || matchEnd == len(value) || !isWordByte(value[matchEnd])
+		if hasLeftBoundary && hasRightBoundary {
+			builder.WriteString(value[start:index])
+			builder.WriteString(replacement)
+			start = matchEnd
+			changed = true
+		} else {
+			builder.WriteString(value[start : index+1])
+			start = index + 1
+		}
+	}
+	if !changed {
+		return value, false
+	}
+	builder.WriteString(value[start:])
+	return builder.String(), true
+}
+
+func findHoldLenWithBoundary(combined, brand string, prevIsWord bool) int {
+	max := len(brand)
+	if len(combined) < max {
+		max = len(combined)
+	}
+	for k := max; k >= 1; k-- {
+		suffix := combined[len(combined)-k:]
+		if !strings.EqualFold(suffix, brand[:k]) {
+			continue
+		}
+		pos := len(combined) - k
+		var leftOK bool
+		if pos == 0 {
+			leftOK = !prevIsWord
+		} else {
+			leftOK = !isWordByte(combined[pos-1])
+		}
+		if leftOK {
+			return k
+		}
+	}
+	return 0
+}
+
+func getBrandLane(sess *streamSession, key string) *brandLane {
+	if sess.brandCarries == nil {
+		sess.brandCarries = make(map[string]*brandLane)
+	}
+	if lane, ok := sess.brandCarries[key]; ok {
+		return lane
+	}
+	lane := &brandLane{}
+	sess.brandCarries[key] = lane
+	return lane
+}
+
+func applyBrandLane(text string, lane *brandLane, isFinal bool) (string, bool) {
+	combined := lane.carry + text
+	if combined == "" {
+		return "", false
+	}
+	if isFinal {
+		out, changed := replaceInsensitiveWithPrev(combined, lane.lastIsWord, reverseBrandMatch, reverseBrandReplacement)
+		lane.carry = ""
+		if out != "" {
+			lane.lastIsWord = isWordByte(out[len(out)-1])
+		}
+		return out, changed || out != combined
+	}
+	holdLen := findHoldLenWithBoundary(combined, reverseBrandMatch, lane.lastIsWord)
+	if holdLen == 0 {
+		out, changed := replaceInsensitiveWithPrev(combined, lane.lastIsWord, reverseBrandMatch, reverseBrandReplacement)
+		lane.carry = ""
+		if out != "" {
+			lane.lastIsWord = isWordByte(out[len(out)-1])
+		}
+		return out, changed || out != combined
+	}
+	emitPart := combined[:len(combined)-holdLen]
+	newCarry := combined[len(combined)-holdLen:]
+	outEmit, changedEmit := replaceInsensitiveWithPrev(emitPart, lane.lastIsWord, reverseBrandMatch, reverseBrandReplacement)
+	lane.carry = newCarry
+	if outEmit != "" {
+		lane.lastIsWord = isWordByte(outEmit[len(outEmit)-1])
+	}
+	return outEmit, changedEmit || outEmit != emitPart
 }
 
 type textSpanReplacement struct {
