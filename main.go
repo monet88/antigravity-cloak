@@ -42,6 +42,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"net/http"
 	"os"
 	"regexp"
 	"sort"
@@ -97,6 +98,11 @@ const (
 	pluginVersion    = "0.4.1"
 	pluginRepository = "https://github.com/monet88/antigravity-cloak"
 )
+
+// explicitClientHeader is the plugin-owned control header carrying the
+// operator-declared client identity. It is consumed on the request path and
+// never forwarded upstream, whether its value is valid or not.
+const explicitClientHeader = "X-Cloak-Client"
 
 func main() {}
 
@@ -295,13 +301,38 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		return mustErrorEnvelope("invalid_request", fmt.Sprintf("decode request.intercept_before request: %v", err))
 	}
 
+	resp := pluginapi.RequestInterceptResponse{}
+	explicitClient, matchedKeys, explicitPresent, explicitValid := resolveExplicitClient(req.Headers)
+	if explicitPresent {
+		// Consume the plugin-owned control header on both host header contracts:
+		// ClearHeaders covers a merging host; the before-auth interceptor applies
+		// resp.Headers as the final set, so the filtered clone provides every
+		// non-owned inbound header verbatim. Inbound request headers are canonical
+		// MIME keys (Go net/http), so the host can always drop the owned key; a
+		// non-canonically-spelled stored key is a host-contract limitation outside
+		// this plugin's control and cannot be produced by the real HTTP stack.
+		resp.ClearHeaders = matchedKeys
+		resp.Headers = filteredHeaders(req.Headers, matchedKeys)
+	}
+
 	format := normalizeSourceFormat(req.SourceFormat)
-	debugLog("handleRequestInterceptBefore: SourceFormat=%s (normalized=%s) ToFormat=%q Model=%q RequestedModel=%q Body=%s", req.SourceFormat, format, req.ToFormat, req.Model, req.RequestedModel, string(req.Body))
+	debugLog("handleRequestInterceptBefore: SourceFormat=%s (normalized=%s) ToFormat=%q Model=%q RequestedModel=%q explicitClient=%q valid=%t Body=%s", req.SourceFormat, format, req.ToFormat, req.Model, req.RequestedModel, explicitClient, explicitValid, string(req.Body))
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleRequestInterceptBefore: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
-		return mustEnvelope(pluginapi.RequestInterceptResponse{})
+		return mustEnvelope(resp)
 	}
-	body, rewritten, client := rewriteRequestBodyWithClient(req.Body, format)
+
+	// A validated explicit client is authoritative. An invalid/unknown value
+	// must not activate a weaker signal (e.g. User-Agent inference) and falls
+	// back to the existing body Client Gate instead, making the operator
+	// mistake visible rather than masking it with a heuristic.
+	forcedClient := ""
+	if explicitValid {
+		forcedClient = explicitClient
+	} else if explicitPresent {
+		debugLog("handleRequestInterceptBefore: invalid explicit client %q, falling back to body detection", explicitClient)
+	}
+	body, rewritten, client := rewriteRequestBodyWithClient(req.Body, format, forcedClient)
 	debugLog("handleRequestInterceptBefore: rewritten=%t client=%s Body=%s", rewritten, client, string(body))
 	if client != "" && req.RequestID != "" {
 		cached := activeFilterConfig().uncloakRegexCache[client]
@@ -310,9 +341,10 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		}
 	}
 	if !rewritten {
-		return mustEnvelope(pluginapi.RequestInterceptResponse{})
+		return mustEnvelope(resp)
 	}
-	return mustEnvelope(pluginapi.RequestInterceptResponse{Body: body})
+	resp.Body = body
+	return mustEnvelope(resp)
 }
 
 func handleResponseIntercept(request []byte) []byte {
@@ -402,6 +434,7 @@ func detectionRequestBody(originalRequest, requestBody []byte) []byte {
 	}
 	return requestBody
 }
+
 // splitToolNamespace separates an optional namespace prefix (e.g. "functions:", "default_api:")
 // from the base tool name. It returns (prefix, baseName). If no prefix is present, it returns ("", name).
 func splitToolNamespace(name string) (string, string) {
@@ -1123,9 +1156,9 @@ type filterConfig struct {
 // cachedCloakPatterns holds pre-compiled regexes for tool name replacement
 // in descriptions and system messages (request cloaking path).
 type cachedCloakPatterns struct {
-	cloakTable map[string]string     // orig → target (for identity replacement lookup)
-	identRe    *regexp.Regexp        // single-pass identity replacement (quoted, namespaced, unambiguous)
-	ambigRe    *regexp.Regexp        // single-pass contextual replacement for short/ambiguous words
+	cloakTable map[string]string // orig → target (for identity replacement lookup)
+	identRe    *regexp.Regexp    // single-pass identity replacement (quoted, namespaced, unambiguous)
+	ambigRe    *regexp.Regexp    // single-pass contextual replacement for short/ambiguous words
 }
 
 // cachedUncloakPattern holds a pre-compiled regex for stream chunk uncloaking.
@@ -1313,6 +1346,66 @@ func normalizeClientKey(client string) string {
 	}
 }
 
+// filteredHeaders returns a copy of headers with every key that matches any of
+// remove case-insensitively dropped. It builds a fresh map rather than relying
+// on http.Header.Del, which canonicalizes its argument and therefore cannot
+// delete a stored key whose spelling is non-canonical. The result carries every
+// non-owned inbound header verbatim, which is exactly the set a replacement
+// host (the before-auth interceptor) keeps.
+func filteredHeaders(headers http.Header, remove []string) http.Header {
+	if headers == nil {
+		return http.Header{}
+	}
+	out := make(http.Header, len(headers))
+	for k, vs := range headers {
+		drop := false
+		for _, r := range remove {
+			if strings.EqualFold(k, r) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out[k] = append([]string(nil), vs...)
+		}
+	}
+	return out
+}
+
+// resolveExplicitClient reads the plugin-owned X-Cloak-Client header from the
+// inbound request headers. It returns the normalized client key, every stored
+// header key spelling that matches the owned header case-insensitively, whether
+// the header was present at all, and whether the value resolves to a currently
+// usable (non-empty) ToolMappings entry. All matching key spellings are returned
+// so the interceptor can clear every variant; the client value is derived from
+// the lexicographically first spelling for deterministic selection.
+func resolveExplicitClient(headers http.Header) (client string, matchedKeys []string, present, valid bool) {
+	if headers == nil {
+		return "", nil, false, false
+	}
+	for k := range headers {
+		if strings.EqualFold(k, explicitClientHeader) {
+			matchedKeys = append(matchedKeys, k)
+		}
+	}
+	if len(matchedKeys) == 0 {
+		return "", nil, false, false
+	}
+	sort.Strings(matchedKeys)
+	value := ""
+	if vs := headers[matchedKeys[0]]; len(vs) > 0 {
+		value = vs[0]
+	}
+	client = normalizeClientKey(value)
+	if client == "" {
+		return client, matchedKeys, true, false
+	}
+	if table := activeFilterConfig().ToolMappings[client]; len(table) == 0 {
+		return client, matchedKeys, true, false
+	}
+	return client, matchedKeys, true, true
+}
+
 func parseToolMappings(value any) (map[string]map[string]string, error) {
 	typed, ok := value.(map[string]any)
 	if !ok {
@@ -1445,11 +1538,15 @@ func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
 }
 
 func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
-	raw, changed, _ := rewriteRequestBodyWithClient(body, sourceFormat)
+	raw, changed, _ := rewriteRequestBodyWithClient(body, sourceFormat, "")
 	return raw, changed
 }
 
-func rewriteRequestBodyWithClient(body []byte, sourceFormat string) ([]byte, bool, string) {
+// rewriteRequestBodyWithClient rewrites brand text and cloaks tool names. When
+// forcedClient is non-empty (a validated explicit X-Cloak-Client override), that
+// client's mapping table is used deterministically instead of body-based
+// detection. An empty forcedClient keeps the existing detectClient path.
+func rewriteRequestBodyWithClient(body []byte, sourceFormat string, forcedClient string) ([]byte, bool, string) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {
 		return nil, false, ""
@@ -1471,8 +1568,11 @@ func rewriteRequestBodyWithClient(body []byte, sourceFormat string) ([]byte, boo
 
 	// 2. Tool cloaking
 	toolNames := extractToolNames(rootMap, sourceFormat)
-	client := detectClient(toolNames)
+	client := forcedClient
 	var cachedCloak *cachedCloakPatterns
+	if client == "" {
+		client = detectClient(toolNames)
+	}
 	if client != "" {
 		cloakTable := effectiveCloakTable(client)
 		if len(cloakTable) > 0 {
