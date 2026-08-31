@@ -104,6 +104,18 @@ const (
 // never forwarded upstream, whether its value is valid or not.
 const explicitClientHeader = "X-Cloak-Client"
 
+// userAgentEvidence lists conservative User-Agent prefixes that may resolve a
+// client. Each entry is verified against active ToolMappings; an entry without
+// a usable mapping (e.g. opencode before any table exists) stays inert and
+// never invents a client.
+var userAgentEvidence = []struct {
+	prefix string
+	client string
+}{
+	{"omp/", "oh_my_pi"},
+	{"opencode/", "opencode"},
+}
+
 func main() {}
 
 //export cliproxy_plugin_init
@@ -322,15 +334,20 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		return mustEnvelope(resp)
 	}
 
-	// A validated explicit client is authoritative. An invalid/unknown value
-	// must not activate a weaker signal (e.g. User-Agent inference) and falls
-	// back to the existing body Client Gate instead, making the operator
-	// mistake visible rather than masking it with a heuristic.
+	// Precedence: valid explicit owned header > verified positive UA evidence
+	// > existing body Client Gate. An invalid explicit value bypasses UA and
+	// falls directly to body classification so a weaker signal cannot hide
+	// operator misconfiguration.
 	forcedClient := ""
-	if explicitValid {
-		forcedClient = explicitClient
-	} else if explicitPresent {
-		debugLog("handleRequestInterceptBefore: invalid explicit client %q, falling back to body detection", explicitClient)
+	if explicitPresent {
+		if explicitValid {
+			forcedClient = explicitClient
+		} else {
+			debugLog("handleRequestInterceptBefore: invalid explicit client %q, falling back to body detection", explicitClient)
+		}
+	} else if uaClient, ok := resolveUserAgentClient(req.Headers); ok {
+		forcedClient = uaClient
+		debugLog("handleRequestInterceptBefore: UA evidence client=%q", uaClient)
 	}
 	body, rewritten, client := rewriteRequestBodyWithClient(req.Body, format, forcedClient)
 	debugLog("handleRequestInterceptBefore: rewritten=%t client=%s Body=%s", rewritten, client, string(body))
@@ -363,6 +380,12 @@ func handleResponseIntercept(request []byte) []byte {
 	if req.RequestID != "" {
 		if client := globalStreamManager.getClient("req:" + req.RequestID); client != "" {
 			uncloakTable = effectiveUncloakTable(client)
+		}
+	}
+	if uncloakTable == nil {
+		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
+			uncloakTable = effectiveUncloakTable(uaClient)
+			debugLog("handleResponseIntercept: UA evidence client=%q", uaClient)
 		}
 	}
 	if uncloakTable == nil {
@@ -705,6 +728,13 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			debugLog("StreamSessionManager: header-init using pre-registered session key=%s client=%s", key, sessClient)
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
+		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
+			debugLog("StreamSessionManager: header-init UA evidence key=%s client=%s", key, uaClient)
+			if cached := activeFilterConfig().uncloakRegexCache[uaClient]; cached != nil && cached.re != nil {
+				m.resetSession(key, uaClient, cached)
+			}
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
 		_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
 		debugLog("StreamSessionManager: header-init key=%s client=%s", key, client)
 		if client != "" {
@@ -800,8 +830,17 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 // deliberately runs WITHOUT holding the manager lock: parsing a large request
 // body under the lock serialized every concurrent stream's chunk processing.
 func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkInterceptRequest, format, key string) *streamSession {
+	if key == "" {
+		return nil
+	}
+	if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
+		if cached := activeFilterConfig().uncloakRegexCache[uaClient]; cached != nil && cached.re != nil {
+			debugLog("StreamSessionManager: fallback UA evidence key=%s client=%s", key, uaClient)
+			return m.ensureSession(key, uaClient, cached)
+		}
+	}
 	src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
-	if len(src) == 0 || key == "" {
+	if len(src) == 0 {
 		return nil
 	}
 	_, client := buildUncloakTable(src, format)
@@ -1404,6 +1443,45 @@ func resolveExplicitClient(headers http.Header) (client string, matchedKeys []st
 		return client, matchedKeys, true, false
 	}
 	return client, matchedKeys, true, true
+}
+
+// resolveUserAgentClient returns a client derived from conservative
+// User-Agent evidence. Only prefixes listed in userAgentEvidence may match,
+// comparison is case-insensitive, and the match requires a usable active
+// ToolMappings entry so entries like opencode/ stay inert until a table
+// exists. The UA value is taken from the lexicographically first
+// User-Agent key spelling for determinism, mirroring resolveExplicitClient.
+func resolveUserAgentClient(headers http.Header) (string, bool) {
+	if headers == nil {
+		return "", false
+	}
+	var matchedKeys []string
+	for k := range headers {
+		if strings.EqualFold(k, "User-Agent") {
+			matchedKeys = append(matchedKeys, k)
+		}
+	}
+	if len(matchedKeys) == 0 {
+		return "", false
+	}
+	sort.Strings(matchedKeys)
+	ua := ""
+	if vs := headers[matchedKeys[0]]; len(vs) > 0 {
+		ua = strings.TrimSpace(vs[0])
+	}
+	if ua == "" {
+		return "", false
+	}
+	lowerUA := strings.ToLower(ua)
+	for _, e := range userAgentEvidence {
+		if strings.HasPrefix(lowerUA, strings.ToLower(e.prefix)) {
+			if table := activeFilterConfig().ToolMappings[e.client]; len(table) > 0 {
+				return e.client, true
+			}
+			return "", false
+		}
+	}
+	return "", false
 }
 
 func parseToolMappings(value any) (map[string]map[string]string, error) {
