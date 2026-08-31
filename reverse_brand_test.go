@@ -59,6 +59,91 @@ func decodeStreamBody(t *testing.T, rawEnvelope []byte) ([]byte, bool) {
 	dec, _ := base64.StdEncoding.DecodeString(env.Result.Body)
 	return dec, env.Result.DropChunk
 }
+// sseAssistantJoined centralizes repeated SSE assistant-text extraction for
+// both Anthropic content_block_delta and OpenAI choice delta content.
+// It joins delta texts in event order, handling the string and array content
+// shapes. Local test refactor for Issue #21 (small, justified).
+func sseAssistantJoined(t *testing.T, bodies ...[]byte) string {
+	t.Helper()
+	var sb strings.Builder
+	for _, body := range bodies {
+		if len(body) == 0 {
+			continue
+		}
+		s := string(body)
+		// Standalone JSON without SSE framing (used by standalone path tests
+		// that also call this helper for convenience) – try direct parse.
+		if !strings.Contains(s, "data:") {
+			var m map[string]any
+			if err := json.Unmarshal(body, &m); err == nil {
+				if m["type"] == "content_block_delta" {
+					if delta, ok := m["delta"].(map[string]any); ok {
+						if txt, ok := delta["text"].(string); ok {
+							sb.WriteString(txt)
+						}
+					}
+				}
+			}
+			continue
+		}
+		parts := strings.Split(s, "data: ")
+		for _, p := range parts {
+			p = strings.TrimSpace(p)
+			if p == "" || p == "[DONE]" {
+				continue
+			}
+			line := strings.Split(p, "\n")[0]
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			var m map[string]any
+			if err := json.Unmarshal([]byte(line), &m); err != nil {
+				continue
+			}
+			if m["type"] == "content_block_delta" {
+				if delta, ok := m["delta"].(map[string]any); ok {
+					if txt, ok := delta["text"].(string); ok {
+						sb.WriteString(txt)
+					}
+				}
+				continue
+			}
+			if choices, ok := m["choices"].([]any); ok {
+				for _, cRaw := range choices {
+					c, ok := cRaw.(map[string]any)
+					if !ok {
+						continue
+					}
+					var target map[string]any
+					if d, ok := c["delta"].(map[string]any); ok {
+						target = d
+					} else if d, ok := c["message"].(map[string]any); ok {
+						target = d
+					} else {
+						continue
+					}
+					if txt, ok := target["content"].(string); ok {
+						sb.WriteString(txt)
+					} else if arr, ok := target["content"].([]any); ok {
+						for _, partRaw := range arr {
+							if part, ok := partRaw.(map[string]any); ok {
+								if typ, _ := part["type"].(string); isAssistantTextPartType(typ) {
+									if txt, ok := part["text"].(string); ok {
+										sb.WriteString(txt)
+									}
+								}
+							} else if s, ok := partRaw.(string); ok {
+								sb.WriteString(s)
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	return sb.String()
+}
 
 func TestReverseBrand_OpenAI_NonStream_OMP(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
@@ -154,101 +239,23 @@ func TestReverseBrand_Streaming_OpenAI_Fragmentation(t *testing.T) {
 	if drop1 {
 		t.Fatal("unexpected drop")
 	}
-	// body1 should contain Hello without Anti? Our hold logic withholds Anti, so first delta becomes "Hello "
-	var assembled strings.Builder
-	if len(body1) > 0 {
-		// extract delta content
-		s := string(body1)
-		// parse data JSON
-		parts := strings.Split(s, "data: ")
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" || p == "[DONE]" {
-				continue
-			}
-			// take first line
-			line := strings.Split(p, "\n")[0]
-			var m map[string]any
-			if err := json.Unmarshal([]byte(line), &m); err == nil {
-				if choices, ok := m["choices"].([]any); ok {
-					for _, cRaw := range choices {
-						c := cRaw.(map[string]any)
-						if delta, ok := c["delta"].(map[string]any); ok {
-							if txt, ok := delta["content"].(string); ok {
-								assembled.WriteString(txt)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
 	// Chunk 2 continues with gravity
 	chunk2 := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"gravity world\"}}]}\n\n"
 	p2 := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 1, []byte(chunk2), nil)
 	raw2, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p2)
 	body2, _ := decodeStreamBody(t, raw2)
-	if len(body2) > 0 {
-		s := string(body2)
-		parts := strings.Split(s, "data: ")
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" || p == "[DONE]" {
-				continue
-			}
-			line := strings.Split(p, "\n")[0]
-			var m map[string]any
-			if err := json.Unmarshal([]byte(line), &m); err == nil {
-				if choices, ok := m["choices"].([]any); ok {
-					for _, cRaw := range choices {
-						c := cRaw.(map[string]any)
-						if delta, ok := c["delta"].(map[string]any); ok {
-							if txt, ok := delta["content"].(string); ok {
-								assembled.WriteString(txt)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
 	// Flush at DONE
 	doneChunk := "data: [DONE]\n\n"
 	pDone := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 2, []byte(doneChunk), nil)
 	rawDone, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, pDone)
 	bodyDone, _ := decodeStreamBody(t, rawDone)
-	if len(bodyDone) > 0 {
-		s := string(bodyDone)
-		parts := strings.Split(s, "data: ")
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" || p == "[DONE]" {
-				continue
-			}
-			line := strings.Split(p, "\n")[0]
-			var m map[string]any
-			if err := json.Unmarshal([]byte(line), &m); err == nil {
-				if choices, ok := m["choices"].([]any); ok {
-					for _, cRaw := range choices {
-						c := cRaw.(map[string]any)
-						if delta, ok := c["delta"].(map[string]any); ok {
-							if txt, ok := delta["content"].(string); ok {
-								assembled.WriteString(txt)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	final := assembled.String()
+	final := sseAssistantJoined(t, body1, body2, bodyDone)
 	if !strings.Contains(final, "omp") {
 		t.Fatalf("fragmented brand not replaced, assembled=%q body1=%q body2=%q done=%q", final, string(body1), string(body2), string(bodyDone))
 	}
 	if strings.Contains(final, "Antigravity") || strings.Contains(final, "Anti") {
 		t.Fatalf("leak in fragmented, final=%q", final)
 	}
-	// Expected Hello omp world (with Hello prefix)
 	if !strings.Contains(final, "Hello") {
 		t.Fatalf("lost Hello, final=%q", final)
 	}
@@ -272,37 +279,15 @@ func TestReverseBrand_Streaming_Anthropic_Fragmentation(t *testing.T) {
 	raw2, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p2)
 	b2, _ := decodeStreamBody(t, raw2)
 
-	done := "data: [DONE]\n\n"
-	pDone := makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/model", 2, []byte(done), nil)
-	rawDone, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, pDone)
-	bDone, _ := decodeStreamBody(t, rawDone)
+	// Protocol-realistic native Anthropic termination instead of synthetic [DONE] (Issue #21).
+	term := "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":5}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	pTerm := makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/model", 2, []byte(term), nil)
+	rawTerm, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, pTerm)
+	bTerm, _ := decodeStreamBody(t, rawTerm)
 
-	// Extract texts
-	var texts []string
-	for _, b := range [][]byte{b1, b2, bDone} {
-		s := string(b)
-		parts := strings.Split(s, "data: ")
-		for _, p := range parts {
-			p = strings.TrimSpace(p)
-			if p == "" || p == "[DONE]" {
-				continue
-			}
-			line := strings.Split(p, "\n")[0]
-			var m map[string]any
-			if err := json.Unmarshal([]byte(line), &m); err == nil {
-				if m["type"] == "content_block_delta" {
-					if delta, ok := m["delta"].(map[string]any); ok {
-						if txt, ok := delta["text"].(string); ok {
-							texts = append(texts, txt)
-						}
-					}
-				}
-			}
-		}
-	}
-	joined := strings.Join(texts, "")
+	joined := sseAssistantJoined(t, b1, b2, bTerm)
 	if !strings.Contains(joined, "omp") {
-		t.Fatalf("anthropic fragmented not replaced, joined=%q b1=%q b2=%q", joined, string(b1), string(b2))
+		t.Fatalf("anthropic fragmented not replaced, joined=%q b1=%q b2=%q term=%q", joined, string(b1), string(b2), string(bTerm))
 	}
 	if strings.Contains(joined, "Antigravity") {
 		t.Fatalf("leak anthropic %q", joined)
@@ -1056,5 +1041,278 @@ func TestReviewFix_OpenAIContentSingletonMapAllowlist(t *testing.T) {
 		if _, changed := reverseBrandInOpenAIContent(part); !changed {
 			t.Fatalf("assistant text part not rewritten: %v", part)
 		}
+	}
+}
+
+// ── Issue #21: Anthropic native termination flush ───────────────────────────
+
+func TestIssue21_AnthropicSSE_NativeTermination_HeldCarryFlush(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:issue21-sse-hold", "oh_my_pi", ompUncloakCache(t))
+
+	// content_block_delta with trailing "Anti" holds the brand prefix.
+	resp0 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sse-hold", SourceFormat: "anthropic", ChunkIndex: 0,
+		Body: []byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello Anti\"}}\n\n"),
+	}, "anthropic")
+	if bytes.Contains(resp0.Body, []byte("Anti")) {
+		t.Fatalf("carry should be held, got %q", resp0.Body)
+	}
+	if !bytes.Contains(resp0.Body, []byte("Hello ")) {
+		t.Fatalf("prefix lost %q", resp0.Body)
+	}
+	mgr.mu.Lock()
+	carry := ""
+	if sess := mgr.sessions["req:issue21-sse-hold"]; sess != nil {
+		if lane := sess.brandCarries["anthropic:0"]; lane != nil {
+			carry = lane.carry
+		}
+	}
+	mgr.mu.Unlock()
+	if carry != "Anti" {
+		t.Fatalf("carry not held want Anti got %q", carry)
+	}
+
+	// Native terminal sequence without synthetic [DONE].
+	term := "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":5}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	respTerm := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sse-hold", SourceFormat: "anthropic", ChunkIndex: 1,
+		Body: []byte(term),
+	}, "anthropic")
+	body := string(respTerm.Body)
+	// Flush must be an Anthropic-valid assistant text delta before the stop event, preserving lane 0 identity.
+	if !strings.Contains(body, `"type":"content_block_delta"`) || !strings.Contains(body, `"text":"Anti"`) {
+		t.Fatalf("held carry not flushed as valid delta before termination, body=%q", body)
+	}
+	if !strings.Contains(body, `"index":0`) {
+		t.Fatalf("flush must preserve lane index, body=%q", body)
+	}
+	idxDelta := strings.Index(body, "content_block_delta")
+	idxStop := strings.Index(body, "content_block_stop")
+	if idxDelta < 0 || idxStop < 0 || idxDelta > idxStop {
+		t.Fatalf("flush must precede content_block_stop, body=%q", body)
+	}
+	// Text must not be lost; joined via helper should contain Hello Anti.
+	joined := sseAssistantJoined(t, resp0.Body, respTerm.Body)
+	if joined != "Hello Anti" {
+		t.Fatalf("lossless joined want %q got %q body0=%q term=%q", "Hello Anti", joined, string(resp0.Body), body)
+	}
+	// Control payloads keep literal Antigravity (none present here, but ensure no leak).
+	if strings.Contains(joined, "Antigravity") {
+		t.Fatalf("leak %q", joined)
+	}
+	// Session cleanup only after successful flush.
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:issue21-sse-hold"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be deleted after native termination with successful flush")
+	}
+}
+
+func TestIssue21_AnthropicStandalone_MessageStopFlush(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:issue21-sa-msgstop", "oh_my_pi", ompUncloakCache(t))
+
+	// Standalone content_block_delta holds Anti.
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-msgstop", SourceFormat: "anthropic", ChunkIndex: 0,
+		Body: []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi Anti"}}`),
+	}, "anthropic")
+	mgr.mu.Lock()
+	carry := ""
+	if sess := mgr.sessions["req:issue21-sa-msgstop"]; sess != nil {
+		if lane := sess.brandCarries["anthropic:0"]; lane != nil {
+			carry = lane.carry
+		}
+	}
+	mgr.mu.Unlock()
+	if carry != "Anti" {
+		t.Fatalf("standalone carry not held %q", carry)
+	}
+
+	// Terminal payload has no delta.text field; flush must still be emitted before cleanup.
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-msgstop", SourceFormat: "anthropic", ChunkIndex: 1,
+		Body: []byte(`{"type":"message_stop"}`),
+	}, "anthropic")
+	body := string(resp.Body)
+	if !strings.Contains(body, `"type":"content_block_delta"`) || !strings.Contains(body, `"text":"Anti"`) {
+		t.Fatalf("standalone message_stop must flush pending carry as valid delta, body=%q", body)
+	}
+	if !strings.Contains(body, `"type":"message_stop"`) {
+		t.Fatalf("terminal message_stop payload lost, body=%q", body)
+	}
+	if !strings.Contains(body, `"index":0`) {
+		t.Fatalf("flush must preserve lane index, body=%q", body)
+	}
+	// Flush must precede terminal in the composite body.
+	if strings.Index(body, "content_block_delta") > strings.Index(body, "message_stop") {
+		t.Fatalf("flush must precede message_stop, body=%q", body)
+	}
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:issue21-sa-msgstop"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be deleted after standalone message_stop with successful flush")
+	}
+}
+
+func TestIssue21_AnthropicSSE_InterleavedLanesIsolatedAndDeterministic(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:issue21-lanes", "oh_my_pi", ompUncloakCache(t))
+
+	// Interleaved deltas: lane 1 holds Anti, lane 0 holds Anti — distinct lanes must not combine.
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-lanes", SourceFormat: "anthropic", ChunkIndex: 0,
+		Body: []byte("data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"b1 Anti\"}}\n\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"b0 Anti\"}}\n\n"),
+	}, "anthropic")
+	term := "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-lanes", SourceFormat: "anthropic", ChunkIndex: 1,
+		Body: []byte(term),
+	}, "anthropic")
+	body := string(resp.Body)
+	// Both lanes must flush in deterministic lane-index order (0 before 1).
+	idx0 := strings.Index(body, `"index":0`)
+	// Find second index 0? The flush for lane 0 has index 0, lane 1 has index 1. The stop events also have indexes. Check flush ordering by locating flush delta texts.
+	// Extract flush delta order by scanning events before first content_block_stop.
+	flushOrder := flushAnthropicLaneOrder(t, resp.Body)
+	if len(flushOrder) != 2 || flushOrder[0] != 0 || flushOrder[1] != 1 {
+		t.Fatalf("lane flush order want [0 1] got %v body=%q", flushOrder, body)
+	}
+	if idx0 < 0 {
+		t.Fatalf("missing lane 0 flush %q", body)
+	}
+	// No cross-lane brand synthesis: neither lane's "Anti" combined with the other to form "Antigravity" -> omp.
+	if strings.Contains(body, "omp") {
+		t.Fatalf("false brand match across lanes, body=%q", body)
+	}
+	joined := sseAssistantJoined(t, resp.Body)
+	if strings.Contains(joined, "omp") {
+		t.Fatalf("false brand across lanes leaked into joined %q", joined)
+	}
+}
+
+func flushAnthropicLaneOrder(t *testing.T, body []byte) []int {
+	t.Helper()
+	var order []int
+	for _, ev := range strings.Split(string(body), "\n\n") {
+		ev = strings.TrimSpace(ev)
+		if !strings.HasPrefix(ev, "data: {") {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimPrefix(ev, "data: ")), &m); err != nil {
+			continue
+		}
+		if m["type"] != "content_block_delta" {
+			continue
+		}
+		if idx, ok := m["index"].(float64); ok {
+			order = append(order, int(idx))
+		}
+	}
+	return order
+}
+
+func TestIssue21_AnthropicSSE_ToolPayloadPreservedThroughNativeTermination(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:issue21-tool", "oh_my_pi", ompUncloakCache(t))
+
+	// Text delta holds Anti.
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-tool", SourceFormat: "anthropic", ChunkIndex: 0,
+		Body: []byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello Anti\"}}\n\n"),
+	}, "anthropic")
+	// Tool/input_json_delta with literal Antigravity must stay untouched, plus native termination.
+	term := "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" Antigravity \"}}\n\n" +
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-tool", SourceFormat: "anthropic", ChunkIndex: 1,
+		Body: []byte(term),
+	}, "anthropic")
+	body := string(resp.Body)
+	// Tool partial_json must retain literal Antigravity.
+	if !strings.Contains(body, "Antigravity") {
+		t.Fatalf("tool payload Antigravity should remain literal, body=%q", body)
+	}
+	// Flush text delta must be present before stop, but not corrupt tool payload.
+	if !strings.Contains(body, `"text":"Anti"`) {
+		t.Fatalf("text carry not flushed, body=%q", body)
+	}
+	// Ensure the input_json_delta block itself was not rewritten to omp.
+	if strings.Contains(body, `input_json_delta`) {
+		// locate the input_json_delta event line
+		for _, ev := range strings.Split(body, "\n\n") {
+			if strings.Contains(ev, "input_json_delta") && strings.Contains(ev, "omp") {
+				t.Fatalf("tool delta incorrectly rewritten, ev=%q", ev)
+			}
+		}
+	}
+}
+
+func TestIssue21_AnthropicStandalone_ContentBlockStopPerLaneFlush(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:issue21-sa-block", "oh_my_pi", ompUncloakCache(t))
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-block", SourceFormat: "anthropic", ChunkIndex: 0,
+		Body: []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi Anti"}}`),
+	}, "anthropic")
+	// Also hold a second lane that must not be flushed by block 0 stop.
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-block", SourceFormat: "anthropic", ChunkIndex: 1,
+		Body: []byte(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"B Anti"}}`),
+	}, "anthropic")
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-block", SourceFormat: "anthropic", ChunkIndex: 2,
+		Body: []byte(`{"type":"content_block_stop","index":0}`),
+	}, "anthropic")
+	body := string(resp.Body)
+	if !strings.Contains(body, `"text":"Anti"`) {
+		t.Fatalf("block 0 carry not flushed, body=%q", body)
+	}
+	if strings.Count(body, `"text":"Anti"`) != 1 {
+		t.Fatalf("only lane 0 should flush on block 0 stop, body=%q", body)
+	}
+	if !strings.Contains(body, `"content_block_stop"`) {
+		t.Fatalf("terminal stop lost, body=%q", body)
+	}
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:issue21-sa-block"]
+	var carry1 string
+	if sess := mgr.sessions["req:issue21-sa-block"]; sess != nil {
+		if lane := sess.brandCarries["anthropic:1"]; lane != nil {
+			carry1 = lane.carry
+		}
+	}
+	mgr.mu.Unlock()
+	if !alive {
+		t.Fatal("session must survive content_block_stop (stream continues)")
+	}
+	if carry1 != "Anti" {
+		t.Fatalf("other lane carry lost, got %q", carry1)
+	}
+	// Final message_stop must flush remaining lane.
+	resp2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-block", SourceFormat: "anthropic", ChunkIndex: 3,
+		Body: []byte(`{"type":"message_stop"}`),
+	}, "anthropic")
+	if !strings.Contains(string(resp2.Body), `"index":1`) {
+		t.Fatalf("remaining lane not flushed on message_stop, body=%q", resp2.Body)
+	}
+	mgr.mu.Lock()
+	_, alive = mgr.sessions["req:issue21-sa-block"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be deleted after message_stop")
 	}
 }

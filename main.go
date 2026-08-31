@@ -644,6 +644,13 @@ func reverseAssistantBrandInJSON(root any, format string) bool {
 	}
 	return changed
 }
+// isAssistantTextPartType reports whether an OpenAI content part type is
+// assistant-visible text. The allowlist is text, output_text, and untyped
+// (empty) parts; data/control/tool/reasoning/refusal parts keep literal
+// Antigravity. All reverse-brand content paths share this predicate (Issue #21).
+func isAssistantTextPartType(typ string) bool {
+	return typ == "text" || typ == "output_text" || typ == ""
+}
 
 func reverseBrandInOpenAIContent(content any) (any, bool) {
 	switch v := content.(type) {
@@ -653,12 +660,13 @@ func reverseBrandInOpenAIContent(content any) (any, bool) {
 		changed := false
 		for _, partRaw := range v {
 			if part, ok := partRaw.(map[string]any); ok {
-				if typ, _ := part["type"].(string); typ == "text" || typ == "output_text" || typ == "" {
-					if txt, ok := part["text"].(string); ok {
-						if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
-							part["text"] = next
-							changed = true
-						}
+				if typ, _ := part["type"].(string); !isAssistantTextPartType(typ) {
+					continue
+				}
+				if txt, ok := part["text"].(string); ok {
+					if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
+						part["text"] = next
+						changed = true
 					}
 				}
 			} else if s, ok := partRaw.(string); ok {
@@ -675,9 +683,7 @@ func reverseBrandInOpenAIContent(content any) (any, bool) {
 		}
 		return v, changed
 	case map[string]any:
-		// Assistant-text allowlist (same as the array branch): an explicit
-		// non-text type (refusal/reasoning/tool/data) keeps literal brand.
-		if typ, _ := v["type"].(string); typ != "text" && typ != "output_text" && typ != "" {
+		if typ, _ := v["type"].(string); !isAssistantTextPartType(typ) {
 			return content, false
 		}
 		if txt, ok := v["text"].(string); ok {
@@ -758,6 +764,25 @@ func (m *streamSessionManager) reverseBrandSSE(sess *streamSession, sseBytes []b
 			}
 			out.Write(ev)
 			continue
+		}
+		// Anthropic native termination: flush pending carry before the
+		// terminal control event using a protocol-valid assistant text delta
+		// that preserves lane identity. content_block_stop flushes its block
+		// lane; message_stop flushes all remaining lanes. The session must
+		// not be deleted before this carry is delivered (Issue #21).
+		if format == "anthropic" {
+			if kind, laneKey := sseAnthropicTerminalKind(ev); kind != "" {
+				var flushEvents [][]byte
+				if kind == "content_block_stop" {
+					flushEvents = m.generateBrandFlushEventsFiltered(sess, format, []string{laneKey})
+				} else { // message_stop
+					flushEvents = m.generateBrandFlushEvents(sess, format)
+				}
+				for _, fe := range flushEvents {
+					out.Write(fe)
+					changedOverall = true
+				}
+			}
 		}
 		modifiedEv, changed := m.reverseBrandSingleSSEEvent(sess, ev, format, false)
 		if changed {
@@ -888,10 +913,7 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 				c2 := false
 				for _, partRaw := range v {
 					if part, ok := partRaw.(map[string]any); ok {
-						// Assistant-text allowlist (mirrors reverseBrandInOpenAIContent):
-						// only text/output_text/untyped parts are assistant-visible.
-						// data/control/tool/reasoning parts keep literal Antigravity.
-						if typ, _ := part["type"].(string); typ != "text" && typ != "output_text" && typ != "" {
+						if typ, _ := part["type"].(string); !isAssistantTextPartType(typ) {
 							continue
 						}
 						if txt, ok := part["text"].(string); ok {
@@ -1059,7 +1081,97 @@ func drainBrandFlushes(sess *streamSession, flushes []brandFlush) {
 }
 
 func (m *streamSessionManager) generateBrandFlushEvents(sess *streamSession, format string) [][]byte {
+	return m.generateBrandFlushEventsFiltered(sess, format, nil)
+}
+func hasPendingBrandCarry(sess *streamSession) bool {
+	if sess == nil {
+		return false
+	}
+	for _, lane := range sess.brandCarries {
+		if lane != nil && lane.carry != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// anthropicTerminalKindFromMap reports whether an Anthropic data map is part
+// of the native terminal lifecycle. Returns kind "content_block_stop" (with
+// lane key) or "message_stop", or "" if not terminal.
+func anthropicTerminalKindFromMap(m map[string]any) (kind, laneKey string) {
+	t, _ := m["type"].(string)
+	switch t {
+	case "content_block_stop":
+		idx := 0
+		if v, ok := m["index"]; ok {
+			if n, ok := jsonIndexValue(v); ok {
+				idx = n
+			} else if f, ok := v.(float64); ok {
+				idx = int(f)
+			} else if i, ok := v.(int); ok {
+				idx = i
+			}
+		}
+		return "content_block_stop", fmt.Sprintf("anthropic:%d", idx)
+	case "message_stop":
+		return "message_stop", ""
+	default:
+		return "", ""
+	}
+}
+
+// sseAnthropicTerminalKind scans raw SSE bytes for an Anthropic terminal
+// control event. Returns kind and laneKey (only for content_block_stop).
+func sseAnthropicTerminalKind(ev []byte) (kind, laneKey string) {
+	s := string(ev)
+	// Split into lines handling both \n and \r\n.
+	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var m map[string]any
+		if err := safeUnmarshal([]byte(payload), &m); err != nil {
+			continue
+		}
+		if k, lk := anthropicTerminalKindFromMap(m); k != "" {
+			return k, lk
+		}
+	}
+	return "", ""
+}
+
+func sseContainsAnthropicMessageStop(sse []byte) bool {
+	for _, ev := range splitSSEEventsForBrand(sse) {
+		if k, _ := sseAnthropicTerminalKind(ev); k == "message_stop" {
+			return true
+		}
+	}
+	return false
+}
+
+// generateBrandFlushEventsFiltered emits pending carries filtered to only the
+// given lane keys (nil means all), draining each flushed lane. Preserves the
+// deterministic lane ordering of orderedBrandFlushes.
+func (m *streamSessionManager) generateBrandFlushEventsFiltered(sess *streamSession, format string, only []string) [][]byte {
 	flushes := orderedBrandFlushes(sess)
+	if only != nil {
+		filtered := flushes[:0]
+		for _, f := range flushes {
+			for _, k := range only {
+				if f.key == k {
+					filtered = append(filtered, f)
+					break
+				}
+			}
+		}
+		flushes = filtered
+	}
 	if len(flushes) == 0 {
 		return nil
 	}
@@ -1120,6 +1232,9 @@ func markStandaloneFinishes(sess *streamSession, body []byte) (finished []string
 	}
 	if t, _ := root["type"].(string); t == "message_stop" {
 		return nil, true
+	}
+	if kind, laneKey := anthropicTerminalKindFromMap(root); kind == "content_block_stop" {
+		return []string{laneKey}, false
 	}
 	choices, _ := root["choices"].([]any)
 	for _, chRaw := range choices {
@@ -1206,6 +1321,33 @@ func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []
 		merged = mergeAnthropicStandaloneFlush(root, flushes)
 	}
 	if !merged {
+		if format == "anthropic" {
+			if t, _ := root["type"].(string); t == "message_stop" || t == "content_block_stop" {
+				if len(flushes) > 0 {
+					var buf bytes.Buffer
+					for i, f := range flushes {
+						idx, _ := laneIndexNum(f.key)
+						dataMap := map[string]any{
+							"type":  "content_block_delta",
+							"index": idx,
+							"delta": map[string]any{
+								"type": "text_delta",
+								"text": f.text,
+							},
+						}
+						jb, _ := safeMarshal(dataMap)
+						if i > 0 {
+							buf.WriteString("\n\ndata: ")
+						}
+						buf.Write(jb)
+					}
+					buf.WriteString("\n\ndata: ")
+					buf.Write(trimmed)
+					drainBrandFlushes(sess, flushes)
+					return buf.Bytes(), true
+				}
+			}
+		}
 		return nil, false
 	}
 	drainBrandFlushes(sess, flushes)
@@ -1606,13 +1748,15 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			}
 		}
 		overallChanged := changed || brandChanged
-		if bytes.Contains(completeEvents, []byte("data: [DONE]")) || bytes.Contains(modified, []byte("data: [DONE]")) {
-			// Safety net for [DONE] embedded in a multi-line event that
-			// reverseBrandSSE's per-event check misses. generateBrandFlushEvents
-			// drains each lane as it emits, so the common case (flush events
-			// already written before the [DONE] frame) is a no-op here — no
-			// double emission.
-			if sess.client == "oh_my_pi" {
+		isDone := bytes.Contains(completeEvents, []byte("data: [DONE]")) || bytes.Contains(modified, []byte("data: [DONE]"))
+		isAnthropicEnd := format == "anthropic" && (sseContainsAnthropicMessageStop(completeEvents) || sseContainsAnthropicMessageStop(modified))
+		if isDone || isAnthropicEnd {
+			if isDone && sess.client == "oh_my_pi" {
+				// Safety net for [DONE] embedded in a multi-line event that
+				// reverseBrandSSE's per-event check misses. generateBrandFlushEvents
+				// drains each lane as it emits, so the common case (flush events
+				// already written before the [DONE] frame) is a no-op here — no
+				// double emission.
 				if flush := m.generateBrandFlushEvents(sess, format); len(flush) > 0 {
 					doneIdx := bytes.Index(modified, []byte("data: [DONE]"))
 					var tmp bytes.Buffer
@@ -1632,9 +1776,10 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 					overallChanged = true
 				}
 			}
-			m.deleteSession(key)
+			if !hasPendingBrandCarry(sess) {
+				m.deleteSession(key)
+			}
 		}
-
 		if !overallChanged {
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
@@ -1671,7 +1816,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 				changed = true
 			}
 		}
-		if done {
+		if done && !hasPendingBrandCarry(sess) {
 			m.deleteSession(key)
 		}
 	}
