@@ -1367,3 +1367,123 @@ func TestIssue21_AnthropicStandalone_ContentBlockStopPerLaneFlush(t *testing.T) 
 		t.Fatal("session must be deleted after message_stop")
 	}
 }
+
+// sseEventsStrict parses a composite body as SSE events and fails on any
+// non-blank line that is not a valid `data:`/`event:` field. A bare-JSON
+// (unframed) line makes this fatal.
+func sseEventsStrict(t *testing.T, body []byte) []map[string]any {
+	t.Helper()
+	events := strings.Split(strings.ReplaceAll(string(body), "\r\n", "\n"), "\n\n")
+	var out []map[string]any
+	for _, ev := range events {
+		ev = strings.TrimSpace(ev)
+		if ev == "" {
+			continue
+		}
+		var data map[string]any
+		gotData := false
+		for _, line := range strings.Split(ev, "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if strings.HasPrefix(line, "event:") {
+				continue
+			}
+			if !strings.HasPrefix(line, "data:") {
+				t.Fatalf("SSE event line not data:-framed: %q in body=%q", line, string(body))
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			var m map[string]any
+			if err := json.Unmarshal([]byte(payload), &m); err != nil {
+				t.Fatalf("data: payload not valid JSON %q: %v", payload, err)
+			}
+			data = m
+			gotData = true
+		}
+		if !gotData {
+			t.Fatalf("event missing data: field, ev=%q body=%q", ev, string(body))
+		}
+		out = append(out, data)
+	}
+	return out
+}
+
+// Issue #21 final-review blocker: the Anthropic standalone terminal fallback
+// in flushBrandStandalone must emit protocol-valid SSE. The host forwards the
+// intercepted Body verbatim to the HTTP writer (handlers_stream.go payload →
+// dataChan; ClaudeCodeAPIHandler c.Writer.Write(chunk)), so every event in a
+// multi-event composite — synthetic flush deltas AND the terminal event —
+// must carry its own `data:` framing. Previously the first synthetic delta
+// was bare JSON and parsed as a malformed stream at the client.
+func TestIssue21_AnthropicStandalone_TerminalFlushCompositeIsSSEFramed(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+
+	// Hold carries on two lanes so the terminal composite contains two
+	// synthetic flush deltas — the exact case where the first delta used to
+	// ship unframed.
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:issue21-sa-frame", "oh_my_pi", ompUncloakCache(t), 2)
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-frame", SourceFormat: "anthropic", ChunkIndex: 0,
+		Body: []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi Anti"}}`),
+	}, "anthropic")
+	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-frame", SourceFormat: "anthropic", ChunkIndex: 1,
+		Body: []byte(`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"Bye Anti"}}`),
+	}, "anthropic")
+
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-frame", SourceFormat: "anthropic", ChunkIndex: 2,
+		Body: []byte(`{"type":"message_stop"}`),
+	}, "anthropic")
+	events := sseEventsStrict(t, resp.Body)
+	if len(events) != 3 {
+		t.Fatalf("want 2 flush deltas + message_stop, got %d events body=%q", len(events), resp.Body)
+	}
+	// Order: flush deltas first (deterministic lane order), terminal last.
+	if events[0]["type"] != "content_block_delta" || events[1]["type"] != "content_block_delta" || events[2]["type"] != "message_stop" {
+		t.Fatalf("event order wrong: %v %v %v body=%q", events[0]["type"], events[1]["type"], events[2]["type"], resp.Body)
+	}
+	// Lane-index preservation: lane 0 flush before lane 1 flush.
+	i0, ok0 := events[0]["index"].(float64)
+	i1, ok1 := events[1]["index"].(float64)
+	if !ok0 || !ok1 || int(i0) != 0 || int(i1) != 1 {
+		t.Fatalf("flush lane indices want [0 1] got %v %v body=%q", events[0]["index"], events[1]["index"], resp.Body)
+	}
+	t0, _ := events[0]["delta"].(map[string]any)
+	t1, _ := events[1]["delta"].(map[string]any)
+	if t0 == nil || t0["text"] != "Anti" || t1 == nil || t1["text"] != "Anti" {
+		t.Fatalf("flush texts wrong: %v %v body=%q", events[0]["delta"], events[1]["delta"], resp.Body)
+	}
+	// Cleanup-safe: carries drained and session deleted after flush.
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:issue21-sa-frame"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be deleted after flushed message_stop")
+	}
+
+	// Single-lane content_block_stop composite must also be fully framed.
+	mgr2 := newStreamSessionManager()
+	mgr2.resetSession("req:issue21-sa-frame2", "oh_my_pi", ompUncloakCache(t))
+	mgr2.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-frame2", SourceFormat: "anthropic", ChunkIndex: 0,
+		Body: []byte(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi Anti"}}`),
+	}, "anthropic")
+	resp2 := mgr2.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue21-sa-frame2", SourceFormat: "anthropic", ChunkIndex: 1,
+		Body: []byte(`{"type":"content_block_stop","index":0}`),
+	}, "anthropic")
+	events2 := sseEventsStrict(t, resp2.Body)
+	if len(events2) != 2 || events2[0]["type"] != "content_block_delta" || events2[1]["type"] != "content_block_stop" {
+		t.Fatalf("single-lane composite wrong: %v body=%q", events2, resp2.Body)
+	}
+	mgr2.mu.Lock()
+	sess2 := mgr2.sessions["req:issue21-sa-frame2"]
+	pending := hasPendingBrandCarry(sess2)
+	mgr2.mu.Unlock()
+	if sess2 == nil || pending {
+		t.Fatalf("session must survive block stop with drained carry: sess=%v pending=%v", sess2 != nil, pending)
+	}
+}

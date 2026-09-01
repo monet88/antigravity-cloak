@@ -1347,8 +1347,9 @@ func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []
 						}
 						jb, _ := safeMarshal(dataMap)
 						if i > 0 {
-							buf.WriteString("\n\ndata: ")
+							buf.WriteString("\n\n")
 						}
+						buf.WriteString("data: ")
 						buf.Write(jb)
 					}
 					buf.WriteString("\n\ndata: ")
