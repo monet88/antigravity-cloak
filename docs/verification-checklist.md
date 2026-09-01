@@ -1,106 +1,220 @@
-# Oh My Pi ⟷ Antigravity Two-Way Verification Checklist
+# Oh My Pi <-> Antigravity Live Verification Runbook
 
-This document details the two-way verification protocol to validate bidirectional tool cloaking, brand rewriting, virtual device routing, and MCP pass-through between **Oh My Pi** (client) and **Antigravity** (backend via CLIProxyAPI).
+Use this runbook for real local acceptance of `antigravity-cloak` with Oh My Pi (OMP), CLIProxyAPI, and an Antigravity-backed model. Deterministic Go tests remain the oracle for edge cases; this runbook proves the actual local round trip.
 
----
+## PASS criteria
 
-## 1. Architecture Overview
+A live run is `PASS` only when all of the following are true:
 
-```
-[ Oh My Pi Client ]  --(1. Request: 'bash', 'read'...)-->  [ CLIProxyAPI + antigravity-cloak ]
-                                                                     │
-                                                      (Cloak: 'run_command', 'view_file')
-                                                                     ▼
-                                                             [ Antigravity Backend ]
-                                                                     │
-                                                       (Model outputs 'run_command')
-                                                                     ▼
-[ Oh My Pi Client ]  <--(3. Response: 'bash' restored)<--   [ CLIProxyAPI + antigravity-cloak ]
-                                                              (Uncloak: restores original name)
-```
+1. CLIProxyAPI loads and registers the intended `antigravity-cloak` version.
+2. OMP reaches the local CLIProxyAPI instance through an isolated profile.
+3. The request is classified as `oh_my_pi` and native OMP tool names are cloaked upstream.
+4. A real streamed model tool call is restored to an OMP-native tool name before OMP executes it.
+5. No Antigravity-only tool name leaks across the OMP boundary.
+6. No unknown-tool, schema, retry-loop, plugin panic, or model-gate error occurs.
+7. Controlled debug logging is disabled and truncated again after verification.
 
-1. **Request Phase (Client $\to$ Backend)**:
-   - Client sends native tool names (`read`, `bash`, `edit`, ...).
-   - `antigravity-cloak` detects `oh_my_pi` and rewrites tool definitions, `tool_choice`, and history `tool_calls` to Antigravity native names (`view_file`, `run_command`, `replace_file_content`, ...).
-   - Brand tokens (`Oh My Pi`, `oh-my-pi`, `omp`) in `system` prompts and messages are rewritten to `Antigravity`.
-2. **Response / SSE Stream Phase (Backend $\to$ Client)**:
-   - Model backend generates Antigravity native tool calls (`view_file`, `run_command`, ...).
-   - `antigravity-cloak` interceptor buffers SSE chunks (`\n\n` boundaries) and uncloaks tool names back to client originals (`read`, `bash`, ...).
-   - Oh My Pi receives its native tool names and executes them without error.
+## Tool direction
 
----
+Core examples:
 
-## 2. Core Tool Verification Checklist (12 Tools)
+| OMP | Antigravity |
+| --- | --- |
+| `bash` | `run_command` |
+| `read` | `view_file` |
+| `edit` | `replace_file_content` |
+| `write` | `write_to_file` |
+| `grep` | `grep_search` |
+| `glob` | `list_dir` |
 
-| # | Oh My Pi Tool | Antigravity Tool | Sample Test Prompt | Expected Client Action | Expected Backend State |
-| :-: | :--- | :--- | :--- | :--- | :--- |
-| **1** | `read` | `view_file` | `"Read the first 10 lines of go.mod"` | Oh My Pi invokes `read` and shows file content | Backend sees `view_file` in request/response |
-| **2** | `write` | `write_to_file` | `"Create test_verify.txt with content 'hello'"` | Oh My Pi invokes `write` to create file | Backend sees `write_to_file` in request/response |
-| **3** | `edit` | `replace_file_content` | `"In test_verify.txt, change 'hello' to 'world'"` | Oh My Pi invokes `edit` with line patch | Backend sees `replace_file_content` |
-| **4** | `bash` | `run_command` | `"Run shell command 'go version'"` | Oh My Pi invokes `bash` and prints output | Backend sees `run_command` in request/response |
-| **5** | `grep` | `grep_search` | `"Search for 'defaultRewriteMappings' in main.go"` | Oh My Pi invokes `grep` with regex | Backend sees `grep_search` |
-| **6** | `glob` | `list_dir` | `"Find all .go files in this repo"` | Oh My Pi invokes `glob` and lists paths | Backend sees `list_dir` |
-| **7** | `task` | `invoke_subagent` | `"Spawn a scout subagent to check git status"` | Oh My Pi invokes `task` with subagent spec | Backend sees `invoke_subagent` |
-| **8** | `ask` | `ask_question` | `"Ask me a question with 2 choices: A or B"` | Oh My Pi invokes `ask` interactive UI | Backend sees `ask_question` |
-| **9** | `todo` | `manage_task` | `"Initialize a 2-step verification todo list"` | Oh My Pi invokes `todo` managing phase/items | Backend sees `manage_task` |
-| **10** | `hub` | `send_message` | `"Check running background jobs via hub"` | Oh My Pi invokes `hub` for process status | Backend sees `send_message` |
-| **11** | `web_search` | `search_web` | `"Search latest release notes for Go 1.26"` | Oh My Pi invokes `web_search` | Backend sees `search_web` |
-| **12** | `eval` | `execute_code` | `"Evaluate Python code printing 1+1"` | Oh My Pi invokes `eval` persistent kernel | Backend sees `execute_code` |
+The full mapping table lives in [CONTEXT.md](../CONTEXT.md).
 
----
+OMP auxiliary devices and MCP servers are typically mounted under `xd://...` and invoked through `read`/`write`; top-level `mcp__*` tools, when present, remain pass-through traffic.
 
-## 3. Virtual Device Tools (`xd://`)
+## 1. Discover the real Docker runtime
 
-Oh My Pi routes advanced capabilities through the **Device Bus** (`xd://<device>`) by calling the `write` tool:
-
-- **`lsp`** (Language Server Protocol): Navigation, diagnostics, symbol queries
-- **`ast_grep` / `ast_edit`**: AST-aware syntax search and codemods
-- **`browser`**: Headless Chromium Puppeteer automation
-- **`debug`**: Debug Adapter Protocol (DAP) stepping and inspection
-- **`computer`**: Desktop automation
-- **`checkpoint` / `rewind`**: Context window pruning
-
-**Verification**: Because `write` is cloaked to `write_to_file` and restored transparently, all `xd://` virtual devices operate seamlessly.
-
----
-
-## 4. MCP Tools Pass-Through (`mcp__*`)
-
-Model Context Protocol (MCP) tools adhere to the following rules:
-
-1. **Prefix Convention**: Every MCP tool starts with `mcp__<server>_<tool>` (e.g. `mcp__gitnexus_query`, `mcp__fastctx_grep`, `mcp__context_get_library_docs`).
-2. **Passthrough Guarantee**: `antigravity-cloak` leaves `mcp__*` tools completely untouched in both request and response.
-3. **Backend Support**: Antigravity natively accepts dynamic custom function schemas defined in `tools[]`.
-
----
-
-## 5. Step-by-Step Verification Procedure
-
-### Step 1: Build & Deploy Plugin
-
-Compile the shared library for your host environment:
+Do not assume a historical container name or `F:\cliproxy` path. Resolve the active Compose project and bind mounts first:
 
 ```powershell
-# Linux amd64 (for Docker container):
-docker run --rm -v F:\CodeBase\antigravity-cloak:/src -w /src golang:1.26 sh -c "mkdir -p dist && CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -buildmode=c-shared -ldflags '-s -w' -o dist/antigravity-cloak.so . && rm -f dist/antigravity-cloak.h"
+$Container = 'cli-proxy-api'
+$i = (docker inspect $Container | ConvertFrom-Json)[0]
 
-# Deploy to container:
-cd F:\cliproxy
-docker compose stop
-Copy-Item F:\CodeBase\antigravity-cloak\dist\antigravity-cloak.so F:\cliproxy\plugins\linux\amd64\antigravity-cloak-v0.3.1.so -Force
-docker compose start
+$ComposeService = $i.Config.Labels.'com.docker.compose.service'
+$ComposeDir = $i.Config.Labels.'com.docker.compose.project.working_dir'
+$PluginMount = $i.Mounts | Where-Object Destination -eq '/CLIProxyAPI/plugins'
+$ConfigMount = $i.Mounts | Where-Object Destination -eq '/CLIProxyAPI/config.yaml'
+$LogsMount = $i.Mounts | Where-Object Destination -eq '/CLIProxyAPI/logs'
+
+[pscustomobject]@{
+  Container = $Container
+  ComposeService = $ComposeService
+  ComposeDir = $ComposeDir
+  PluginDir = $PluginMount.Source
+  ConfigPath = $ConfigMount.Source
+  LogsDir = $LogsMount.Source
+}
 ```
 
-### Step 2: Enable Debug Logging
+All three mounts must resolve before changing or testing the runtime.
 
-Set `CPA_FILTER_DEBUG=1` in `docker-compose.yml` (requires container recreate: `docker compose up -d`).
+## 2. Verify the plugin that is actually loaded
 
-### Step 3: Execute & Cross-Check Logs
+The active CLIProxyAPI config should enable the plugin. A pinned store version is recommended for release acceptance:
 
-1. Send a request from **Oh My Pi** (e.g. *"Read go.mod"*).
-2. Inspect `logs/cpa-filter-debug.log`:
-   - **Client Detection**: `buildUncloakTable: client=oh_my_pi`
-   - **Request Cloak**: `tools[i].name` rewritten from `read` $\to$ `view_file`
-   - **System Brand Rewrite**: `Oh My Pi` $\to$ `Antigravity`
-   - **Response Uncloak**: `view_file` restored $\to$ `read`
-3. Verify that Oh My Pi completes the action without schema or unknown tool errors.
+```yaml
+plugins:
+  enabled: true
+  configs:
+    antigravity-cloak:
+      enabled: true
+      store:
+        version: "<VERSION>"
+      model_prefixes:
+        - "agy/"
+```
+
+Confirm startup evidence from the container:
+
+```powershell
+docker logs $Container 2>&1 |
+  Select-String 'pluginhost: plugin (loaded|registered).*antigravity-cloak' |
+  Select-Object -Last 4
+```
+
+When testing a published release, install its published Linux/amd64 asset into the discovered plugin mount rather than rebuilding different source. A loaded Go shared object cannot be safely hot-swapped; recreate the service before replacing an active binary.
+
+## 3. Use an isolated OMP profile
+
+Create or reuse a profile such as `cloak-live`:
+
+```powershell
+$OmpProfile = 'cloak-live'
+$OmpRoot = (omp --profile $OmpProfile config path).Trim()
+New-Item -ItemType Directory -Force -Path $OmpRoot | Out-Null
+$OmpRoot
+```
+
+`$OmpRoot\models.yml` should point only to the local gateway. Keep the key local and never commit it:
+
+```yaml
+providers:
+  cpa:
+    baseUrl: http://127.0.0.1:8317/v1
+    apiKey: "<LOCAL_CLI_PROXY_API_KEY>"
+    api: openai-completions
+    discovery:
+      type: openai-models-list
+```
+
+Verify discovery:
+
+```powershell
+omp --profile cloak-live models
+```
+
+OMP model selectors include the provider namespace. For the validated route, select:
+
+```text
+cpa/agy/gemini-3.7-flash-high
+```
+
+The provider prefix `cpa/` is OMP-local routing metadata; the plugin sees the request model as `agy/gemini-3.7-flash-high`, which is what `model_prefixes: ["agy/"]` matches.
+
+## 4. Interactive TUI validation
+
+Launch OMP in the target repository:
+
+```powershell
+omp --profile cloak-live `
+  --model cpa/agy/gemini-3.7-flash-high `
+  --cwd F:\CodeBase\antigravity-cloak `
+  --auto-approve
+```
+
+Give it a task that requires real file reads, edits/writes, and shell commands. The client should execute normal OMP tools; it must never surface `run_command`, `view_file`, `replace_file_content`, or `write_to_file` as unknown client tools.
+
+For a minimal one-shot smoke instead of the TUI:
+
+```powershell
+omp --profile cloak-live `
+  --model cpa/agy/gemini-3.7-flash-high `
+  --cwd F:\CodeBase\antigravity-cloak `
+  --tools bash,read,edit,write,todo `
+  --no-session `
+  --auto-approve `
+  --max-time 2m `
+  -p "Use bash exactly once to run: git rev-parse --short HEAD. Report the exact output."
+```
+
+## 5. Controlled debug proof
+
+`CPA_FILTER_DEBUG` writes full request/response/stream bodies. Enable it only for a small controlled run and never publish the raw log.
+
+Add `CPA_FILTER_DEBUG: "1"` to the CLIProxyAPI service environment, then recreate the service. Merely restarting an existing container is insufficient because the plugin caches debug enablement for the process lifetime.
+
+```powershell
+Push-Location $ComposeDir
+docker compose up -d --force-recreate --pull never $ComposeService
+Pop-Location
+
+docker exec $Container sh -lc ': > /CLIProxyAPI/logs/cpa-filter-debug.log'
+```
+
+For the request under test, prove these transitions from debug records:
+
+```text
+OMP request:          bash / read / edit / write
+rewritten upstream:  run_command / view_file / replace_file_content / write_to_file
+model stream:        Antigravity-native tool name
+next OMP history:    native OMP tool name again
+```
+
+Useful markers include:
+
+```text
+handleRequestInterceptBefore: ... Model="agy/..." RequestedModel="agy/..."
+handleRequestInterceptBefore: rewritten=true client=oh_my_pi
+StreamSessionManager: header-init using pre-registered session ... client=oh_my_pi
+handleStreamChunkIntercept: ...
+```
+
+Do not prove uncloaking by searching the whole log for both names. Compare the model stream event with the following OMP request/history: the native name must reappear there and the cloaked name must not remain at that client boundary.
+
+## 6. Reverse-brand check
+
+For resolved `oh_my_pi` traffic, assistant-visible standalone `Antigravity` is restored to `omp`. Tool arguments, metadata, reasoning/control lanes, IDs, and non-assistant data keep literal `Antigravity`.
+
+When this code changes, add one focused live response containing standalone `Antigravity` and confirm the TUI displays `omp`. The deterministic `reverse_brand_test.go` suite remains the primary edge-case oracle for fragmentation, per-lane buffering, boundaries, and excluded fields.
+
+## 7. Cleanup after every debug run
+
+Remove `CPA_FILTER_DEBUG` from the Compose environment and recreate the service:
+
+```powershell
+Push-Location $ComposeDir
+docker compose up -d --force-recreate --pull never $ComposeService
+Pop-Location
+
+docker exec $Container sh -lc ': > /CLIProxyAPI/logs/cpa-filter-debug.log'
+```
+
+Verify the final state:
+
+```powershell
+docker inspect $Container --format '{{range .Config.Env}}{{println .}}{{end}}' |
+  Select-String '^CPA_FILTER_DEBUG='
+```
+
+Expected: no `CPA_FILTER_DEBUG=1` entry, and the debug log is empty.
+
+## Validated baseline - 2026-09-01
+
+The local release acceptance used:
+
+- CLIProxyAPI `v7.2.146`
+- `antigravity-cloak v0.4.2`
+- OMP `18.0.11`
+- OMP route `cpa/agy/gemini-3.7-flash-high`
+- plugin-visible model `agy/gemini-3.7-flash-high`
+
+A real interactive OMP task exercised `bash`, `read`, `edit`, and `write`. Correlation across model stream events and following OMP requests found 58 streamed tool-call events with 0 boundary failures. No plugin panic, unknown-tool, or schema failure was observed. Debug was disabled and the log truncated afterward.

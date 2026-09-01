@@ -15,7 +15,7 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 ### 2. Tool Cloaking & Uncloaking
 - **Cloaking (Request Path)**: Translates client-native tool names (e.g., `Bash`, `read`, `shell_command`) into Antigravity-native tool names (e.g., `run_command`, `view_file`) before the request reaches the upstream LLM.
 - **Uncloaking (Response & Stream Path)**: Reverses the translation in upstream responses (JSON bodies and SSE stream chunks) back to the client's native tool names so the client remains unaware of the disguise.
-- **MCP Pass-through**: MCP tools (`mcp__*`) bypass cloaking in both directions.
+- **MCP Pass-through & Virtual Devices**: Top-level `mcp__*` tools bypass cloaking in both directions. Oh My Pi normally mounts MCP tools as virtual devices (`xd://mcp__<server>_<tool>`) and reaches them through core `read`/`write`, which are already cloaked to `view_file`/`write_to_file`.
 
 #### Cloak Mapping Tables
 
@@ -44,7 +44,7 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 | `log_experiment` | `update_plan` | Autoresearch | Record metric, commit or discard |
 | `update_notes` | `update_goal` | Autoresearch | Update experiment playbook / ideas |
 
-> **Virtual Devices (`xd://`)**: Other auxiliary tools in `oh-my-pi` (`ast_grep`, `ast_edit`, `lsp`, `checkpoint`, `rewind`, `browser`, `retain`, `recall`, `reflect`, `memory_edit`, `security_scan`) are unmounted from top-level tool definitions and dispatched as virtual file payloads via `read`/`write` to `xd://<tool>`, thus automatically protected without needing top-level mappings.
+> **Virtual Devices (`xd://`)**: Auxiliary tools (`ast_grep`, `ast_edit`, `lsp`, `checkpoint`, `rewind`, `browser`, `retain`, `recall`, `reflect`, `memory_edit`, `security_scan`) and MCP servers (`xd://mcp__<server>_<tool>`) in `oh_my_pi` are dispatched through `read`/`write` to `xd://<target>`. Because `read`/`write` are cloaked automatically, these calls need no separate top-level MCP mapping.
 
 ##### 2. Claude Code (`claude_code`)
 - `Bash` $\to$ `run_command`

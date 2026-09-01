@@ -93,6 +93,11 @@ Supported clients:
 > Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 > Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
 
+### MCP tools behavior
+- **Oh My Pi (`oh_my_pi`)** mounts MCP servers under the virtual-device protocol (`xd://mcp__<server>_<tool>`) and invokes them through its standard `read`/`write` tools. Those core tools are already cloaked to `view_file`/`write_to_file`, so OMP MCP traffic is protected without a separate top-level mapping.
+- **Do not convert OMP virtual-device MCP calls into `call_mcp_tool`.** That would require additional payload/schema transformation and risks breaking streaming semantics.
+- **Top-level `mcp__*` tools** from clients that expose them directly remain pass-through traffic.
+
 ### Two casing rules that bite
 1. sourceFormat normalization. The proxy sends SourceFormat="claude" for
    Claude Code, but the body-walking branches only understand "anthropic" /
@@ -119,8 +124,8 @@ Supported clients:
   quit/relaunch of Docker Desktop. KEEP DEBUG OFF for production; only enable it
   for a few single requests at a time.
 - To clear the log while the container runs (the plugin holds the file handle so
-  the host cannot delete it): docker exec cli-proxy-api-origin sh -c ': >
-  logs/cpa-filter-debug.log'. O_APPEND means the next write restarts at offset 0
+  the host cannot delete it), use the `$Container` resolved by the local runbook:
+  `docker exec $Container sh -c ': > /CLIProxyAPI/logs/cpa-filter-debug.log'`. `O_APPEND` means the next write restarts at offset 0
   - no sparse file.
 
 Key debug lines to grep:
@@ -150,57 +155,18 @@ go vet ./...
 CI (.github/workflows/build.yml) builds the full OS/arch matrix and packages
 release zips + checksums.txt; version comes from the v* git tag.
 
-## Deploy to the running container
+## Local Docker deploy and OMP live acceptance
 
-Container cli-proxy-api-origin (compose project at F:\cliproxy,
-docker-compose.yml). Relevant bind mounts:
-- F:\cliproxy\plugins -> /CLIProxyAPI/plugins
-- F:\cliproxy\logs -> /CLIProxyAPI/logs
-- F:\cliproxy\config.yaml -> /CLIProxyAPI/config.yaml
+Use **[docs/verification-checklist.md](docs/verification-checklist.md)** as the authoritative local deploy and real acceptance runbook.
 
-The deployed artifact is the VERSIONED filename
-F:\cliproxy\plugins\linux\amd64\antigravity-cloak-v0.1.1.so. The plugin .so is
-mmap'd by the process and a Go plugin can never be unloaded, so STOP the
-container before overwriting the file:
-
-```powershell
-cd F:\cliproxy
-docker compose stop
-Copy-Item F:\CodeBase\antigravity-cloak\dist\antigravity-cloak.so `
-  F:\cliproxy\plugins\linux\amd64\antigravity-cloak-v0.1.1.so -Force
-# optional: truncate debug log while stopped
-Set-Content -LiteralPath F:\cliproxy\logs\cpa-filter-debug.log -Value $null
-docker compose start
-```
-
-Verify load (these lines go to docker stdout at startup, NOT into main.log):
-
-```powershell
-docker logs cli-proxy-api-origin 2>&1 | Select-String 'antigravity-cloak' | Select-Object -Last 4
-```
-
-Expect pluginhost: plugin loaded + plugin registered ... antigravity-cloak
-version=0.1.1.
-
-### Enabling / disabling debug needs a recreate (not just start)
-
-CPA_FILTER_DEBUG lives in docker-compose.yml under the service environment:.
-Editing it requires docker compose up -d (recreate) to take effect - a plain
-start keeps the old env. The plugin is enabled in config.yaml under
-plugins.configs.antigravity-cloak.enabled: true; the store source is
-plugins.store-sources pointing at monet88/antigravity-cloak/registry.json.
-
-## Verifying cloak from logs (round-trip must be closed)
-
-With debug on, send ONE request, then check:
-- Request side: tool name fields contain only cloaked names (run_command etc.),
-  zero leftover PascalCase (Bash/Edit/...).
-- Response/stream side: every tool_use the model returns under a cloaked name is
-  restored to the client's real name (run_command -> Bash), and NO cloaked name
-  is delivered to the client (zero leak).
-
-Because stream chunk bodies are multi-line SSE, parse by [DEBUG] record, not by
-line, when separating input bodies from changed=true output bodies.
+Important invariants:
+- Discover the active Compose project, container, config mount, plugin mount, and log mount with `docker inspect`; never rely on an old hardcoded `F:\cliproxy` path or container name.
+- The Docker plugin artifact is Linux/amd64 `-buildmode=c-shared`; when testing a published release, use the release asset rather than silently rebuilding different source.
+- A loaded Go `.so` cannot be hot-swapped safely. Stop/recreate CLIProxyAPI before replacing an already-loaded binary.
+- `CPA_FILTER_DEBUG` is process environment state cached on first debug use; enabling or disabling it requires a container recreate.
+- Debug writes full request/response/stream bodies. Enable it only for a controlled acceptance run, then disable it and truncate the log.
+- The primary live acceptance gate is Oh My Pi (`omp`) against local CLIProxyAPI. Prove request cloak and streamed response uncloak at the OMP boundary; source/tests remain the oracle for protocol edge cases not exercised by that run.
+- Never commit local CLIProxyAPI keys, management secrets, auth files, OMP profile credentials, or full debug-body logs.
 
 ## Installing a custom (non-official) plugin onto a remote VPS
 

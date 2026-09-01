@@ -65,7 +65,7 @@ Provide seamless, bidirectional cloaking and brand rewriting in the `antigravity
 ## Out of Scope
 
 - Request blocking (HTTP 403 rejection) based on coding signatures; the plugin focuses solely on cloaking/rewriting.
-- Custom payload transformation for MCP tool arguments (handled natively by host and MCP servers).
+- Custom payload transformation of OMP virtual-device MCP calls into `call_mcp_tool`; OMP routes those calls through `xd://mcp__<server>_<tool>` using its normal `read`/`write` tools, which are already covered by the core cloak mappings.
 
 ## Further Notes
 
