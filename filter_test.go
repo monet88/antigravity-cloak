@@ -1473,6 +1473,28 @@ func TestReplaceInsensitiveWordBoundaries(t *testing.T) {
 	}
 }
 
+func TestReplaceBrandKeywordSkipsPathSegments(t *testing.T) {
+	applyFilterConfig(filterConfig{
+		UseDefaultKeywords: true,
+		ToolMappings:       copyToolMappings(defaultCloakTables),
+	})
+	defer restoreDefaultFilterConfig(t)
+
+	// Windows OMP config dir path must survive the forward brand rewrite.
+	if got, changed := rewriteRequestBody([]byte(`{"system":"agent config is at C:\\Users\\monet\\.omp\\agent"}`), "openai"); changed {
+		t.Fatalf("windows .omp path must not be rewritten: body=%s", got)
+	}
+	// Unix-style path form survives too.
+	if _, c := rewriteRequestBody([]byte(`{"system":"config at /home/user/.omp"}`), "openai"); c {
+		t.Fatalf("unix .omp path must not be rewritten")
+	}
+	// Bare brand mention is still masked.
+	b, bc := rewriteRequestBody([]byte(`{"system":"You are omp."}`), "openai")
+	if !bc || !strings.Contains(string(b), "Antigravity.") {
+		t.Fatalf("bare omp brand must still be masked: changed=%v body=%s", bc, b)
+	}
+}
+
 func TestDetectClientOhMyPiRequiresSignatureOrThreshold(t *testing.T) {
 	// Generic tools (read, write) alone should NOT trigger Oh My Pi
 	if client := detectClient([]string{"read", "write"}); client != "" {

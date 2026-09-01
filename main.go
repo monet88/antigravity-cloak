@@ -2865,7 +2865,7 @@ func rewriteDescriptionField(obj map[string]any, key string, mappings []rewriteM
 	descChanged := false
 	for _, mapping := range mappings {
 		var replaced bool
-		next, replaced = replaceInsensitive(next, mapping.Match, mapping.Replacement)
+		next, replaced = replaceBrandKeyword(next, mapping.Match, mapping.Replacement)
 		descChanged = descChanged || replaced
 	}
 	if cached != nil {
@@ -2953,7 +2953,7 @@ func rewriteSystemValue(value any, mappings []rewriteMapping) (any, bool) {
 		changed := false
 		for _, mapping := range mappings {
 			var replaced bool
-			next, replaced = replaceInsensitive(next, mapping.Match, mapping.Replacement)
+			next, replaced = replaceBrandKeyword(next, mapping.Match, mapping.Replacement)
 			changed = changed || replaced
 		}
 		return next, changed
@@ -2987,6 +2987,13 @@ func isWordByte(b byte) bool {
 }
 
 func replaceInsensitive(value, match, replacement string) (string, bool) {
+	return replaceInsensitiveOpt(value, match, replacement, false)
+}
+
+// replaceInsensitiveOpt is the shared case-insensitive word-boundary matcher.
+// When skipPath is true, matches that are filesystem-path segments (preceded by
+// '.', '/', or '\\') are left untouched.
+func replaceInsensitiveOpt(value, match, replacement string, skipPath bool) (string, bool) {
 	if match == "" {
 		return value, false
 	}
@@ -3007,11 +3014,11 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 		index += start
 		matchEnd := index + len(match)
 
-		// Check word boundaries if match starts/ends with a word character
 		hasLeftBoundary := !firstIsWord || index == 0 || !isWordByte(value[index-1])
 		hasRightBoundary := !lastIsWord || matchEnd == len(value) || !isWordByte(value[matchEnd])
+		pathSegment := skipPath && index > 0 && (value[index-1] == '.' || value[index-1] == '/' || value[index-1] == '\\')
 
-		if hasLeftBoundary && hasRightBoundary {
+		if hasLeftBoundary && hasRightBoundary && !pathSegment {
 			builder.WriteString(value[start:index])
 			builder.WriteString(replacement)
 			start = matchEnd
@@ -3026,6 +3033,13 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 	}
 	builder.WriteString(value[start:])
 	return builder.String(), true
+}
+
+// replaceBrandKeyword is the forward brand rewrite, skipping path segments so
+// real resource paths (e.g. ".omp" in C:\Users\monet\.omp\agent) are never
+// masked into tool arguments the reverse brand path does not restore.
+func replaceBrandKeyword(value, match, replacement string) (string, bool) {
+	return replaceInsensitiveOpt(value, match, replacement, true)
 }
 
 func replaceInsensitiveWithPrev(value string, prevIsWord bool, match, replacement string) (string, bool) {
