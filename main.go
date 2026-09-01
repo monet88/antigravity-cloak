@@ -42,9 +42,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"net/http"
 	"os"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,6 +99,32 @@ const (
 	pluginVersion    = "0.4.1"
 	pluginRepository = "https://github.com/monet88/antigravity-cloak"
 )
+
+// explicitClientHeader is the plugin-owned control header carrying the
+// operator-declared client identity. It is consumed on the request path and
+// never forwarded upstream, whether its value is valid or not.
+const explicitClientHeader = "X-Cloak-Client"
+
+// negativeClientResolution is a sentinel client id recorded under a request's
+// correlation key when request-time precedence ran to completion but resolved
+// no client (an invalid explicit X-Cloak-Client suppressed User-Agent evidence
+// and body classification found nothing). Its presence is authoritative:
+// response and stream paths must not reclassify the request from a weaker
+// signal that survived after the control header was consumed. It is distinct
+// from a missing session, which leaves conservative recovery available.
+const negativeClientResolution = "__none__"
+
+// userAgentEvidence lists conservative User-Agent prefixes that may resolve a
+// client. Each entry is verified against active ToolMappings; an entry without
+// a usable mapping (e.g. opencode before any table exists) stays inert and
+// never invents a client.
+var userAgentEvidence = []struct {
+	prefix string
+	client string
+}{
+	{"omp/", "oh_my_pi"},
+	{"opencode/", "opencode"},
+}
 
 func main() {}
 
@@ -295,24 +323,64 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		return mustErrorEnvelope("invalid_request", fmt.Sprintf("decode request.intercept_before request: %v", err))
 	}
 
+	resp := pluginapi.RequestInterceptResponse{}
+	explicitClient, matchedKeys, explicitPresent, explicitValid := resolveExplicitClient(req.Headers)
+	if explicitPresent {
+		// Consume the plugin-owned control header on both host header contracts:
+		// ClearHeaders covers a merging host; the before-auth interceptor applies
+		// resp.Headers as the final set, so the filtered clone provides every
+		// non-owned inbound header verbatim. Inbound request headers are canonical
+		// MIME keys (Go net/http), so the host can always drop the owned key; a
+		// non-canonically-spelled stored key is a host-contract limitation outside
+		// this plugin's control and cannot be produced by the real HTTP stack.
+		resp.ClearHeaders = matchedKeys
+		resp.Headers = filteredHeaders(req.Headers, matchedKeys)
+	}
+
 	format := normalizeSourceFormat(req.SourceFormat)
-	debugLog("handleRequestInterceptBefore: SourceFormat=%s (normalized=%s) ToFormat=%q Model=%q RequestedModel=%q Body=%s", req.SourceFormat, format, req.ToFormat, req.Model, req.RequestedModel, string(req.Body))
+	debugLog("handleRequestInterceptBefore: SourceFormat=%s (normalized=%s) ToFormat=%q Model=%q RequestedModel=%q explicitClient=%q valid=%t Body=%s", req.SourceFormat, format, req.ToFormat, req.Model, req.RequestedModel, explicitClient, explicitValid, string(req.Body))
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleRequestInterceptBefore: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
-		return mustEnvelope(pluginapi.RequestInterceptResponse{})
+		return mustEnvelope(resp)
 	}
-	body, rewritten, client := rewriteRequestBodyWithClient(req.Body, format)
+
+	// Precedence: valid explicit owned header > verified positive UA evidence
+	// > existing body Client Gate. An invalid explicit value bypasses UA and
+	// falls directly to body classification so a weaker signal cannot hide
+	// operator misconfiguration.
+	forcedClient := ""
+	if explicitPresent {
+		if explicitValid {
+			forcedClient = explicitClient
+		} else {
+			debugLog("handleRequestInterceptBefore: invalid explicit client %q, falling back to body detection", explicitClient)
+		}
+	} else if uaClient, ok := resolveUserAgentClient(req.Headers); ok {
+		forcedClient = uaClient
+		debugLog("handleRequestInterceptBefore: UA evidence client=%q", uaClient)
+	}
+	body, rewritten, client := rewriteRequestBodyWithClient(req.Body, format, forcedClient)
 	debugLog("handleRequestInterceptBefore: rewritten=%t client=%s Body=%s", rewritten, client, string(body))
-	if client != "" && req.RequestID != "" {
-		cached := activeFilterConfig().uncloakRegexCache[client]
-		if cached != nil && cached.re != nil {
-			globalStreamManager.resetSession("req:"+req.RequestID, client, cached)
+	if req.RequestID != "" {
+		if client != "" {
+			cached := activeFilterConfig().uncloakRegexCache[client]
+			if cached != nil && cached.re != nil {
+				globalStreamManager.resetSession("req:"+req.RequestID, client, cached, requestChoiceCount(req.Body))
+			}
+		} else if explicitPresent && !explicitValid {
+			// Precedence ran to completion with UA suppressed and the body
+			// classifying nothing: record the authoritative negative so the
+			// response/stream paths cannot re-infer a weaker client from the
+			// surviving User-Agent after this interceptor consumed the header.
+			debugLog("handleRequestInterceptBefore: negative client resolution recorded for RequestID=%s", req.RequestID)
+			globalStreamManager.resetSession("req:"+req.RequestID, negativeClientResolution, nil, requestChoiceCount(req.Body))
 		}
 	}
 	if !rewritten {
-		return mustEnvelope(pluginapi.RequestInterceptResponse{})
+		return mustEnvelope(resp)
 	}
-	return mustEnvelope(pluginapi.RequestInterceptResponse{Body: body})
+	resp.Body = body
+	return mustEnvelope(resp)
 }
 
 func handleResponseIntercept(request []byte) []byte {
@@ -327,21 +395,55 @@ func handleResponseIntercept(request []byte) []byte {
 		debugLog("handleResponseIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
+	var client string
 	var uncloakTable map[string]string
+	correlated := false
 	if req.RequestID != "" {
-		if client := globalStreamManager.getClient("req:" + req.RequestID); client != "" {
-			uncloakTable = effectiveUncloakTable(client)
+		if c := globalStreamManager.getClient("req:" + req.RequestID); c != "" {
+			correlated = true
+			if c != negativeClientResolution {
+				client = c
+				uncloakTable = effectiveUncloakTable(c)
+			}
 		}
 	}
-	if uncloakTable == nil {
-		uncloakTable, _ = buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+	// Weaker-evidence recovery runs only when request-time correlation is
+	// genuinely unavailable; a recorded negative resolution suppresses it.
+	if !correlated && uncloakTable == nil {
+		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
+			uncloakTable = effectiveUncloakTable(uaClient)
+			if client == "" {
+				client = uaClient
+			}
+			debugLog("handleResponseIntercept: UA evidence client=%q", uaClient)
+		}
 	}
-	debugLog("handleResponseIntercept: uncloakTable=%v", uncloakTable)
-	if uncloakTable == nil {
+	if !correlated && uncloakTable == nil {
+		var detectedClient string
+		uncloakTable, detectedClient = buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+		if client == "" {
+			client = detectedClient
+		}
+	}
+	debugLog("handleResponseIntercept: client=%s uncloakTable=%v", client, uncloakTable)
+	if uncloakTable == nil && client != "oh_my_pi" {
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
 
-	modified, changed := uncloakResponseBody(req.Body, uncloakTable, format)
+	modified := req.Body
+	changed := false
+	if uncloakTable != nil {
+		if m, c := uncloakResponseBody(req.Body, uncloakTable, format); c {
+			modified = m
+			changed = true
+		}
+	}
+	if client == "oh_my_pi" {
+		if rev, c := reverseBrandInResponseBody(modified, format); c {
+			modified = rev
+			changed = true
+		}
+	}
 	debugLog("handleResponseIntercept: changed=%t Body=%s", changed, string(modified))
 	if !changed {
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
@@ -402,6 +504,7 @@ func detectionRequestBody(originalRequest, requestBody []byte) []byte {
 	}
 	return requestBody
 }
+
 // splitToolNamespace separates an optional namespace prefix (e.g. "functions:", "default_api:")
 // from the base tool name. It returns (prefix, baseName). If no prefix is present, it returns ("", name).
 func splitToolNamespace(name string) (string, string) {
@@ -465,6 +568,134 @@ func uncloakResponseBody(body []byte, uncloakTable map[string]string, sourceForm
 	return raw, true
 }
 
+func reverseBrandInResponseBody(body []byte, format string) ([]byte, bool) {
+	var root any
+	if err := safeUnmarshal(body, &root); err != nil {
+		return nil, false
+	}
+	if !reverseAssistantBrandInJSON(root, format) {
+		return nil, false
+	}
+	raw, err := safeMarshal(root)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+func reverseAssistantBrandInJSON(root any, format string) bool {
+	changed := false
+	switch format {
+	case "openai":
+		m, ok := root.(map[string]any)
+		if !ok {
+			return false
+		}
+		choices, ok := m["choices"].([]any)
+		if !ok {
+			return false
+		}
+		for _, chRaw := range choices {
+			ch, ok := chRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if msg, ok := ch["message"].(map[string]any); ok {
+				if content, exists := msg["content"]; exists {
+					if next, c := reverseBrandInOpenAIContent(content); c {
+						msg["content"] = next
+						changed = true
+					}
+				}
+			}
+			if delta, ok := ch["delta"].(map[string]any); ok {
+				if content, exists := delta["content"]; exists {
+					if next, c := reverseBrandInOpenAIContent(content); c {
+						delta["content"] = next
+						changed = true
+					}
+				}
+			}
+		}
+	case "anthropic":
+		m, ok := root.(map[string]any)
+		if !ok {
+			return false
+		}
+		contentArr, ok := m["content"].([]any)
+		if !ok {
+			return false
+		}
+		for _, blockRaw := range contentArr {
+			block, ok := blockRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if block["type"] != "text" {
+				continue
+			}
+			if txt, ok := block["text"].(string); ok {
+				if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
+					block["text"] = next
+					changed = true
+				}
+			}
+		}
+	}
+	return changed
+}
+// isAssistantTextPartType reports whether an OpenAI content part type is
+// assistant-visible text. The allowlist is text, output_text, and untyped
+// (empty) parts; data/control/tool/reasoning/refusal parts keep literal
+// Antigravity. All reverse-brand content paths share this predicate (Issue #21).
+func isAssistantTextPartType(typ string) bool {
+	return typ == "text" || typ == "output_text" || typ == ""
+}
+
+func reverseBrandInOpenAIContent(content any) (any, bool) {
+	switch v := content.(type) {
+	case string:
+		return replaceInsensitive(v, reverseBrandMatch, reverseBrandReplacement)
+	case []any:
+		changed := false
+		for _, partRaw := range v {
+			if part, ok := partRaw.(map[string]any); ok {
+				if typ, _ := part["type"].(string); !isAssistantTextPartType(typ) {
+					continue
+				}
+				if txt, ok := part["text"].(string); ok {
+					if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
+						part["text"] = next
+						changed = true
+					}
+				}
+			} else if s, ok := partRaw.(string); ok {
+				if next, c := replaceInsensitive(s, reverseBrandMatch, reverseBrandReplacement); c {
+					for i, elem := range v {
+						if elem == partRaw {
+							v[i] = next
+							changed = true
+							break
+						}
+					}
+				}
+			}
+		}
+		return v, changed
+	case map[string]any:
+		if typ, _ := v["type"].(string); !isAssistantTextPartType(typ) {
+			return content, false
+		}
+		if txt, ok := v["text"].(string); ok {
+			if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
+				v["text"] = next
+				return v, true
+			}
+		}
+	}
+	return content, false
+}
+
 // uncloakStreamChunk uses pre-compiled regex to replace tool names directly in
 // raw SSE bytes. Callers MUST pass complete SSE events (assembled by the event
 // reassembly buffer) to guarantee that tool names are never split across calls.
@@ -512,6 +743,752 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 	return []byte(buf.String()), true
 }
 
+func (m *streamSessionManager) reverseBrandSSE(sess *streamSession, sseBytes []byte, format string) ([]byte, bool) {
+	if sess == nil || sess.client != "oh_my_pi" {
+		return nil, false
+	}
+	isDone := bytes.Contains(sseBytes, []byte("data: [DONE]")) || bytes.Contains(sseBytes, []byte("data:[DONE]"))
+	events := splitSSEEventsForBrand(sseBytes)
+	var out bytes.Buffer
+	changedOverall := false
+	for _, ev := range events {
+		trimmed := bytes.TrimSpace(ev)
+		isDoneEvent := bytes.HasPrefix(trimmed, []byte("data: [DONE]")) || bytes.HasPrefix(trimmed, []byte("data:[DONE]")) || (bytes.Contains(trimmed, []byte("[DONE]")) && bytes.HasPrefix(trimmed, []byte("data:")))
+		if isDoneEvent {
+			if isDone {
+				flushEvents := m.generateBrandFlushEvents(sess, format)
+				for _, fe := range flushEvents {
+					out.Write(fe)
+					changedOverall = true
+				}
+			}
+			out.Write(ev)
+			continue
+		}
+		// Anthropic native termination: flush pending carry before the
+		// terminal control event using a protocol-valid assistant text delta
+		// that preserves lane identity. content_block_stop flushes its block
+		// lane; message_stop flushes all remaining lanes. The session must
+		// not be deleted before this carry is delivered (Issue #21).
+		if format == "anthropic" {
+			if kind, laneKey := sseAnthropicTerminalKind(ev); kind != "" {
+				var flushEvents [][]byte
+				if kind == "content_block_stop" {
+					flushEvents = m.generateBrandFlushEventsFiltered(sess, format, []string{laneKey})
+				} else { // message_stop
+					flushEvents = m.generateBrandFlushEvents(sess, format)
+				}
+				for _, fe := range flushEvents {
+					out.Write(fe)
+					changedOverall = true
+				}
+			}
+		}
+		modifiedEv, changed := m.reverseBrandSingleSSEEvent(sess, ev, format, false)
+		if changed {
+			out.Write(modifiedEv)
+			changedOverall = true
+		} else {
+			out.Write(ev)
+		}
+	}
+	return out.Bytes(), changedOverall
+}
+
+func splitSSEEventsForBrand(data []byte) [][]byte {
+	var events [][]byte
+	start := 0
+	for i := 0; i < len(data); {
+		idx1 := bytes.Index(data[i:], []byte("\n\n"))
+		idx2 := bytes.Index(data[i:], []byte("\r\n\r\n"))
+		var idx int
+		var blen int
+		if idx1 >= 0 && idx2 >= 0 {
+			if idx1 < idx2 {
+				idx = idx1
+				blen = 2
+			} else {
+				idx = idx2
+				blen = 4
+			}
+		} else if idx1 >= 0 {
+			idx = idx1
+			blen = 2
+		} else if idx2 >= 0 {
+			idx = idx2
+			blen = 4
+		} else {
+			events = append(events, data[start:])
+			break
+		}
+		end := i + idx + blen
+		events = append(events, data[start:end])
+		start = end
+		i = end
+	}
+	return events
+}
+
+func (m *streamSessionManager) reverseBrandSingleSSEEvent(sess *streamSession, ev []byte, format string, isFinal bool) ([]byte, bool) {
+	evStr := string(ev)
+	lines := strings.Split(strings.ReplaceAll(evStr, "\r\n", "\n"), "\n")
+	changed := false
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var dataMap map[string]any
+		if err := safeUnmarshal([]byte(payload), &dataMap); err != nil {
+			continue
+		}
+		didChange := false
+		if format == "openai" {
+			didChange = m.reverseBrandOpenAIStreamingMap(dataMap, sess, isFinal)
+		} else if format == "anthropic" {
+			didChange = m.reverseBrandAnthropicStreamingMap(dataMap, sess, isFinal)
+		}
+		if didChange {
+			newPayload, err := safeMarshal(dataMap)
+			if err == nil {
+				lines[i] = "data: " + string(newPayload)
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return ev, false
+	}
+	rebuilt := strings.Join(lines, "\n")
+	if !strings.HasSuffix(rebuilt, "\n\n") {
+		if strings.HasSuffix(evStr, "\r\n\r\n") {
+			rebuilt += "\r\n"
+		}
+		if !strings.HasSuffix(rebuilt, "\n\n") {
+			if strings.HasSuffix(rebuilt, "\n") {
+				rebuilt += "\n"
+			} else {
+				rebuilt += "\n\n"
+			}
+		}
+	}
+	return []byte(rebuilt), true
+}
+
+func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]any, sess *streamSession, isFinal bool) bool {
+	choices, ok := data["choices"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, chRaw := range choices {
+		ch, ok := chRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		laneKey := openAIChoiceLaneKey(ch)
+		lane := getBrandLane(sess, laneKey)
+		var delta map[string]any
+		if d, ok := ch["delta"].(map[string]any); ok {
+			delta = d
+		} else if d, ok := ch["message"].(map[string]any); ok {
+			delta = d
+		}
+		if delta == nil {
+			continue
+		}
+		if content, exists := delta["content"]; exists {
+			switch v := content.(type) {
+			case string:
+				newStr, _ := applyBrandLane(v, lane, isFinal)
+				if newStr != v {
+					delta["content"] = newStr
+					changed = true
+				}
+			case []any:
+				c2 := false
+				for _, partRaw := range v {
+					if part, ok := partRaw.(map[string]any); ok {
+						if typ, _ := part["type"].(string); !isAssistantTextPartType(typ) {
+							continue
+						}
+						if txt, ok := part["text"].(string); ok {
+							newTxt, _ := applyBrandLane(txt, lane, isFinal)
+							if newTxt != txt {
+								part["text"] = newTxt
+								c2 = true
+							}
+						}
+					} else if s, ok := partRaw.(string); ok {
+						newStr, _ := applyBrandLane(s, lane, isFinal)
+						if newStr != s {
+							for i, elem := range v {
+								if elem == partRaw {
+									v[i] = newStr
+									c2 = true
+									break
+								}
+							}
+						}
+					}
+				}
+				if c2 {
+					changed = true
+				}
+			case map[string]any:
+				if typ, _ := v["type"].(string); isAssistantTextPartType(typ) {
+					if txt, ok := v["text"].(string); ok {
+						newTxt, _ := applyBrandLane(txt, lane, isFinal)
+						if newTxt != txt {
+							v["text"] = newTxt
+							changed = true
+						}
+					}
+				}
+			}
+		}
+	}
+	return changed
+}
+
+func (m *streamSessionManager) reverseBrandAnthropicStreamingMap(data map[string]any, sess *streamSession, isFinal bool) bool {
+	idxVal, hasIdx := data["index"]
+	laneKey := "anthropic:0"
+	if hasIdx {
+		switch v := idxVal.(type) {
+		case json.Number:
+			if i, err := v.Int64(); err == nil {
+				laneKey = fmt.Sprintf("anthropic:%d", i)
+			}
+		case float64:
+			laneKey = fmt.Sprintf("anthropic:%d", int(v))
+		case int:
+			laneKey = fmt.Sprintf("anthropic:%d", v)
+		default:
+			laneKey = fmt.Sprintf("anthropic:%v", v)
+		}
+	}
+	lane := getBrandLane(sess, laneKey)
+	typ, _ := data["type"].(string)
+	switch typ {
+	case "content_block_start":
+		cb, ok := data["content_block"].(map[string]any)
+		if !ok {
+			return false
+		}
+		if cb["type"] != "text" {
+			return false
+		}
+		if txt, ok := cb["text"].(string); ok {
+			newTxt, _ := applyBrandLane(txt, lane, isFinal)
+			if newTxt != txt {
+				cb["text"] = newTxt
+				return true
+			}
+		}
+	case "content_block_delta":
+		delta, ok := data["delta"].(map[string]any)
+		if !ok {
+			return false
+		}
+		if delta["type"] != "text_delta" {
+			return false
+		}
+		if txt, ok := delta["text"].(string); ok {
+			newTxt, _ := applyBrandLane(txt, lane, isFinal)
+			if newTxt != txt {
+				delta["text"] = newTxt
+				return true
+			}
+		}
+	default:
+		if delta, ok := data["delta"].(map[string]any); ok {
+			if delta["type"] == "text_delta" {
+				if txt, ok := delta["text"].(string); ok {
+					newTxt, _ := applyBrandLane(txt, lane, isFinal)
+					if newTxt != txt {
+						delta["text"] = newTxt
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+type brandFlush struct {
+	key  string
+	text string
+}
+
+// laneIndexNum parses the numeric lane index from a "format:N" carry key.
+func laneIndexNum(key string) (int, bool) {
+	i := strings.LastIndexByte(key, ':')
+	if i < 0 {
+		return 0, false
+	}
+	n, err := strconv.Atoi(key[i+1:])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// orderedBrandFlushes resolves the final text of every held carry in
+// deterministic lane order: numeric lane indices ascending, non-numeric lanes
+// last, tie-broken by key. Go map iteration would otherwise randomise the
+// cross-lane flush sequence; Issue #18 requires stable event/lane ordering
+// while keeping distinct indexed lanes isolated. This does not mutate lane
+// state — callers drain only once the flushed text is safely delivered.
+func orderedBrandFlushes(sess *streamSession) []brandFlush {
+	keys := make([]string, 0, len(sess.brandCarries))
+	for k, lane := range sess.brandCarries {
+		if lane == nil || lane.carry == "" {
+			continue
+		}
+		keys = append(keys, k)
+	}
+	sort.SliceStable(keys, func(i, j int) bool {
+		ni, okI := laneIndexNum(keys[i])
+		nj, okJ := laneIndexNum(keys[j])
+		if okI != okJ {
+			return okI
+		}
+		if ni != nj {
+			return ni < nj
+		}
+		return keys[i] < keys[j]
+	})
+	flushes := make([]brandFlush, 0, len(keys))
+	for _, k := range keys {
+		lane := sess.brandCarries[k]
+		finalOut, _ := replaceInsensitiveWithPrev(lane.carry, lane.lastIsWord, reverseBrandMatch, reverseBrandReplacement)
+		if finalOut == "" {
+			finalOut = lane.carry
+		}
+		if finalOut == "" {
+			continue
+		}
+		flushes = append(flushes, brandFlush{key: k, text: finalOut})
+	}
+	return flushes
+}
+
+func drainBrandFlushes(sess *streamSession, flushes []brandFlush) {
+	for _, f := range flushes {
+		lane := sess.brandCarries[f.key]
+		if lane == nil {
+			continue
+		}
+		lane.carry = ""
+		lane.lastIsWord = isWordByte(f.text[len(f.text)-1])
+	}
+}
+
+func (m *streamSessionManager) generateBrandFlushEvents(sess *streamSession, format string) [][]byte {
+	return m.generateBrandFlushEventsFiltered(sess, format, nil)
+}
+func hasPendingBrandCarry(sess *streamSession) bool {
+	if sess == nil {
+		return false
+	}
+	for _, lane := range sess.brandCarries {
+		if lane != nil && lane.carry != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// anthropicTerminalKindFromMap reports whether an Anthropic data map is part
+// of the native terminal lifecycle. Returns kind "content_block_stop" (with
+// lane key) or "message_stop", or "" if not terminal.
+func anthropicTerminalKindFromMap(m map[string]any) (kind, laneKey string) {
+	t, _ := m["type"].(string)
+	switch t {
+	case "content_block_stop":
+		idx := 0
+		if v, ok := m["index"]; ok {
+			if n, ok := jsonIndexValue(v); ok {
+				idx = n
+			} else if f, ok := v.(float64); ok {
+				idx = int(f)
+			} else if i, ok := v.(int); ok {
+				idx = i
+			}
+		}
+		return "content_block_stop", fmt.Sprintf("anthropic:%d", idx)
+	case "message_stop":
+		return "message_stop", ""
+	default:
+		return "", ""
+	}
+}
+
+// sseAnthropicTerminalKind scans raw SSE bytes for an Anthropic terminal
+// control event. Returns kind and laneKey (only for content_block_stop).
+func sseAnthropicTerminalKind(ev []byte) (kind, laneKey string) {
+	s := string(ev)
+	// Split into lines handling both \n and \r\n.
+	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		var m map[string]any
+		if err := safeUnmarshal([]byte(payload), &m); err != nil {
+			continue
+		}
+		if k, lk := anthropicTerminalKindFromMap(m); k != "" {
+			return k, lk
+		}
+	}
+	return "", ""
+}
+
+func sseContainsAnthropicMessageStop(sse []byte) bool {
+	for _, ev := range splitSSEEventsForBrand(sse) {
+		if k, _ := sseAnthropicTerminalKind(ev); k == "message_stop" {
+			return true
+		}
+	}
+	return false
+}
+
+// generateBrandFlushEventsFiltered emits pending carries filtered to only the
+// given lane keys (nil means all), draining each flushed lane. Preserves the
+// deterministic lane ordering of orderedBrandFlushes.
+func (m *streamSessionManager) generateBrandFlushEventsFiltered(sess *streamSession, format string, only []string) [][]byte {
+	flushes := orderedBrandFlushes(sess)
+	if only != nil {
+		filtered := flushes[:0]
+		for _, f := range flushes {
+			for _, k := range only {
+				if f.key == k {
+					filtered = append(filtered, f)
+					break
+				}
+			}
+		}
+		flushes = filtered
+	}
+	if len(flushes) == 0 {
+		return nil
+	}
+	drainBrandFlushes(sess, flushes)
+	var out [][]byte
+	for _, f := range flushes {
+		idx, _ := laneIndexNum(f.key)
+		var ev []byte
+		if format == "openai" {
+			dataMap := map[string]any{
+				"choices": []any{
+					map[string]any{
+						"index": idx,
+						"delta": map[string]any{
+							"content": f.text,
+						},
+					},
+				},
+			}
+			jb, _ := safeMarshal(dataMap)
+			ev = []byte("data: " + string(jb) + "\n\n")
+		} else if format == "anthropic" {
+			dataMap := map[string]any{
+				"type":  "content_block_delta",
+				"index": idx,
+				"delta": map[string]any{
+					"type": "text_delta",
+					"text": f.text,
+				},
+			}
+			jb, _ := safeMarshal(dataMap)
+			ev = []byte("data: " + string(jb) + "\n\n")
+		} else {
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+// markStandaloneFinishes records the choices a standalone (non-SSE) chunk
+// finished: a non-null finish_reason ends ONLY its own choice lane, never the
+// whole stream (with n > 1 other choices keep streaming). It reports the lanes
+// finished by this chunk and whether the stream as a whole is done: a global
+// terminal payload (bare [DONE] or Anthropic message_stop), or finish_reasons
+// covering every expected choice lane.
+func markStandaloneFinishes(sess *streamSession, body []byte) (finished []string, done bool) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, false
+	}
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return nil, true
+	}
+	var root map[string]any
+	if err := safeUnmarshal(trimmed, &root); err != nil || root == nil {
+		return nil, false
+	}
+	if t, _ := root["type"].(string); t == "message_stop" {
+		return nil, true
+	}
+	if kind, laneKey := anthropicTerminalKindFromMap(root); kind == "content_block_stop" {
+		return []string{laneKey}, false
+	}
+	choices, _ := root["choices"].([]any)
+	for _, chRaw := range choices {
+		ch, ok := chRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if fr, has := ch["finish_reason"]; has && fr != nil {
+			laneKey := openAIChoiceLaneKey(ch)
+			getBrandLane(sess, laneKey).finished = true
+			finished = append(finished, laneKey)
+		}
+	}
+	if len(finished) == 0 || len(sess.brandCarries) < sess.expected {
+		return finished, false
+	}
+	for _, lane := range sess.brandCarries {
+		if !lane.finished {
+			return finished, false
+		}
+	}
+	return finished, true
+}
+
+// openAIChoiceLaneKey derives the brand lane key for a choice map, matching
+// the keys produced by reverseBrandOpenAIStreamingMap.
+func openAIChoiceLaneKey(ch map[string]any) string {
+	if idxVal, ok := ch["index"]; ok {
+		if n, ok := jsonIndexValue(idxVal); ok {
+			return fmt.Sprintf("openai:%d", n)
+		}
+		return fmt.Sprintf("openai:%v", idxVal)
+	}
+	return "openai:0"
+}
+
+// requestChoiceCount reads the OpenAI "n" (choices per completion) from a
+// request body; absent/invalid means 1.
+func requestChoiceCount(body []byte) int {
+	var root map[string]any
+	if err := safeUnmarshal(body, &root); err != nil || root == nil {
+		return 1
+	}
+	if n, ok := jsonIndexValue(root["n"]); ok && n > 1 {
+		return n
+	}
+	return 1
+}
+
+func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []byte, format string, only []string) ([]byte, bool) {
+	if sess == nil || sess.client != "oh_my_pi" || len(sess.brandCarries) == 0 {
+		return nil, false
+	}
+	var root map[string]any
+	trimmed := bytes.TrimSpace(body)
+	bareDone := bytes.Equal(trimmed, []byte("[DONE]"))
+	if err := safeUnmarshal(body, &root); err != nil || root == nil {
+		if !bareDone {
+			return nil, false
+		}
+		root = map[string]any{}
+	}
+	flushes := orderedBrandFlushes(sess)
+	if only != nil {
+		selected := flushes[:0:0]
+		for _, f := range flushes {
+			for _, k := range only {
+				if k == f.key {
+					selected = append(selected, f)
+					break
+				}
+			}
+		}
+		flushes = selected
+	}
+	if len(flushes) == 0 {
+		return nil, false
+	}
+	var merged bool
+	switch format {
+	case "openai":
+		merged = mergeOpenAIStandaloneFlush(root, flushes)
+	case "anthropic":
+		merged = mergeAnthropicStandaloneFlush(root, flushes)
+	}
+	if !merged {
+		if format == "anthropic" {
+			if t, _ := root["type"].(string); t == "message_stop" || t == "content_block_stop" {
+				if len(flushes) > 0 {
+					var buf bytes.Buffer
+					for i, f := range flushes {
+						idx, _ := laneIndexNum(f.key)
+						dataMap := map[string]any{
+							"type":  "content_block_delta",
+							"index": idx,
+							"delta": map[string]any{
+								"type": "text_delta",
+								"text": f.text,
+							},
+						}
+						jb, _ := safeMarshal(dataMap)
+						if i > 0 {
+							buf.WriteString("\n\n")
+						}
+						buf.WriteString("data: ")
+						buf.Write(jb)
+					}
+					buf.WriteString("\n\ndata: ")
+					buf.Write(trimmed)
+					drainBrandFlushes(sess, flushes)
+					return buf.Bytes(), true
+				}
+			}
+		}
+		return nil, false
+	}
+	drainBrandFlushes(sess, flushes)
+	raw, err := safeMarshal(root)
+	if err != nil {
+		return nil, false
+	}
+	if bareDone {
+		// The host frames the whole payload as one SSE data line, so keep
+		// the terminal marker as its own event after the flush content.
+		return append(raw, []byte("\n\ndata: [DONE]")...), true
+	}
+	return raw, true
+}
+
+func mergeOpenAIStandaloneFlush(root map[string]any, flushes []brandFlush) bool {
+	choices, _ := root["choices"].([]any)
+	for _, f := range flushes {
+		idx, ok := laneIndexNum(f.key)
+		if !ok {
+			idx = 0
+		}
+		target := openAIChoiceAt(choices, idx)
+		if target == nil {
+			target = map[string]any{"index": idx}
+			choices = append(choices, target)
+		}
+		delta, _ := target["delta"].(map[string]any)
+		if delta == nil {
+			if msg, ok := target["message"].(map[string]any); ok {
+				delta = msg
+			} else {
+				delta = map[string]any{}
+				target["delta"] = delta
+			}
+		}
+		if s, ok := delta["content"].(string); ok {
+			delta["content"] = s + f.text
+		} else {
+			delta["content"] = f.text
+		}
+	}
+	root["choices"] = choices
+	return true
+}
+
+func openAIChoiceAt(choices []any, idx int) map[string]any {
+	for _, chRaw := range choices {
+		ch, ok := chRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		ci := 0
+		if v, has := ch["index"]; has {
+			if n, ok := jsonIndexValue(v); ok {
+				ci = n
+			}
+		}
+		if ci == idx {
+			return ch
+		}
+	}
+	return nil
+}
+
+// jsonIndexValue reads an integer lane index from a safeUnmarshal-produced
+// value (UseNumber guarantees json.Number for every JSON number).
+func jsonIndexValue(v any) (int, bool) {
+	n, ok := v.(json.Number)
+	if !ok {
+		return 0, false
+	}
+	i, err := n.Int64()
+	return int(i), err == nil
+}
+
+func mergeAnthropicStandaloneFlush(root map[string]any, flushes []brandFlush) bool {
+	if len(flushes) != 1 {
+		return false
+	}
+	delta, ok := root["delta"].(map[string]any)
+	if !ok {
+		return false
+	}
+	txt, ok := delta["text"].(string)
+	if !ok {
+		return false
+	}
+	delta["text"] = txt + flushes[0].text
+	return true
+}
+
+func (m *streamSessionManager) reverseBrandStandalone(sess *streamSession, body []byte, format string) ([]byte, bool) {
+	if sess == nil {
+		return nil, false
+	}
+	if sess.client != "oh_my_pi" {
+		return nil, false
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, false
+	}
+	if bytes.Equal(trimmed, []byte("[DONE]")) {
+		return nil, false
+	}
+	var root map[string]any
+	if err := safeUnmarshal(body, &root); err != nil {
+		return nil, false
+	}
+	changed := false
+	if format == "openai" {
+		changed = m.reverseBrandOpenAIStreamingMap(root, sess, false)
+	} else if format == "anthropic" {
+		if _, ok := root["delta"]; ok || root["type"] == "content_block_delta" || root["type"] == "content_block_start" {
+			changed = m.reverseBrandAnthropicStreamingMap(root, sess, false)
+		} else {
+			changed = m.reverseBrandOpenAIStreamingMap(root, sess, false)
+		}
+	}
+	if !changed {
+		return nil, false
+	}
+	raw, err := safeMarshal(root)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
 // ── Stream Session Manager & SSE Event Reassembly ────────────────────────
 //
 // Handles the "Split-String Chunk" attack: TCP can split a network chunk
@@ -535,12 +1512,30 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 // stream's state overwrite another's (cross-stream corruption), so such
 // chunks pass through unmolested instead of being buffered.
 
-type streamSession struct {
-	client    string
-	cached    *cachedUncloakPattern
-	tail      []byte
-	updatedAt time.Time
+type brandLane struct {
+	carry      string
+	lastIsWord bool
+	// finished marks the lane's choice as ended by a non-null
+	// finish_reason on the standalone path; the whole session is freed
+	// only once every expected lane is finished.
+	finished bool
 }
+
+type streamSession struct {
+	client       string
+	cached       *cachedUncloakPattern
+	tail         []byte
+	updatedAt    time.Time
+	brandCarries map[string]*brandLane
+	// expected is the request's OpenAI "n" (choices per completion),
+	// minimum 1; gates standalone stream-end detection.
+	expected int
+}
+
+const (
+	reverseBrandMatch       = "Antigravity"
+	reverseBrandReplacement = "omp"
+)
 
 type streamSessionManager struct {
 	mu       sync.Mutex
@@ -598,14 +1593,25 @@ func (m *streamSessionManager) sessionKey(req *pluginapi.StreamChunkInterceptReq
 
 // resetSession (re)initializes the session for a fresh stream start, clearing
 // any stale tail left by an aborted previous incarnation of the same key.
-func (m *streamSessionManager) resetSession(key, client string, cached *cachedUncloakPattern) {
+// expected is the request's choice count ("n"); omitted means 1.
+func (m *streamSessionManager) resetSession(key, client string, cached *cachedUncloakPattern, expected ...int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.cleanupStaleLocked()
-	m.sessions[key] = &streamSession{
-		client:    client,
-		cached:    cached,
-		updatedAt: time.Now(),
+	m.sessions[key] = newStreamSession(client, cached, expected...)
+}
+
+func newStreamSession(client string, cached *cachedUncloakPattern, expected ...int) *streamSession {
+	n := 1
+	if len(expected) > 0 && expected[0] > 1 {
+		n = expected[0]
+	}
+	return &streamSession{
+		client:       client,
+		cached:       cached,
+		updatedAt:    time.Now(),
+		brandCarries: make(map[string]*brandLane),
+		expected:     n,
 	}
 }
 
@@ -613,17 +1619,13 @@ func (m *streamSessionManager) resetSession(key, client string, cached *cachedUn
 // Losing a race to an already-registered session returns the incumbent;
 // both racers derive (client, cached) from the same request body, so either
 // outcome is correct.
-func (m *streamSessionManager) ensureSession(key, client string, cached *cachedUncloakPattern) *streamSession {
+func (m *streamSessionManager) ensureSession(key, client string, cached *cachedUncloakPattern, expected ...int) *streamSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if sess := m.sessions[key]; sess != nil {
 		return sess
 	}
-	sess := &streamSession{
-		client:    client,
-		cached:    cached,
-		updatedAt: time.Now(),
-	}
+	sess := newStreamSession(client, cached, expected...)
 	m.sessions[key] = sess
 	return sess
 }
@@ -672,12 +1674,21 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			debugLog("StreamSessionManager: header-init using pre-registered session key=%s client=%s", key, sessClient)
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
-		_, client := buildUncloakTable(detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+		detectSrc := detectionRequestBody(req.OriginalRequest, req.RequestBody)
+		n := requestChoiceCount(detectSrc)
+		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
+			debugLog("StreamSessionManager: header-init UA evidence key=%s client=%s", key, uaClient)
+			if cached := activeFilterConfig().uncloakRegexCache[uaClient]; cached != nil && cached.re != nil {
+				m.resetSession(key, uaClient, cached, n)
+			}
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
+		_, client := buildUncloakTable(detectSrc, format)
 		debugLog("StreamSessionManager: header-init key=%s client=%s", key, client)
 		if client != "" {
 			cached := activeFilterConfig().uncloakRegexCache[client]
 			if cached != nil && cached.re != nil {
-				m.resetSession(key, client, cached)
+				m.resetSession(key, client, cached, n)
 			}
 		}
 		return pluginapi.StreamChunkInterceptResponse{}
@@ -737,13 +1748,50 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		if !changed {
 			modified = completeEvents
 		}
-
-		// Cleanup session if stream reached [DONE]
-		if bytes.Contains(completeEvents, []byte("data: [DONE]")) {
-			m.deleteSession(key)
+		brandChanged := false
+		if sess.client == "oh_my_pi" {
+			if bm, bc := m.reverseBrandSSE(sess, modified, format); bc {
+				modified = bm
+				brandChanged = true
+			} else if bm != nil && !bytes.Equal(bm, modified) {
+				modified = bm
+				brandChanged = true
+			}
 		}
-
-		if bytes.Equal(modified, req.Body) {
+		overallChanged := changed || brandChanged
+		isDone := bytes.Contains(completeEvents, []byte("data: [DONE]")) || bytes.Contains(modified, []byte("data: [DONE]"))
+		isAnthropicEnd := format == "anthropic" && (sseContainsAnthropicMessageStop(completeEvents) || sseContainsAnthropicMessageStop(modified))
+		if isDone || isAnthropicEnd {
+			if isDone && sess.client == "oh_my_pi" {
+				// Safety net for [DONE] embedded in a multi-line event that
+				// reverseBrandSSE's per-event check misses. generateBrandFlushEvents
+				// drains each lane as it emits, so the common case (flush events
+				// already written before the [DONE] frame) is a no-op here — no
+				// double emission.
+				if flush := m.generateBrandFlushEvents(sess, format); len(flush) > 0 {
+					doneIdx := bytes.Index(modified, []byte("data: [DONE]"))
+					var tmp bytes.Buffer
+					if doneIdx >= 0 {
+						tmp.Write(modified[:doneIdx])
+						for _, fe := range flush {
+							tmp.Write(fe)
+						}
+						tmp.Write(modified[doneIdx:])
+					} else {
+						for _, fe := range flush {
+							tmp.Write(fe)
+						}
+						tmp.Write(modified)
+					}
+					modified = tmp.Bytes()
+					overallChanged = true
+				}
+			}
+			if !hasPendingBrandCarry(sess) {
+				m.deleteSession(key)
+			}
+		}
+		if !overallChanged {
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
 		return pluginapi.StreamChunkInterceptResponse{Body: modified}
@@ -756,7 +1804,37 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 
 	modified, changed := uncloakStreamChunk(req.Body, cached)
 	if !changed {
-		return pluginapi.StreamChunkInterceptResponse{}
+		modified = req.Body
+	}
+	if sess.client == "oh_my_pi" {
+		if bm, bc := m.reverseBrandStandalone(sess, modified, format); bc {
+			modified = bm
+			changed = true
+		}
+		// A non-null finish_reason ends ONLY its own choice lane: flush that
+		// lane's held carry into this chunk. The session is freed — and every
+		// remaining carry flushed — only at true stream completion (bare
+		// [DONE], message_stop, or finish_reasons covering every expected
+		// lane); unfinished lanes keep streaming.
+		finished, done := markStandaloneFinishes(sess, modified)
+		if done || len(finished) > 0 {
+			only := finished
+			if done {
+				only = nil
+			}
+			if bm, fc := m.flushBrandStandalone(sess, modified, format, only); fc {
+				modified = bm
+				changed = true
+			}
+		}
+		if done && !hasPendingBrandCarry(sess) {
+			m.deleteSession(key)
+		}
+	}
+	if !changed {
+		if bytes.Equal(modified, req.Body) {
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
 	}
 	return pluginapi.StreamChunkInterceptResponse{Body: modified}
 }
@@ -767,8 +1845,18 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 // deliberately runs WITHOUT holding the manager lock: parsing a large request
 // body under the lock serialized every concurrent stream's chunk processing.
 func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkInterceptRequest, format, key string) *streamSession {
+	if key == "" {
+		return nil
+	}
 	src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
-	if len(src) == 0 || key == "" {
+	n := requestChoiceCount(src)
+	if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
+		if cached := activeFilterConfig().uncloakRegexCache[uaClient]; cached != nil && cached.re != nil {
+			debugLog("StreamSessionManager: fallback UA evidence key=%s client=%s", key, uaClient)
+			return m.ensureSession(key, uaClient, cached, n)
+		}
+	}
+	if len(src) == 0 {
 		return nil
 	}
 	_, client := buildUncloakTable(src, format)
@@ -780,7 +1868,7 @@ func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkI
 	if cached == nil || cached.re == nil {
 		return nil
 	}
-	return m.ensureSession(key, client, cached)
+	return m.ensureSession(key, client, cached, n)
 }
 
 // splitSSEEvents splits combined bytes into complete SSE events and an
@@ -1123,9 +2211,9 @@ type filterConfig struct {
 // cachedCloakPatterns holds pre-compiled regexes for tool name replacement
 // in descriptions and system messages (request cloaking path).
 type cachedCloakPatterns struct {
-	cloakTable map[string]string     // orig → target (for identity replacement lookup)
-	identRe    *regexp.Regexp        // single-pass identity replacement (quoted, namespaced, unambiguous)
-	ambigRe    *regexp.Regexp        // single-pass contextual replacement for short/ambiguous words
+	cloakTable map[string]string // orig → target (for identity replacement lookup)
+	identRe    *regexp.Regexp    // single-pass identity replacement (quoted, namespaced, unambiguous)
+	ambigRe    *regexp.Regexp    // single-pass contextual replacement for short/ambiguous words
 }
 
 // cachedUncloakPattern holds a pre-compiled regex for stream chunk uncloaking.
@@ -1313,6 +2401,105 @@ func normalizeClientKey(client string) string {
 	}
 }
 
+// filteredHeaders returns a copy of headers with every key that matches any of
+// remove case-insensitively dropped. It builds a fresh map rather than relying
+// on http.Header.Del, which canonicalizes its argument and therefore cannot
+// delete a stored key whose spelling is non-canonical. The result carries every
+// non-owned inbound header verbatim, which is exactly the set a replacement
+// host (the before-auth interceptor) keeps.
+func filteredHeaders(headers http.Header, remove []string) http.Header {
+	if headers == nil {
+		return http.Header{}
+	}
+	out := make(http.Header, len(headers))
+	for k, vs := range headers {
+		drop := false
+		for _, r := range remove {
+			if strings.EqualFold(k, r) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			out[k] = append([]string(nil), vs...)
+		}
+	}
+	return out
+}
+
+// resolveExplicitClient reads the plugin-owned X-Cloak-Client header from the
+// inbound request headers. It returns the normalized client key, every stored
+// header key spelling that matches the owned header case-insensitively, whether
+// the header was present at all, and whether the value resolves to a currently
+// usable (non-empty) ToolMappings entry. All matching key spellings are returned
+// so the interceptor can clear every variant; the client value is derived from
+// the lexicographically first spelling for deterministic selection.
+func resolveExplicitClient(headers http.Header) (client string, matchedKeys []string, present, valid bool) {
+	if headers == nil {
+		return "", nil, false, false
+	}
+	for k := range headers {
+		if strings.EqualFold(k, explicitClientHeader) {
+			matchedKeys = append(matchedKeys, k)
+		}
+	}
+	if len(matchedKeys) == 0 {
+		return "", nil, false, false
+	}
+	sort.Strings(matchedKeys)
+	value := ""
+	if vs := headers[matchedKeys[0]]; len(vs) > 0 {
+		value = vs[0]
+	}
+	client = normalizeClientKey(value)
+	if client == "" {
+		return client, matchedKeys, true, false
+	}
+	if table := activeFilterConfig().ToolMappings[client]; len(table) == 0 {
+		return client, matchedKeys, true, false
+	}
+	return client, matchedKeys, true, true
+}
+
+// resolveUserAgentClient returns a client derived from conservative
+// User-Agent evidence. Only prefixes listed in userAgentEvidence may match,
+// comparison is case-insensitive, and the match requires a usable active
+// ToolMappings entry so entries like opencode/ stay inert until a table
+// exists. The UA value is taken from the lexicographically first
+// User-Agent key spelling for determinism, mirroring resolveExplicitClient.
+func resolveUserAgentClient(headers http.Header) (string, bool) {
+	if headers == nil {
+		return "", false
+	}
+	var matchedKeys []string
+	for k := range headers {
+		if strings.EqualFold(k, "User-Agent") {
+			matchedKeys = append(matchedKeys, k)
+		}
+	}
+	if len(matchedKeys) == 0 {
+		return "", false
+	}
+	sort.Strings(matchedKeys)
+	ua := ""
+	if vs := headers[matchedKeys[0]]; len(vs) > 0 {
+		ua = strings.TrimSpace(vs[0])
+	}
+	if ua == "" {
+		return "", false
+	}
+	lowerUA := strings.ToLower(ua)
+	for _, e := range userAgentEvidence {
+		if strings.HasPrefix(lowerUA, strings.ToLower(e.prefix)) {
+			if table := activeFilterConfig().ToolMappings[e.client]; len(table) > 0 {
+				return e.client, true
+			}
+			return "", false
+		}
+	}
+	return "", false
+}
+
 func parseToolMappings(value any) (map[string]map[string]string, error) {
 	typed, ok := value.(map[string]any)
 	if !ok {
@@ -1445,11 +2632,15 @@ func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
 }
 
 func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
-	raw, changed, _ := rewriteRequestBodyWithClient(body, sourceFormat)
+	raw, changed, _ := rewriteRequestBodyWithClient(body, sourceFormat, "")
 	return raw, changed
 }
 
-func rewriteRequestBodyWithClient(body []byte, sourceFormat string) ([]byte, bool, string) {
+// rewriteRequestBodyWithClient rewrites brand text and cloaks tool names. When
+// forcedClient is non-empty (a validated explicit X-Cloak-Client override), that
+// client's mapping table is used deterministically instead of body-based
+// detection. An empty forcedClient keeps the existing detectClient path.
+func rewriteRequestBodyWithClient(body []byte, sourceFormat string, forcedClient string) ([]byte, bool, string) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {
 		return nil, false, ""
@@ -1471,8 +2662,11 @@ func rewriteRequestBodyWithClient(body []byte, sourceFormat string) ([]byte, boo
 
 	// 2. Tool cloaking
 	toolNames := extractToolNames(rootMap, sourceFormat)
-	client := detectClient(toolNames)
+	client := forcedClient
 	var cachedCloak *cachedCloakPatterns
+	if client == "" {
+		client = detectClient(toolNames)
+	}
 	if client != "" {
 		cloakTable := effectiveCloakTable(client)
 		if len(cloakTable) > 0 {
@@ -1832,6 +3026,118 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 	}
 	builder.WriteString(value[start:])
 	return builder.String(), true
+}
+
+func replaceInsensitiveWithPrev(value string, prevIsWord bool, match, replacement string) (string, bool) {
+	if match == "" {
+		return value, false
+	}
+	lowerValue := strings.ToLower(value)
+	lowerMatch := strings.ToLower(match)
+	firstIsWord := isWordByte(match[0])
+	lastIsWord := isWordByte(match[len(match)-1])
+	var builder strings.Builder
+	start := 0
+	changed := false
+	for {
+		index := strings.Index(lowerValue[start:], lowerMatch)
+		if index < 0 {
+			break
+		}
+		index += start
+		matchEnd := index + len(match)
+		hasLeftBoundary := !firstIsWord
+		if firstIsWord {
+			if index == 0 {
+				hasLeftBoundary = !prevIsWord
+			} else {
+				hasLeftBoundary = !isWordByte(value[index-1])
+			}
+		}
+		hasRightBoundary := !lastIsWord || matchEnd == len(value) || !isWordByte(value[matchEnd])
+		if hasLeftBoundary && hasRightBoundary {
+			builder.WriteString(value[start:index])
+			builder.WriteString(replacement)
+			start = matchEnd
+			changed = true
+		} else {
+			builder.WriteString(value[start : index+1])
+			start = index + 1
+		}
+	}
+	if !changed {
+		return value, false
+	}
+	builder.WriteString(value[start:])
+	return builder.String(), true
+}
+
+func findHoldLenWithBoundary(combined, brand string, prevIsWord bool) int {
+	max := len(brand)
+	if len(combined) < max {
+		max = len(combined)
+	}
+	for k := max; k >= 1; k-- {
+		suffix := combined[len(combined)-k:]
+		if !strings.EqualFold(suffix, brand[:k]) {
+			continue
+		}
+		pos := len(combined) - k
+		var leftOK bool
+		if pos == 0 {
+			leftOK = !prevIsWord
+		} else {
+			leftOK = !isWordByte(combined[pos-1])
+		}
+		if leftOK {
+			return k
+		}
+	}
+	return 0
+}
+
+func getBrandLane(sess *streamSession, key string) *brandLane {
+	if sess.brandCarries == nil {
+		sess.brandCarries = make(map[string]*brandLane)
+	}
+	if lane, ok := sess.brandCarries[key]; ok {
+		return lane
+	}
+	lane := &brandLane{}
+	sess.brandCarries[key] = lane
+	return lane
+}
+
+func applyBrandLane(text string, lane *brandLane, isFinal bool) (string, bool) {
+	combined := lane.carry + text
+	if combined == "" {
+		return "", false
+	}
+	if isFinal {
+		out, changed := replaceInsensitiveWithPrev(combined, lane.lastIsWord, reverseBrandMatch, reverseBrandReplacement)
+		lane.carry = ""
+		if out != "" {
+			lane.lastIsWord = isWordByte(out[len(out)-1])
+		}
+		return out, changed || out != combined
+	}
+	holdLen := findHoldLenWithBoundary(combined, reverseBrandMatch, lane.lastIsWord)
+	if holdLen == 0 {
+		out, changed := replaceInsensitiveWithPrev(combined, lane.lastIsWord, reverseBrandMatch, reverseBrandReplacement)
+		lane.carry = ""
+		if out != "" {
+			lane.lastIsWord = isWordByte(out[len(out)-1])
+		}
+		return out, changed || out != combined
+	}
+	emitPart := combined[:len(combined)-holdLen]
+	newCarry := combined[len(combined)-holdLen:]
+	outEmit, changedEmit := replaceInsensitiveWithPrev(emitPart, lane.lastIsWord, reverseBrandMatch, reverseBrandReplacement)
+	lane.carry = newCarry
+	if outEmit != "" {
+		lane.lastIsWord = isWordByte(outEmit[len(outEmit)-1])
+	}
+	return outEmit, changedEmit || outEmit != emitPart
 }
 
 type textSpanReplacement struct {

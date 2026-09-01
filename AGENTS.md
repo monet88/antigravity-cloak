@@ -33,8 +33,12 @@ coding-CLI traffic as Antigravity. Two jobs:
 Two gates decide whether cloaking runs, checked in this order in every handler:
 
 1. Model gate (modelAllowsCloak, config field `model_prefixes`). See below.
-   This runs FIRST in all three handlers; if it returns false the handler
-   returns an empty (no-op) envelope before any detection or rewrite.
+   This is the FIRST gate for cloak/body mutation in all three handlers; if it
+   returns false no detection or rewrite runs. The one exception is transport
+   sanitation (Spec #15): in handleRequestInterceptBefore the plugin-owned
+   X-Cloak-Client control header is consumed/cleared BEFORE the gate, so a
+   gate-skipped request still returns an envelope that strips the header -
+   never a fully empty envelope when the header was present.
 2. Client gate (detectClient). rewriteRequestBody keys purely off request
    content: detectClient(toolNames) matches tool names against known client
    cloak tables (common-word clients like oh_my_pi require distinctive tools or >= 4 matches; distinctive clients require >= 2 matches). Once identified, cloaking runs.
