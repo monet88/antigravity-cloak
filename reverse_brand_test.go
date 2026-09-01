@@ -1044,6 +1044,57 @@ func TestReviewFix_OpenAIContentSingletonMapAllowlist(t *testing.T) {
 	}
 }
 
+// Spec #15 finding (PR #19 review MEDIUM): the streaming map path
+// reverseBrandOpenAIStreamingMap handled string and []any content but not the
+// singleton-map content part the non-streaming path already supports. At the
+// handlePluginCall stream seam: an allowed assistant text singleton map
+// (text/output_text/untyped) must reverse Antigravity -> omp; an explicit
+// non-text/control/tool/reasoning/refusal/data singleton map keeps the
+// literal Antigravity brand.
+func TestReviewFix_OpenAIStreamingSingletonMapContent(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	streamContentText := func(t *testing.T, reqID, part string) string {
+		t.Helper()
+		reqBody := `{"tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"task"}}],"messages":[]}`
+		handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
+		initPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", -1, []byte(""), []byte(reqBody))
+		handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, initPayload)
+		chunk := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":" + part + "}}]}\n\n"
+		p := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 0, []byte(chunk), nil)
+		raw, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p)
+		body, _ := decodeStreamBody(t, raw)
+		payload := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(chunk), "data:"))
+		if len(bytes.TrimSpace(body)) > 0 {
+			payload = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(body)), "data:"))
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(payload), &m); err != nil {
+			t.Fatalf("decode streamed chunk %q: %v", payload, err)
+		}
+		content := m["choices"].([]any)[0].(map[string]any)["delta"].(map[string]any)["content"]
+		partMap, ok := content.(map[string]any)
+		if !ok {
+			t.Fatalf("content singleton map not preserved, got %T in %q", content, payload)
+		}
+		txt, _ := partMap["text"].(string)
+		return txt
+	}
+	rewritten := []string{`{"type":"text","text":"a Antigravity b"}`, `{"type":"output_text","text":"c Antigravity d"}`, `{"text":"e Antigravity f"}`}
+	for i, part := range rewritten {
+		txt := streamContentText(t, fmt.Sprintf("rev-smap-ok-%d", i), part)
+		if !strings.Contains(txt, "omp") || strings.Contains(txt, "Antigravity") {
+			t.Fatalf("assistant text singleton map %s not reversed: %q", part, txt)
+		}
+	}
+	literal := []string{`{"type":"refusal","text":"a Antigravity b"}`, `{"type":"reasoning","text":"c Antigravity d"}`, `{"type":"tool_call","text":"e Antigravity f"}`, `{"type":"data","text":"g Antigravity h"}`}
+	for i, part := range literal {
+		txt := streamContentText(t, fmt.Sprintf("rev-smap-lit-%d", i), part)
+		if !strings.Contains(txt, "Antigravity") {
+			t.Fatalf("non-text singleton map %s was rewritten: %q", part, txt)
+		}
+	}
+}
+
 // ── Issue #21: Anthropic native termination flush ───────────────────────────
 
 func TestIssue21_AnthropicSSE_NativeTermination_HeldCarryFlush(t *testing.T) {

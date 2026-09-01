@@ -939,6 +939,16 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 				if c2 {
 					changed = true
 				}
+			case map[string]any:
+				if typ, _ := v["type"].(string); isAssistantTextPartType(typ) {
+					if txt, ok := v["text"].(string); ok {
+						newTxt, _ := applyBrandLane(txt, lane, isFinal)
+						if newTxt != txt {
+							v["text"] = newTxt
+							changed = true
+						}
+					}
+				}
 			}
 		}
 	}
