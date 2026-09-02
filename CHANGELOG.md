@@ -6,6 +6,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-02
+
+### Fixed
+- Preserved only the exact dot-prefixed `.omp` filesystem path segment during forward OMP brand rewriting, while continuing to mask bare `omp`, `/omp/`, `\omp\`, `.omp-backup`, `profile.omp`, and other brand aliases.
+
+### Removed
+- Removed obsolete Claude-specific repository guidance after retiring that workflow.
+
 ## [0.4.2] - 2026-09-01
 
 ### Added
@@ -86,7 +94,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and 
 - Initial plugin implementation.
 - Added repository metadata, MIT license, and release build workflow.
 
-[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.3
 [0.4.2]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.2
 [0.4.1]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.1
 [0.4.0]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.0

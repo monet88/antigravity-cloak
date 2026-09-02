@@ -1473,6 +1473,57 @@ func TestReplaceInsensitiveWordBoundaries(t *testing.T) {
 	}
 }
 
+func TestReplaceBrandKeywordSkipsPathSegments(t *testing.T) {
+	applyFilterConfig(filterConfig{
+		UseDefaultKeywords: true,
+		ToolMappings:       copyToolMappings(defaultCloakTables),
+	})
+	defer restoreDefaultFilterConfig(t)
+
+	// Windows OMP config dir path must survive the forward brand rewrite.
+	if got, changed := rewriteRequestBody([]byte(`{"system":"agent config is at C:\\Users\\monet\\.omp\\agent"}`), "openai"); changed {
+		t.Fatalf("windows .omp path must not be rewritten: body=%s", got)
+	}
+	// Unix-style path form survives too.
+	if _, c := rewriteRequestBody([]byte(`{"system":"config at /home/user/.omp"}`), "openai"); c {
+		t.Fatalf("unix .omp path must not be rewritten")
+	}
+	if _, c := rewriteRequestBody([]byte(`{"system":"config at /home/user/.omp/agent"}`), "openai"); c {
+		t.Fatalf("unix .omp/agent path must not be rewritten")
+	}
+	// Bare brand mention is still masked.
+	b, bc := rewriteRequestBody([]byte(`{"system":"You are omp."}`), "openai")
+	if !bc || !strings.Contains(string(b), "Antigravity.") {
+		t.Fatalf("bare omp brand must still be masked: changed=%v body=%s", bc, b)
+	}
+
+	// Non-dot path delimiters like /omp/ and \omp\ MUST be masked to Antigravity (OMP-only dot prefix scope).
+	bSlash, bcSlash := rewriteRequestBody([]byte(`{"system":"binary at /omp/agent"}`), "openai")
+	if !bcSlash || !strings.Contains(string(bSlash), "/Antigravity/agent") {
+		t.Fatalf("/omp/ must be masked to Antigravity: changed=%v body=%s", bcSlash, bSlash)
+	}
+	bBackslash, bcBackslash := rewriteRequestBody([]byte(`{"system":"binary at C:\\omp\\agent"}`), "openai")
+	if !bcBackslash || !strings.Contains(string(bBackslash), `C:\\Antigravity\\agent`) {
+		t.Fatalf(`\omp\ must be masked to Antigravity: changed=%v body=%s`, bcBackslash, bBackslash)
+	}
+
+	// Other clients/brands preceded by a dot are not skipped.
+	bOther, bcOther := rewriteRequestBody([]byte(`{"system":"config at /home/user/.oh-my-pi"}`), "openai")
+	if !bcOther || !strings.Contains(string(bOther), "/home/user/.Antigravity") {
+		t.Fatalf(".oh-my-pi must be masked to Antigravity: changed=%v body=%s", bcOther, bOther)
+	}
+
+	// Only the exact .omp path segment is exempt; lookalike segments/files still mask the brand.
+	bSuffix, bcSuffix := rewriteRequestBody([]byte(`{"system":"config at /home/user/.omp-backup/agent"}`), "openai")
+	if !bcSuffix || !strings.Contains(string(bSuffix), "/home/user/.Antigravity-backup/agent") {
+		t.Fatalf(".omp-backup must be masked to Antigravity: changed=%v body=%s", bcSuffix, bSuffix)
+	}
+	bExtension, bcExtension := rewriteRequestBody([]byte(`{"system":"config at /home/user/profile.omp/agent"}`), "openai")
+	if !bcExtension || !strings.Contains(string(bExtension), "/home/user/profile.Antigravity/agent") {
+		t.Fatalf("profile.omp must be masked to Antigravity: changed=%v body=%s", bcExtension, bExtension)
+	}
+}
+
 func TestDetectClientOhMyPiRequiresSignatureOrThreshold(t *testing.T) {
 	// Generic tools (read, write) alone should NOT trigger Oh My Pi
 	if client := detectClient([]string{"read", "write"}); client != "" {
