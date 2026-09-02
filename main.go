@@ -2991,8 +2991,8 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 }
 
 // replaceInsensitiveOpt is the shared case-insensitive word-boundary matcher.
-// When skipPath is true, matches that are filesystem-path segments (preceded by
-// '.', '/', or '\\') are left untouched.
+// When skipPath is true, matches that are literal ".omp" path segments (preceded by
+// '.') are left untouched.
 func replaceInsensitiveOpt(value, match, replacement string, skipPath bool) (string, bool) {
 	if match == "" {
 		return value, false
@@ -3016,7 +3016,13 @@ func replaceInsensitiveOpt(value, match, replacement string, skipPath bool) (str
 
 		hasLeftBoundary := !firstIsWord || index == 0 || !isWordByte(value[index-1])
 		hasRightBoundary := !lastIsWord || matchEnd == len(value) || !isWordByte(value[matchEnd])
-		pathSegment := skipPath && index > 0 && (value[index-1] == '.' || value[index-1] == '/' || value[index-1] == '\\')
+		pathSegment := false
+		if skipPath && lowerMatch == "omp" && index > 0 && value[index-1] == '.' {
+			dotIndex := index - 1
+			leftSegmentBoundary := dotIndex == 0 || value[dotIndex-1] == '/' || value[dotIndex-1] == '\\'
+			rightSegmentBoundary := matchEnd == len(value) || value[matchEnd] == '/' || value[matchEnd] == '\\'
+			pathSegment = leftSegmentBoundary && rightSegmentBoundary
+		}
 
 		if hasLeftBoundary && hasRightBoundary && !pathSegment {
 			builder.WriteString(value[start:index])
@@ -3035,7 +3041,7 @@ func replaceInsensitiveOpt(value, match, replacement string, skipPath bool) (str
 	return builder.String(), true
 }
 
-// replaceBrandKeyword is the forward brand rewrite, skipping path segments so
+// replaceBrandKeyword is the forward brand rewrite, skipping ".omp" path segments so
 // real resource paths (e.g. ".omp" in C:\Users\monet\.omp\agent) are never
 // masked into tool arguments the reverse brand path does not restore.
 func replaceBrandKeyword(value, match, replacement string) (string, bool) {
