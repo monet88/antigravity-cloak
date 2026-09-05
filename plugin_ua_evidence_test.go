@@ -576,3 +576,188 @@ func TestIntegration_UserAgent_NoCodexUAInference(t *testing.T) {
 		t.Fatalf("codex body gate should still cloak via body detection, got: %s", body)
 	}
 }
+
+// TestIntegration_NonClientRequestWithBrandWords_PreservesBodyWithoutMutation proves
+// that a normal non-client API request that passes the model gate and contains brand
+// words (OMP, Codex, Claude Code) in system / system-role content returns no body
+// mutation when no supported coding client is resolved (Issue #23).
+func TestIntegration_NonClientRequestWithBrandWords_PreservesBodyWithoutMutation(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	model := "agy/gemini-3.7-flash"
+
+	// OpenAI format: top-level system and messages system role with brand words, no coding tools
+	openAIReq := map[string]any{
+		"model":  model,
+		"system": "You are a helpful assistant talking about OMP, Codex, and Claude Code.",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "Keep OMP, Codex, and Claude Code intact."},
+			map[string]any{"role": "user", "content": "Explain OMP architecture."},
+		},
+	}
+	b, err := json.Marshal(openAIReq)
+	if err != nil {
+		t.Fatalf("marshal openAIReq: %v", err)
+	}
+
+	// Case 1: No User-Agent header
+	rawResp, code := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue23-no-client-no-ua", "openai", model, b, nil))
+	if code != 0 {
+		t.Fatalf("request.intercept_before code=%d, want 0", code)
+	}
+	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
+	if len(body) != 0 {
+		t.Fatalf("normal API request without client must not be mutated, got: %s", body)
+	}
+
+	// Case 2: Generic User-Agent (curl/8.0.0)
+	h := http.Header{}
+	h.Set("User-Agent", "curl/8.0.0")
+	rawResp2, code2 := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue23-no-client-curl-ua", "openai", model, b, h))
+	if code2 != 0 {
+		t.Fatalf("request.intercept_before code=%d, want 0", code2)
+	}
+	body2, _, _ := decodeEnvelopeRequestIntercept(t, rawResp2)
+	if len(body2) != 0 {
+		t.Fatalf("normal API request with generic UA must not be mutated, got: %s", body2)
+	}
+
+	// Case 3: Anthropic format with brand words in top-level system
+	anthropicReq := map[string]any{
+		"model":  model,
+		"system": "You are a helpful assistant talking about OMP and Claude Code.",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "Hello"},
+		},
+	}
+	bAnth, err := json.Marshal(anthropicReq)
+	if err != nil {
+		t.Fatalf("marshal anthropicReq: %v", err)
+	}
+	rawRespAnth, codeAnth := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue23-no-client-anthropic", "anthropic", model, bAnth, h))
+	if codeAnth != 0 {
+		t.Fatalf("request.intercept_before code=%d, want 0", codeAnth)
+	}
+	bodyAnth, _, _ := decodeEnvelopeRequestIntercept(t, rawRespAnth)
+	if len(bodyAnth) != 0 {
+		t.Fatalf("normal Anthropic API request must not be mutated, got: %s", bodyAnth)
+	}
+}
+
+// TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks proves that a
+// recognized Oh My Pi request (via UA evidence or body-based tools) performs
+// both brand rewriting on system/system-role fields and tool cloaking on the
+// request path, and uncloaks cleanly on response and stream paths (Issue #23).
+func TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	reqID := "omp-brand-tool-roundtrip-001"
+	model := "agy/gemini-3.7-flash"
+	headers := http.Header{}
+	headers.Set("User-Agent", "omp/1.2.3")
+
+	clientReq := map[string]any{
+		"model":  model,
+		"system": "You are Oh My Pi coding assistant.",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "Running in OMP harness."},
+			map[string]any{"role": "user", "content": "read file"},
+		},
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "read", "description": "Read file"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "bash", "description": "Run shell"}},
+		},
+		"stream": false,
+	}
+	b, err := json.Marshal(clientReq)
+	if err != nil {
+		t.Fatalf("marshal clientReq: %v", err)
+	}
+
+	rawResp, code := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, b, headers))
+	if code != 0 {
+		t.Fatalf("request.intercept_before code=%d, want 0", code)
+	}
+	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
+	if len(body) == 0 {
+		t.Fatalf("recognized OMP request must be rewritten, got empty body")
+	}
+	bodyStr := string(body)
+	if !strings.Contains(bodyStr, `"name":"view_file"`) {
+		t.Fatalf("read tool not cloaked to view_file: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, `"name":"run_command"`) {
+		t.Fatalf("bash tool not cloaked to run_command: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "Oh My Pi") {
+		t.Fatalf("leaked 'Oh My Pi' brand in request body: %s", bodyStr)
+	}
+	if strings.Contains(bodyStr, "OMP") {
+		t.Fatalf("leaked 'OMP' brand in request body: %s", bodyStr)
+	}
+	if !strings.Contains(bodyStr, "Antigravity") {
+		t.Fatalf("missing 'Antigravity' replacement in request body: %s", bodyStr)
+	}
+
+	// Non-streaming response path uncloaks view_file to read
+	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	rawResp2, code2 := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
+		makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, respBody))
+	if code2 != 0 {
+		t.Fatalf("response.intercept_after code=%d", code2)
+	}
+	out := decodeEnvelopeBody(t, rawResp2)
+	if !strings.Contains(string(out), `"name":"read"`) {
+		t.Fatalf("response did not uncloak view_file to read: %s", out)
+	}
+
+	// Streaming response path uncloaks view_file to read
+	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	rawChunk, codeChunk := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk,
+		makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, chunkBody, nil))
+	if codeChunk != 0 {
+		t.Fatalf("stream chunk code=%d", codeChunk)
+	}
+	chunkOut := decodeEnvelopeBody(t, rawChunk)
+	if !strings.Contains(string(chunkOut), `"name":"read"`) {
+		t.Fatalf("stream chunk did not uncloak view_file to read: %s", chunkOut)
+	}
+
+	// Case 2: Body-based OMP detection (no UA) with >= 4 common tools
+	bodyOnlyReq := map[string]any{
+		"model":  model,
+		"system": "You are Oh My Pi agent.",
+		"messages": []any{
+			map[string]any{"role": "system", "content": "OMP environment."},
+			map[string]any{"role": "user", "content": "edit"},
+		},
+		"tools": []any{
+			map[string]any{"type": "function", "function": map[string]any{"name": "read"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "write"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "edit"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "bash"}},
+		},
+	}
+	bBody, _ := json.Marshal(bodyOnlyReq)
+	rawRespBody, codeBody := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeIntegrationRequestInterceptPayloadWithHeaders(t, "omp-body-detected-002", "openai", model, bBody, nil))
+	if codeBody != 0 {
+		t.Fatalf("request.intercept_before code=%d, want 0", codeBody)
+	}
+	bodyRes, _, _ := decodeEnvelopeRequestIntercept(t, rawRespBody)
+	if len(bodyRes) == 0 {
+		t.Fatalf("body-detected OMP request must be rewritten, got empty body")
+	}
+	bodyResStr := string(bodyRes)
+	if !strings.Contains(bodyResStr, `"name":"replace_file_content"`) {
+		t.Fatalf("edit tool not cloaked to replace_file_content: %s", bodyResStr)
+	}
+	if strings.Contains(bodyResStr, "Oh My Pi") || strings.Contains(bodyResStr, "OMP") {
+		t.Fatalf("leaked brand in body-detected OMP request: %s", bodyResStr)
+	}
+	if !strings.Contains(bodyResStr, "Antigravity") {
+		t.Fatalf("missing 'Antigravity' replacement in body-detected OMP request: %s", bodyResStr)
+	}
+}

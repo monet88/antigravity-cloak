@@ -2631,15 +2631,58 @@ func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
 	return out
 }
 
+// rewriteRequestBody is a backward-compatible helper for callers and tests that
+// rewrite a request body directly. When a supported client is detected from
+// tools in body, it delegates to rewriteRequestBodyWithClient. When no client is
+// detected, it preserves the helper contract by applying brand rewriting
+// without tool cloaking.
 func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
-	raw, changed, _ := rewriteRequestBodyWithClient(body, sourceFormat, "")
-	return raw, changed
+	raw, changed, client := rewriteRequestBodyWithClient(body, sourceFormat, "")
+	if changed || client != "" {
+		return raw, changed
+	}
+	return rewriteRequestBodyBrandOnly(body, sourceFormat)
+}
+
+func rewriteRequestBodyBrandOnly(body []byte, sourceFormat string) ([]byte, bool) {
+	var root any
+	if err := safeUnmarshal(body, &root); err != nil {
+		return nil, false
+	}
+	rootMap, ok := root.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	changed := false
+	cfg := activeFilterConfig()
+	mappings := effectiveMappings(cfg)
+	rewritten, sysChanged := rewriteSystemFields(rootMap, mappings)
+	rootMap = rewritten.(map[string]any)
+	changed = changed || sysChanged
+
+	descChanged := rewriteToolDescriptions(rootMap, mappings, nil, sourceFormat)
+	changed = changed || descChanged
+
+	sysMsgChanged := rewriteSystemMessages(rootMap, mappings, nil)
+	changed = changed || sysMsgChanged
+
+	if !changed {
+		return nil, false
+	}
+	raw, err := safeMarshal(rootMap)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
 }
 
 // rewriteRequestBodyWithClient rewrites brand text and cloaks tool names. When
-// forcedClient is non-empty (a validated explicit X-Cloak-Client override), that
-// client's mapping table is used deterministically instead of body-based
-// detection. An empty forcedClient keeps the existing detectClient path.
+// forcedClient is non-empty (a validated explicit X-Cloak-Client override or
+// verified User-Agent evidence), that client's mapping table is used
+// deterministically instead of body-based detection. An empty forcedClient
+// falls back to body-based client detection. Both brand rewriting and tool
+// cloaking only run when a supported client has been resolved; if no supported
+// client is resolved, the request body is returned unmutated.
 func rewriteRequestBodyWithClient(body []byte, sourceFormat string, forcedClient string) ([]byte, bool, string) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {
@@ -2651,40 +2694,39 @@ func rewriteRequestBodyWithClient(body []byte, sourceFormat string, forcedClient
 		return nil, false, ""
 	}
 
-	changed := false
+	client := forcedClient
+	if client != "" && len(effectiveCloakTable(client)) == 0 {
+		client = ""
+	}
+	if client == "" {
+		toolNames := extractToolNames(rootMap, sourceFormat)
+		client = detectClient(toolNames)
+	}
+	if client == "" || len(effectiveCloakTable(client)) == 0 {
+		return nil, false, ""
+	}
 
-	// 1. Existing brand text replace on "system" key
+	changed := false
 	cfg := activeFilterConfig()
+	cloakTable := effectiveCloakTable(client)
+	var cachedCloak *cachedCloakPatterns
+	if len(cloakTable) > 0 {
+		toolCloaked := cloakToolNames(rootMap, cloakTable, sourceFormat)
+		changed = changed || toolCloaked
+		cachedCloak = cfg.cloakRegexCache[client]
+	}
+
 	mappings := effectiveMappings(cfg)
 	rewritten, sysChanged := rewriteSystemFields(rootMap, mappings)
 	rootMap = rewritten.(map[string]any)
 	changed = changed || sysChanged
 
-	// 2. Tool cloaking
-	toolNames := extractToolNames(rootMap, sourceFormat)
-	client := forcedClient
-	var cachedCloak *cachedCloakPatterns
-	if client == "" {
-		client = detectClient(toolNames)
-	}
-	if client != "" {
-		cloakTable := effectiveCloakTable(client)
-		if len(cloakTable) > 0 {
-			toolCloaked := cloakToolNames(rootMap, cloakTable, sourceFormat)
-			changed = changed || toolCloaked
-		}
-		cachedCloak = cfg.cloakRegexCache[client]
-	}
-
-	// 3. Brand replace + tool name replace in tools[].description
 	descChanged := rewriteToolDescriptions(rootMap, mappings, cachedCloak, sourceFormat)
 	changed = changed || descChanged
 
-	// 4. Brand replace + tool name replace in messages[].content where role == "system"
 	sysMsgChanged := rewriteSystemMessages(rootMap, mappings, cachedCloak)
 	changed = changed || sysMsgChanged
 
-	// 5. Tool name replace in top-level system field (Anthropic system prompt)
 	if cachedCloak != nil {
 		if sysVal, ok := rootMap["system"]; ok {
 			next, sysToolChanged := replaceToolNamesInValue(sysVal, cachedCloak)

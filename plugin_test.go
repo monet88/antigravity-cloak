@@ -178,7 +178,7 @@ custom_mappings:
 }
 
 func TestHandlePluginCallRequestInterceptBeforeRewritesCodingSignals(t *testing.T) {
-	request := requestInterceptRequestJSON(t, `{"system":"You are Codex.","messages":[]}`)
+	request := requestInterceptRequestJSON(t, `{"system":"You are Codex.","messages":[],"tools":[{"type":"function","function":{"name":"shell_command"}},{"type":"function","function":{"name":"apply_patch"}}]}`)
 
 	raw, code := handlePluginCall("request.intercept_before", request)
 	if code != 0 {
