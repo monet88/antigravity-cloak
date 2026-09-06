@@ -39,11 +39,14 @@ Two gates decide whether cloaking runs, checked in this order in every handler:
    X-Cloak-Client control header is consumed/cleared BEFORE the gate, so a
    gate-skipped request still returns an envelope that strips the header -
    never a fully empty envelope when the header was present.
-2. Client gate (detectClient). rewriteRequestBody keys purely off request
-   content: detectClient(toolNames) matches tool names against known client
-   cloak tables (common-word clients like oh_my_pi require distinctive tools or >= 4 matches; distinctive clients require >= 2 matches). Once identified, cloaking runs.
-   Brand replace on `system` runs unconditionally once the model gate passes
-   (independent of client detect).
+2. Client gate. After the model gate, client identity must be resolved first
+   following strict precedence: valid explicit X-Cloak-Client > verified positive
+   User-Agent evidence (`omp/...`) > body detection (detectClient on tool names;
+   common-word clients like oh_my_pi require distinctive tools or >= 4 matches,
+   distinctive clients require >= 2 matches). Only a resolved supported client
+   may trigger brand rewriting and tool cloaking. If no supported client is
+   resolved (no client => zero request-body mutation), the request body is
+   preserved completely unmutated.
 
 The model gate is the provider gate. It is OFF by default: with `model_prefixes`
 empty, modelAllowsCloak returns true for every model, so cloaking runs for ALL

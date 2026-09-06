@@ -36,7 +36,7 @@ func TestRewriteRequestReplacesDefaultSystemKeywords(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, rewritten := rewriteRequestBody([]byte(tt.body), "openai")
+			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(tt.body), "openai", "claude_code")
 			if !rewritten {
 				t.Fatalf("rewritten = false, want true")
 			}
@@ -57,7 +57,7 @@ func TestRewriteRequestIgnoresKeywordsOutsideSystem(t *testing.T) {
 		],
 		"input":"Claude Code is mentioned by the user"
 	}`)
-	got, rewritten := rewriteRequestBody(body, "openai")
+	got, rewritten, _ := rewriteRequestBodyWithClient(body, "openai", "claude_code")
 	if rewritten {
 		t.Fatalf("rewritten = true, want false; body=%s", got)
 	}
@@ -289,7 +289,7 @@ func TestRewriteRequestBodyAppliesBrandReplaceToToolDescription(t *testing.T) {
 		"tools":[{"type":"function","function":{"name":"bash","description":"Claude Code shell tool"}}],
 		"messages":[]
 	}`
-	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", "claude_code")
 	if !rewritten {
 		t.Fatal("want rewritten")
 	}
@@ -311,7 +311,7 @@ func TestRewriteRequestBodyAppliesBrandReplaceToSystemMessages(t *testing.T) {
 			{"role":"user","content":"hello Claude Code"}
 		]
 	}`
-	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", "claude_code")
 	if !rewritten {
 		t.Fatal("want rewritten")
 	}
@@ -748,7 +748,7 @@ func TestRewriteRequestPreservesLargeIntegers(t *testing.T) {
 		"messages":[{"role":"user","content":"id is 9007199254740993"}],
 		"max_tokens": 9007199254740993
 	}`
-	result, rewritten := rewriteRequestBody([]byte(body), "openai")
+	result, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", "claude_code")
 	if !rewritten {
 		t.Fatal("expected rewritten = true")
 	}
@@ -1037,7 +1037,7 @@ func TestBuiltInKeywordPresetCoversMainstreamCodingToolsAndAgents(t *testing.T) 
 		keyword := mapping.Match
 		t.Run(keyword, func(t *testing.T) {
 			body := `{"system":"You are running with ` + keyword + ` in this environment."}`
-			got, rewritten := rewriteRequestBody([]byte(body), "openai")
+			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", "claude_code")
 			if !rewritten {
 				t.Fatalf("keyword %q was not rewritten", keyword)
 			}
@@ -1481,44 +1481,44 @@ func TestReplaceBrandKeywordSkipsPathSegments(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
 	// Windows OMP config dir path must survive the forward brand rewrite.
-	if got, changed := rewriteRequestBody([]byte(`{"system":"agent config is at C:\\Users\\monet\\.omp\\agent"}`), "openai"); changed {
+	if got, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"agent config is at C:\\Users\\monet\\.omp\\agent"}`), "openai", "oh_my_pi"); changed {
 		t.Fatalf("windows .omp path must not be rewritten: body=%s", got)
 	}
 	// Unix-style path form survives too.
-	if _, c := rewriteRequestBody([]byte(`{"system":"config at /home/user/.omp"}`), "openai"); c {
+	if _, c, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.omp"}`), "openai", "oh_my_pi"); c {
 		t.Fatalf("unix .omp path must not be rewritten")
 	}
-	if _, c := rewriteRequestBody([]byte(`{"system":"config at /home/user/.omp/agent"}`), "openai"); c {
+	if _, c, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.omp/agent"}`), "openai", "oh_my_pi"); c {
 		t.Fatalf("unix .omp/agent path must not be rewritten")
 	}
 	// Bare brand mention is still masked.
-	b, bc := rewriteRequestBody([]byte(`{"system":"You are omp."}`), "openai")
+	b, bc, _ := rewriteRequestBodyWithClient([]byte(`{"system":"You are omp."}`), "openai", "oh_my_pi")
 	if !bc || !strings.Contains(string(b), "Antigravity.") {
 		t.Fatalf("bare omp brand must still be masked: changed=%v body=%s", bc, b)
 	}
 
 	// Non-dot path delimiters like /omp/ and \omp\ MUST be masked to Antigravity (OMP-only dot prefix scope).
-	bSlash, bcSlash := rewriteRequestBody([]byte(`{"system":"binary at /omp/agent"}`), "openai")
+	bSlash, bcSlash, _ := rewriteRequestBodyWithClient([]byte(`{"system":"binary at /omp/agent"}`), "openai", "oh_my_pi")
 	if !bcSlash || !strings.Contains(string(bSlash), "/Antigravity/agent") {
 		t.Fatalf("/omp/ must be masked to Antigravity: changed=%v body=%s", bcSlash, bSlash)
 	}
-	bBackslash, bcBackslash := rewriteRequestBody([]byte(`{"system":"binary at C:\\omp\\agent"}`), "openai")
+	bBackslash, bcBackslash, _ := rewriteRequestBodyWithClient([]byte(`{"system":"binary at C:\\omp\\agent"}`), "openai", "oh_my_pi")
 	if !bcBackslash || !strings.Contains(string(bBackslash), `C:\\Antigravity\\agent`) {
 		t.Fatalf(`\omp\ must be masked to Antigravity: changed=%v body=%s`, bcBackslash, bBackslash)
 	}
 
 	// Other clients/brands preceded by a dot are not skipped.
-	bOther, bcOther := rewriteRequestBody([]byte(`{"system":"config at /home/user/.oh-my-pi"}`), "openai")
+	bOther, bcOther, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.oh-my-pi"}`), "openai", "oh_my_pi")
 	if !bcOther || !strings.Contains(string(bOther), "/home/user/.Antigravity") {
 		t.Fatalf(".oh-my-pi must be masked to Antigravity: changed=%v body=%s", bcOther, bOther)
 	}
 
 	// Only the exact .omp path segment is exempt; lookalike segments/files still mask the brand.
-	bSuffix, bcSuffix := rewriteRequestBody([]byte(`{"system":"config at /home/user/.omp-backup/agent"}`), "openai")
+	bSuffix, bcSuffix, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.omp-backup/agent"}`), "openai", "oh_my_pi")
 	if !bcSuffix || !strings.Contains(string(bSuffix), "/home/user/.Antigravity-backup/agent") {
 		t.Fatalf(".omp-backup must be masked to Antigravity: changed=%v body=%s", bcSuffix, bSuffix)
 	}
-	bExtension, bcExtension := rewriteRequestBody([]byte(`{"system":"config at /home/user/profile.omp/agent"}`), "openai")
+	bExtension, bcExtension, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/profile.omp/agent"}`), "openai", "oh_my_pi")
 	if !bcExtension || !strings.Contains(string(bExtension), "/home/user/profile.Antigravity/agent") {
 		t.Fatalf("profile.omp must be masked to Antigravity: changed=%v body=%s", bcExtension, bExtension)
 	}
@@ -1711,7 +1711,7 @@ func TestEffectiveMappingsCustomOverride(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
 	body := []byte(`{"system":"This is Codex testing"}`)
-	rewritten, changed := rewriteRequestBody(body, "openai")
+	rewritten, changed, _ := rewriteRequestBodyWithClient(body, "openai", "codex")
 	if !changed {
 		t.Fatalf("expected changed = true")
 	}
