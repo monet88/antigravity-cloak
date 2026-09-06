@@ -6,7 +6,7 @@ import traceback
 def test_omp_chat_completions():
     # Oh My Pi sending tools to /v1/chat/completions with canonical Safe Mapping Set
     endpoint = os.environ.get("CPA_ENDPOINT", "http://127.0.0.1:8317/v1/chat/completions")
-    api_key = os.environ.get("CPA_API_KEY", "Tonight123@")
+    api_key = os.environ.get("CPA_API_KEY", "Tonight123")
     model = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
 
     payload = {

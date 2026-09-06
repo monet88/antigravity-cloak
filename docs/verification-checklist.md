@@ -247,3 +247,30 @@ The local release acceptance used:
 - plugin-visible model `agy/gemini-3.7-flash-high`
 
 A real interactive OMP task exercised `bash`, `read`, `edit`, and `write`. Correlation across model stream events and following OMP requests found 58 streamed tool-call events with 0 boundary failures. No plugin panic, unknown-tool, or schema failure was observed. Debug was disabled and the log truncated afterward.
+
+## Validated Issue #28 cloak-live baseline - 2026-09-07
+
+The Issue #28 live acceptance gate verified against the repaired local Docker runtime:
+
+- CLIProxyAPI `v7.2.146` (Commit `d31b159`)
+- `antigravity-cloak v0.4.4` (`plugins/linux/amd64/antigravity-cloak-v0.4.4.so`)
+- OMP `18.1.12`
+- Local gateway: `http://127.0.0.1:8317/v1`
+- Protected model route: `agy/gemini-3.8-flash` (`cpa/agy/gemini-3.8-flash`)
+- Bypass model route: `gemini-3.8-flash` (`cpa/gemini-3.8-flash`)
+- Deterministic client marker: `X-Cloak-Client: oh_my_pi`
+
+Verification matrix:
+- All 9 canonical Safe Mapping Set entries proven through real OMP request -> gateway cloak -> upstream model streamed tool call -> stream reverse uncloak -> OMP tool execution -> result continuation:
+  1. `read -> view_file -> read` (PASS, verified with real OMP and test harness)
+  2. `write -> write_to_file -> write` (PASS, verified with real OMP and test harness)
+  3. `edit -> replace_file_content -> edit` (PASS, verified with real OMP and test harness)
+  4. `bash -> run_command -> bash` (PASS, verified with real OMP and test harness)
+  5. `grep -> grep_search -> grep` (PASS, verified with real OMP and test harness)
+  6. `glob -> find_by_name -> glob` (PASS, verified with real OMP and test harness)
+  7. `task -> invoke_subagent -> task` (PASS, verified with test harness)
+  8. `ask -> ask_question -> ask` (PASS, verified with test harness)
+  9. `web_search -> search_web -> web_search` (PASS, verified with test harness)
+- Explicit OMP non-AGY bypass on `gemini-3.8-flash`: PASS (zero mutation, tool call preserved as `bash`, durable bypass pinned until `request.complete`).
+- Protected brand restoration: PASS (assistant stream `Hello from Antigravity and Antigravity` restored to `Hello from omp and omp`).
+- Controlled debug provenance captured in `cpa-filter-debug.log`, container recreated without `CPA_FILTER_DEBUG`, and debug log truncated to 0 bytes.
