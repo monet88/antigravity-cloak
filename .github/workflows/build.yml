@@ -87,6 +87,7 @@ jobs:
           set -euo pipefail
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
+            VERSION="${VERSION#.}"
           else
             VERSION="0.0.0-dev"
           fi
@@ -144,6 +145,7 @@ jobs:
           set -euo pipefail
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
+            VERSION="${VERSION#.}"
           else
             VERSION="0.0.0-dev"
           fi
@@ -210,6 +212,7 @@ jobs:
           set -euo pipefail
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
+            VERSION="${VERSION#.}"
           else
             VERSION="0.0.0-dev"
           fi

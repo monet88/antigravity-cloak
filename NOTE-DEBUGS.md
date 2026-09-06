@@ -35,3 +35,21 @@
   "tool_calls":[{"function": {"name": "bash", "arguments": "{\"command\": \"ls -la\"}"}}]
   ```
 - SSE payload returned HTTP 200 OK with `name: "bash"` uncloaked cleanly.
+
+## Bug 002: Plugin Inactive / Not Registered After Plugin Binary Upgrade (v0.4.3)
+
+### 1. Symptom
+- CLIProxyAPI management UI reports `antigravity-cloak`: `Inactive`, `Not registered`, `Configured` (`registered: false`, `path: ""`, `effective_enabled: false`).
+
+### 2. Root Cause
+- Binary `antigravity-cloak-v0.4.3.so` was placed in `plugins/linux/amd64/` and `v0.4.2.so` was removed.
+- `config.yaml` explicitly specified `store.version: "0.4.2"`.
+- CLIProxyAPI's `selectPluginFiles` (`platform.go`) filters candidates by `desiredVersion`: if specified, file version MUST equal `desiredVersion`. Mismatch caused the candidate to be skipped completely, leaving `path: ""` and unregistered.
+
+### 3. Fix
+- Updated `plugins.configs.antigravity-cloak.store.version` to `"0.4.3"` in `config.yaml`.
+- Restarted container `cli-proxy-api`.
+
+### 4. Verification
+- `GET /v0/management/plugins`: `registered: true`, `effective_enabled: true`, `path: "plugins/linux/amd64/antigravity-cloak-v0.4.3.so"`.
+- `POST /v1/chat/completions` with model `agy/gemini-3.7-flash-high` returns 200 OK.
