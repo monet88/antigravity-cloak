@@ -96,7 +96,7 @@ const abiVersion = 1
 
 const (
 	pluginName       = "antigravity-cloak"
-	pluginVersion    = "26.09.06"
+	pluginVersion    = "0.4.4"
 	pluginRepository = "https://github.com/monet88/antigravity-cloak"
 )
 

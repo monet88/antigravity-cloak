@@ -2,9 +2,18 @@
 
 All notable changes to `antigravity-cloak` are documented here.
 
-The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Current releases use date-based CalVer (`YY.MM.DD`) with Git tags in the `v.YY.MM.DD` form; older releases used SemVer.
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Current releases use semantic version tags; the one-off `v.26.09.06` CalVer release is retained below as historical release metadata.
 
 ## [Unreleased]
+
+## [0.4.4] - 2026-09-06
+
+### Fixed
+- Gate request-body brand rewriting and tool cloaking on a resolved supported client identity, preserving ordinary API request bodies when no supported client is identified.
+- Preserve client-precedence semantics across explicit `X-Cloak-Client`, verified User-Agent evidence, and body-based classification while keeping recognized Oh My Pi round trips intact.
+
+### Changed
+- Returned release numbering to SemVer so CLIProxyAPI Plugin Store discovery and asset matching use the expected `v<version>` tag convention.
 
 ## [26.09.06] - 2026-09-06
 
@@ -99,7 +108,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 - Initial plugin implementation.
 - Added repository metadata, MIT license, and release build workflow.
 
-[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v.26.09.06...HEAD
+[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.4
 [26.09.06]: https://github.com/monet88/antigravity-cloak/releases/tag/v.26.09.06
 [0.4.3]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.3
 [0.4.2]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.2
