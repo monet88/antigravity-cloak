@@ -2,6 +2,31 @@
 
 Use this runbook for real local acceptance of `antigravity-cloak` with Oh My Pi (OMP), CLIProxyAPI, and an Antigravity-backed model. Deterministic Go tests remain the oracle for edge cases; this runbook proves the actual local round trip.
 
+## Ready-to-use local baseline
+
+The default OMP profile is the primary real-use configuration. `cloak-live` is an isolated acceptance profile only.
+
+Primary/default OMP contract:
+
+- Default OMP config root: `C:\Users\monet\.omp\agent`
+- Default provider config: `C:\Users\monet\.omp\agent\models.yml`
+- Provider: `cpa`
+- Required deterministic client marker: `X-Cloak-Client: oh_my_pi`
+- The default profile may use a different CLIProxyAPI endpoint from the local acceptance runtime; the marker, not the model or gateway URL, identifies OMP traffic that must cloak.
+
+The workstation is also provisioned for isolated live acceptance. Reuse the existing local runtime first; do not create a new Docker stack, gateway config, or OMP profile unless the verification steps below prove the existing one is missing or broken.
+
+- Docker container: `cli-proxy-api` (`eceasy/cli-proxy-api:latest`)
+- Local gateway: `http://127.0.0.1:8317/v1`
+- Acceptance-only OMP profile: `cloak-live`
+- OMP profile path: `C:\Users\monet\.omp\profiles\cloak-live\agent`
+- Local CLIProxyAPI API key: `Tonight123@`
+- Installed OMP baseline: `omp/18.1.11`
+- Current primary Antigravity route for live cloak testing: `cpa/agy/gemini-3.8-flash`
+- Plugin-visible model for that route: `agy/gemini-3.8-flash`
+
+For production/default-profile checks, verify `omp models`. For isolated local acceptance, verify `docker ps` and `omp --profile cloak-live models`. If the acceptance environment is healthy, use it as-is.
+
 ## PASS criteria
 
 A live run is `PASS` only when all of the following are true:
@@ -83,25 +108,26 @@ docker logs $Container 2>&1 |
 
 When testing a published release, install its published Linux/amd64 asset into the discovered plugin mount rather than rebuilding different source. A loaded Go shared object cannot be safely hot-swapped; recreate the service before replacing an active binary.
 
-## 3. Use an isolated OMP profile
+## 3. Use the existing `cloak-live` OMP profile
 
-Create or reuse a profile such as `cloak-live`:
+The local acceptance profile already exists. Reuse it; do not create a replacement profile unless this one is missing or broken:
 
 ```powershell
 $OmpProfile = 'cloak-live'
 $OmpRoot = (omp --profile $OmpProfile config path).Trim()
-New-Item -ItemType Directory -Force -Path $OmpRoot | Out-Null
 $OmpRoot
 ```
 
-`$OmpRoot\models.yml` should point only to the local gateway. Keep the key local and never commit it:
+`$OmpRoot\models.yml` is expected to contain this local-only provider configuration:
 
 ```yaml
 providers:
   cpa:
     baseUrl: http://127.0.0.1:8317/v1
-    apiKey: "<LOCAL_CLI_PROXY_API_KEY>"
+    apiKey: "Tonight123@"
     api: openai-completions
+    headers:
+      X-Cloak-Client: oh_my_pi
     discovery:
       type: openai-models-list
 ```
@@ -115,10 +141,10 @@ omp --profile cloak-live models
 OMP model selectors include the provider namespace. For the validated route, select:
 
 ```text
-cpa/agy/gemini-3.7-flash-high
+cpa/agy/gemini-3.8-flash
 ```
 
-The provider prefix `cpa/` is OMP-local routing metadata; the plugin sees the request model as `agy/gemini-3.7-flash-high`, which is what `model_prefixes: ["agy/"]` matches.
+The provider prefix `cpa/` is OMP-local routing metadata; the plugin sees the request model as `agy/gemini-3.8-flash`, which is what `model_prefixes: ["agy/"]` matches.
 
 ## 4. Interactive TUI validation
 
@@ -126,7 +152,7 @@ Launch OMP in the target repository:
 
 ```powershell
 omp --profile cloak-live `
-  --model cpa/agy/gemini-3.7-flash-high `
+  --model cpa/agy/gemini-3.8-flash `
   --cwd F:\CodeBase\antigravity-cloak `
   --auto-approve
 ```
@@ -137,7 +163,7 @@ For a minimal one-shot smoke instead of the TUI:
 
 ```powershell
 omp --profile cloak-live `
-  --model cpa/agy/gemini-3.7-flash-high `
+  --model cpa/agy/gemini-3.8-flash `
   --cwd F:\CodeBase\antigravity-cloak `
   --tools bash,read,edit,write,todo `
   --no-session `

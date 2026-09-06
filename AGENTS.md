@@ -163,13 +163,15 @@ release zips + checksums.txt; version comes from the v* git tag.
 Use **[docs/verification-checklist.md](docs/verification-checklist.md)** as the authoritative local deploy and real acceptance runbook.
 
 Important invariants:
+- The **default OMP profile** (`C:\Users\monet\.omp\agent`) is the primary real-use path and must remain the first-class compatibility target. Its `cpa` provider carries `X-Cloak-Client: oh_my_pi`, which is the deterministic OMP identity signal. The current plugin is not yet fail-closed for every marked request failure mode; do not document or assume that guarantee until the corresponding implementation and live rejection tests ship.
+- The `cloak-live` OMP profile exists only for isolated local acceptance against the pre-provisioned `cli-proxy-api` Docker container and local gateway. Do not treat `cloak-live` as the production/default OMP configuration.
 - Discover the active Compose project, container, config mount, plugin mount, and log mount with `docker inspect`; never rely on an old hardcoded `F:\cliproxy` path or container name.
 - The Docker plugin artifact is Linux/amd64 `-buildmode=c-shared`; when testing a published release, use the release asset rather than silently rebuilding different source.
 - A loaded Go `.so` cannot be hot-swapped safely. Stop/recreate CLIProxyAPI before replacing an already-loaded binary.
 - `CPA_FILTER_DEBUG` is process environment state cached on first debug use; enabling or disabling it requires a container recreate.
 - Debug writes full request/response/stream bodies. Enable it only for a controlled acceptance run, then disable it and truncate the log.
 - The primary live acceptance gate is Oh My Pi (`omp`) against local CLIProxyAPI. Prove request cloak and streamed response uncloak at the OMP boundary; source/tests remain the oracle for protocol edge cases not exercised by that run.
-- Never commit local CLIProxyAPI keys, management secrets, auth files, OMP profile credentials, or full debug-body logs.
+- Do not add new secrets, management credentials, auth files, OMP profile credentials, or full debug-body logs to the repository. The explicitly documented local-only CLIProxyAPI acceptance key in `docs/verification-checklist.md` is the intentional exception for this workstation.
 
 ## Installing a custom (non-official) plugin onto a remote VPS
 
@@ -184,44 +186,33 @@ The step-by-step procedure for deploying custom plugin binaries to remote VPS in
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **antigravity-cloak** (497 symbols, 1417 relationships, 43 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **antigravity-cloak** (671 symbols, 2002 relationships, 55 execution flows).
 
-> Index stale? Run `node .gitnexus/run.cjs analyze` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? `npx gitnexus analyze` (npm 11 crash → `npm i -g gitnexus`; #1939).
+> Index stale? Run `node .gitnexus/run.cjs analyze --index-only` from the project root — it auto-selects an available runner. No `.gitnexus/run.cjs` yet? Bootstrap with `npx`, `bunx`, or `pnpm dlx` — e.g. `bunx gitnexus@latest analyze` (npm 11 npx crash; #1939).
 
 ## Always Do
 
-- **MUST run impact analysis before editing any symbol.** Before modifying a function, class, or method, run `impact({target: "symbolName", direction: "upstream"})` and report the blast radius (direct callers, affected processes, risk level) to the user.
-- **MUST run `detect_changes()` before committing** to verify your changes only affect expected symbols and execution flows. For regression review, compare against the default branch: `detect_changes({scope: "compare", base_ref: "main"})`.
-- **MUST warn the user** if impact analysis returns HIGH or CRITICAL risk before proceeding with edits.
-- When exploring unfamiliar code, use `query({search_query: "concept"})` to find execution flows instead of grepping. It returns process-grouped results ranked by relevance.
-- When you need full context on a specific symbol — callers, callees, which execution flows it participates in — use `context({name: "symbolName"})`.
+- **MUST run impact before editing.** Use `impact({target: "symbolName", direction: "upstream"})` or `node .gitnexus/run.cjs impact "symbolName" --direction upstream --repo .`; report callers, processes, and risk. Never substitute grep for graph analysis.
+- **MUST analyze graph changes before committing.** Use `detect_changes({scope: "all"})` (MCP) or `node .gitnexus/run.cjs detect-changes --scope all --repo .` (CLI fallback). `partial: true` or `truncated: true` is not a clean check — a zero means unseen, not unaffected; re-run it. For regression review: `detect_changes({scope: "compare", base_ref: "main"})` or `node .gitnexus/run.cjs detect-changes --scope compare --base-ref "main" --repo .`.
+- MUST warn on HIGH/CRITICAL `risk` pre-edit; never use `riskSharedAxes` to waive a HIGH/CRITICAL `risk` warning. Compare File/symbol: MCP File omits axes; Graph-RAG expands File.
+- **MUST treat `risk: UNKNOWN` as unresolved, not as low.** An empty caller set is not evidence the symbol is unused — it can also mean the callers are not resolvable by the index (plain-object property access, dynamic dispatch, cross-language calls). `impact` pairs `UNKNOWN` with a `riskNote` saying so. Confirm with a text search before treating the symbol as safe to change or delete; do not proceed on the strength of a zero.
+- **MUST use `query({search_query: "concept"})` for concepts/flows, `context({name: "symbolName"})` for a named symbol, or `impact` for blast radius, on read-only callers, dependencies, imports, or execution flow.** Graph first; text search only for empty/`UNKNOWN`/literals.
 - For security review, `explain({target: "fileOrSymbol"})` lists taint findings (source→sink flows; needs `analyze --pdg`).
 
 ## Never Do
 
-- NEVER edit a function, class, or method without first running `impact` on it.
-- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis.
+- NEVER edit a function, class, or method before MCP/CLI impact analysis.
+- NEVER ignore HIGH or CRITICAL risk warnings from impact analysis, and never read `UNKNOWN` as an all-clear — it means the walk could not answer, which is the one verdict that requires confirming by other means.
 - NEVER rename symbols with find-and-replace — use `rename` which understands the call graph.
-- NEVER commit changes without running `detect_changes()` to check affected scope.
+- NEVER commit before MCP/CLI graph change analysis.
 
 ## Resources
 
 | Resource | Use for |
-|----------|---------|
+| --- | --- |
 | `gitnexus://repo/antigravity-cloak/context` | Codebase overview, check index freshness |
 | `gitnexus://repo/antigravity-cloak/clusters` | All functional areas |
 | `gitnexus://repo/antigravity-cloak/processes` | All execution flows |
 | `gitnexus://repo/antigravity-cloak/process/{name}` | Step-by-step execution trace |
-
-## CLI
-
-| Task | Read this skill file |
-|------|---------------------|
-| Understand architecture / "How does X work?" | `.claude/skills/gitnexus/gitnexus-exploring/SKILL.md` |
-| Blast radius / "What breaks if I change X?" | `.claude/skills/gitnexus/gitnexus-impact-analysis/SKILL.md` |
-| Trace bugs / "Why is X failing?" | `.claude/skills/gitnexus/gitnexus-debugging/SKILL.md` |
-| Rename / extract / split / refactor | `.claude/skills/gitnexus/gitnexus-refactoring/SKILL.md` |
-| Tools, resources, schema reference | `.claude/skills/gitnexus/gitnexus-guide/SKILL.md` |
-| Index, status, clean, wiki CLI commands | `.claude/skills/gitnexus/gitnexus-cli/SKILL.md` |
 
 <!-- gitnexus:end -->
