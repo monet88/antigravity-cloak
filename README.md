@@ -17,12 +17,11 @@ CLIProxyAPI v7 dynamic plugin for disguising coding-CLI traffic (**Claude Code**
 ## Supported Coding Clients
 
 `antigravity-cloak` seamlessly cloaks and uncloaks native tool definitions and stream chunks for:
-- **Oh My Pi (`oh_my_pi` / `omp`)**: Standard core tools (`read`, `write`, `edit`, `bash`, `grep`, `task`, `ask`, `todo`, `hub`, `eval`, `web_search`), Vibe Mode (`vibe_spawn`, `vibe_send`, `vibe_wait`, `vibe_kill`, `vibe_list`), and Autoresearch Mode (`init_experiment`, `run_experiment`, `log_experiment`, `update_notes`).
+- **Oh My Pi (`oh_my_pi` / `omp`)**: 9-tool Safe Mapping Set (`read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`). Intentional pass-through tools (`todo`, `hub`, `eval`, `vibe_*`, Autoresearch tools) remain untouched. Reverse uncloaking is request-scoped to active canonical pairs. Protected requests on `agy/*` fail closed with exact 503 on validation failure; explicit OMP requests on non-`agy/` routes bypass cloaking durably with zero mutation.
 - **Claude Code (`claude_code`)**: `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `ToolSearch`, `Skill`, `Workflow`.
 - **OpenAI Codex (`codex`)**: `shell_command`, `apply_patch`, `request_user_input`, `view_image`, `update_plan`, `tool_search`, `get_goal`, `create_goal`, `update_goal`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`.
 
 > For complete domain glossary and full mapping tables across all clients and modes, refer to **[CONTEXT.md](CONTEXT.md)**.
----
 
 ## Built-in Keyword Preset (50+ Signals)
 

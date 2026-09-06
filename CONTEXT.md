@@ -19,31 +19,26 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 
 #### Cloak Mapping Tables
 
-##### 1. Oh My Pi (`oh_my_pi` / `omp`)
-| Native Tool | Antigravity Cloaked Name | Mode / Category | Description |
+##### 1. Oh My Pi (`oh_my_pi` / `omp`) — Safe Mapping Set
+| Native Tool | Antigravity Cloaked Name | Classification | Description |
 | :--- | :--- | :--- | :--- |
-| `read` | `view_file` | Standard Core | Read files, directories, and web URLs |
-| `write` | `write_to_file` | Standard Core | Create or overwrite files |
-| `edit` | `replace_file_content` | Standard Core | Line-anchored code patch |
-| `bash` | `run_command` | Standard Core | Execute persistent shell commands |
-| `grep` | `grep_search` | Standard Core | Regex file search |
-| `glob` | `list_dir` | Standard Core | Match and glob files/directories |
-| `task` | `invoke_subagent` | Standard Core | Dispatch background subagents |
-| `ask` | `ask_question` | Standard Core | Interactive user prompt UI |
-| `todo` | `manage_task` | Standard Core | Manage task checklist state |
-| `hub` | `send_message` | Standard Core | Peer-to-peer messaging and job control |
-| `web_search` | `search_web` | Standard Core | Web search |
-| `eval` | `execute_code` | Standard Core | Run code in persistent kernel |
-| `vibe_spawn` | `define_subagent` | Vibe Mode | Starts persistent worker session |
-| `vibe_send` | `schedule` | Vibe Mode | Message / steer worker session |
-| `vibe_wait` | `wait` | Vibe Mode | Block until worker turn completes |
-| `vibe_kill` | `cancel` | Vibe Mode | Terminate worker session |
-| `vibe_list` | `list` | Vibe Mode | List worker sessions and roster |
-| `init_experiment` | `create_goal` | Autoresearch | Initialize benchmark experiment session |
-| `run_experiment` | `call_mcp_tool` | Autoresearch | Run benchmark workload |
-| `log_experiment` | `update_plan` | Autoresearch | Record metric, commit or discard |
-| `update_notes` | `update_goal` | Autoresearch | Update experiment playbook / ideas |
+| `read` | `view_file` | Transport Exception | Read files, directories, URLs, and `xd://` virtual devices |
+| `write` | `write_to_file` | Transport Exception | Create/overwrite files and dispatch `xd://` devices |
+| `edit` | `replace_file_content` | Semantic Alias | Line-anchored code patch (preserves OMP hashline wire format) |
+| `bash` | `run_command` | Direct Semantic Alias | Execute persistent shell commands |
+| `grep` | `grep_search` | Direct Semantic Alias | Regex file search |
+| `glob` | `find_by_name` | Direct Semantic Alias | Match and glob files/directories by pattern |
+| `task` | `invoke_subagent` | Direct Semantic Alias | Dispatch background subagents (supports batch schema) |
+| `ask` | `ask_question` | Direct Semantic Alias | Interactive user prompt UI |
+| `web_search` | `search_web` | Direct Semantic Alias | Web search (when tool is exposed) |
 
+**Intentional Pass-Through Tools**:
+The following tools are intentionally excluded from cloaking and pass through untouched:
+- Standard tools: `todo`, `hub`, `eval`.
+- Vibe Mode: `vibe_spawn`, `vibe_send`, `vibe_wait`, `vibe_kill`, `vibe_list`.
+- Autoresearch Mode: `init_experiment`, `run_experiment`, `log_experiment`, `update_notes`.
+
+These tools remain in the static OMP source identity inventory for source-side client identification but are never transformed, avoiding ambiguous reverse mappings.
 > **Virtual Devices (`xd://`)**: Auxiliary tools (`ast_grep`, `ast_edit`, `lsp`, `checkpoint`, `rewind`, `browser`, `retain`, `recall`, `reflect`, `memory_edit`, `security_scan`) and MCP servers (`xd://mcp__<server>_<tool>`) in `oh_my_pi` are dispatched through `read`/`write` to `xd://<target>`. Because `read`/`write` are cloaked automatically, these calls need no separate top-level MCP mapping.
 
 ##### 2. Claude Code (`claude_code`)
@@ -74,19 +69,38 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 - `read_mcp_resource` $\to$ `read_resource`
 
 
-### 3. Activation Model (Two-Stage Gating)
-Every interceptor evaluates two sequential gates:
-1. **Model Gate (`modelAllowsCloak`)**: Evaluates `model_prefixes` against `Model` and `RequestedModel`. If empty, all models pass. If configured, non-matching models skip all cloaking/body mutation. Transport sanitation is independent of the gate (Spec #15): `handleRequestInterceptBefore` consumes/clears the plugin-owned `X-Cloak-Client` header before the gate runs, so a gate-skipped request still never leaks the control header upstream.
-2. **Client Gate**: Resolves the client identity by precedence (Issue #16, #17): a valid explicit `X-Cloak-Client` control header (consumed, never forwarded upstream) > verified positive User-Agent evidence (`omp/` prefix, gated on a usable active ToolMappings entry) > body-based tool-name classification. An invalid explicit value bypasses UA evidence and falls directly to body detection, so a weaker signal cannot mask operator misconfiguration. Once identified, cloaking proceeds. When the invalid-explicit path also classifies no client from the body, the request interceptor records an authoritative negative resolution (`negativeClientResolution` sentinel session, Issue #20): response and stream paths treat its presence as request-time truth and must not re-infer a client from surviving User-Agent or body evidence. Conservative UA/body recovery remains available only when correlation is genuinely missing.
+### 3. Activation Model & Explicit OMP Routing
+Every interceptor evaluates explicit client routing and model gating:
 
-#### Client Classification Semantics
-- **Original-name detection (`detectClient`)** keys off source tool names. Clients whose source names are mostly common words (`read`, `bash`) require either a distinctive harness tool (`hub`, `task`, `todo`, `eval`, `web_search`, `vibe_*`, `*_experiment`) or at least `minCollidingToolMatches` (4) simultaneous matches.
-- **Cloaked-target detection (`detectCloakedClient`)** runs against the already-cloaked observed names. Namespace prefixes (`functions:view_file`, `default_api:bash`) are normalised away first, so each declared tool contributes exactly one observed base identity and the denominator is never inflated by an alias. A candidate qualifies only when it has at least 3 hits **and** covers at least 80% of the observed unique base identities (`hits*5 >= observed*4`). The static table length is not an alternative qualification path.
-- **Ties & native pass-through**: multiple candidates are ranked by exact integer ratio over observed identities, then by hit count, then by client id. When 2+ distinct tables each reach full-table coverage (`hits == tableSize`), the traffic is treated as a native Antigravity superset and cloaking is skipped.
-- **Namespace safety**: a namespaced reference whose prefix is itself a source tool name (`read:write`) is an access-mode / compound token, not a tool reference, and is left untouched.
+#### 1. Explicit OMP Routing Precedence (Issue #25, #27, #28)
+When an explicit OMP marker (`X-Cloak-Client: oh_my_pi` / `omp` / `oh-my-pi`) is present:
+- **ProtectedAGY (`agy/*` routes)**: Takes precedence over generic `model_prefixes`. The request must pass strict single-document JSON admission, declaration collision validation (comparing final base identities across namespaces), canonical Safe Mapping Set validation, and request-scoped active reverse derivation. Any failure terminates immediately with an exact HTTP 503 JSON rejection (`{"error":{"code":"omp_cloak_required","message":"Protected OMP request could not be safely cloaked."}}`) before upstream execution.
+- **ExplicitOMPNonAGYBypass (non-`agy/` routes)**: Marker is consumed and stripped; a durable bypass sentinel is pinned under host `RequestID`. Request, response, and stream operations perform zero tool or brand mutation. Correlated handling never falls back to weaker evidence (UA, body, live config, or static target detection).
+- **Marker Conflict Resolution**: Multiple/comma-separated marker values are collected and normalized. Duplicate/alias equivalents (`omp, oh-my-pi`) collapse to one identity. A conflict containing OMP on `agy/*` yields exact 503; on non-`agy/` it conservatively pins bypass; conflicts without OMP retain invalid-explicit negative resolution.
 
-These semantics are recorded in [ADR 0002](docs/adr/0002-ratio-ranked-client-classification-and-session-pre-registration.md).
+#### 2. Generic Model Gate (`modelAllowsCloak`)
+For requests without an explicit OMP marker, `model_prefixes` restricts cloaking to matching model prefixes. Empty `model_prefixes` matches all models.
 
+#### 3. Client Gate Precedence
+Client identity is resolved in order:
+1. Valid explicit `X-Cloak-Client` control header (consumed, never forwarded upstream).
+2. Verified positive User-Agent evidence (`omp/` prefix, requiring a usable active ToolMappings entry).
+3. Body-based tool-name classification via static source identity inventory.
+An invalid explicit value records an authoritative negative resolution (`negativeClientResolution`) preventing weaker fallback.
+
+#### 4. Identity Inventories & Target Corroboration Rule (Issue #26)
+- **OMP Source Identity Inventory**: Static finite set comprising the 9 Safe Mapping Set sources plus legacy detection names (`todo`, `hub`, `eval`, `vibe_*`, Autoresearch names). Does not depend on runtime `ToolMappings`.
+- **OMP Cloaked-Target Inventory**: Exactly the 9 canonical AGY targets (`view_file`, `write_to_file`, `replace_file_content`, `run_command`, `grep_search`, `find_by_name`, `invoke_subagent`, `ask_question`, `search_web`).
+- **Corroboration-Only Rule**: Because canonical targets are native Antigravity tools, target names alone are never standalone OMP attribution. Target-only no-marker traffic cannot resolve to OMP.
+
+#### 5. Request-Scoped Active Reverse Authority
+Correlated Protected responses and streams reverse only canonical pairs whose source tool was actually declared and transformed in that request. Unused canonical targets remain pass-through and are never reverse-cloaked.
+
+#### 6. Request Lifecycle Management
+Explicit OMP route state is lifecycle-owned and registered with CLIProxyAPI (`request_lifecycle_plugin: true`). State is cleaned up idempotently on `request.complete` (`succeeded`, `failed`, `rejected`, `canceled`). Disposable stream sessions are cleaned on `[DONE]`, and pre-payload sessions can be deterministically rehydrated from pinned route state without consulting live config or weaker evidence.
+
+#### 7. Terminal Canonical Brand Policy
+Protected OMP aliases (`Oh My Pi`, `oh-my-pi`, `omp`) mask to `Antigravity` even with `use_default_keywords: false`. The output `Antigravity` is terminal and cannot be reprocessed or redirected by custom operator mappings. Literal `.omp` filesystem path segments (`.omp/foo`, `C:\Users\...\.omp\agent`) are strictly preserved. Assistant text restores `Antigravity -> omp` using pinned route authority.
 ### 4. Stream Session Management (`StreamSessionManager`)
 - **Schema-Aware Caching**: In CLIProxyAPI schema_version >= 3, request bodies (`OriginalRequest`/`RequestBody`) are delivered only on the header-init chunk (`ChunkIndex == StreamChunkHeaderInitIndex`). The manager caches the uncloak regex pattern under the stream's correlation key - `RequestID`, a metadata/header id, or (schema < 3, where every chunk repeats the request body) an FNV hash of that body.
 - **Uncorrelated Chunks**: Payload chunks carrying no correlation key cannot be attributed to any stream and pass through unmolested rather than compete for shared state (which would corrupt concurrent streams).

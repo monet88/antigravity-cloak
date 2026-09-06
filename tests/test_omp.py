@@ -1,11 +1,16 @@
+import os
 import urllib.request
 import json
 import traceback
 
 def test_omp_chat_completions():
-    # Oh My Pi sending tools to /v1/chat/completions
+    # Oh My Pi sending tools to /v1/chat/completions with canonical Safe Mapping Set
+    endpoint = os.environ.get("CPA_ENDPOINT", "http://127.0.0.1:8317/v1/chat/completions")
+    api_key = os.environ.get("CPA_API_KEY", "Tonight123@")
+    model = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
+
     payload = {
-        "model": "agy/gemini-3.7-flash",
+        "model": model,
         "messages": [
             {
                 "role": "system",
@@ -61,7 +66,7 @@ def test_omp_chat_completions():
                 "type": "function",
                 "function": {
                     "name": "glob",
-                    "description": "Find files",
+                    "description": "Find files by pattern (maps to find_by_name)",
                     "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}}, "required": ["pattern"]}
                 }
             },
@@ -70,7 +75,7 @@ def test_omp_chat_completions():
                 "function": {
                     "name": "task",
                     "description": "Run subtask",
-                    "parameters": {"type": "object", "properties": {"prompt": {"type": "string"}}, "required": ["prompt"]}
+                    "parameters": {"type": "object", "properties": {"context": {"type": "string"}, "tasks": {"type": "array"}}, "required": ["context", "tasks"]}
                 }
             },
             {
@@ -78,29 +83,30 @@ def test_omp_chat_completions():
                 "function": {
                     "name": "ask",
                     "description": "Ask question",
-                    "parameters": {"type": "object", "properties": {"question": {"type": "string"}}, "required": ["question"]}
+                    "parameters": {"type": "object", "properties": {"questions": {"type": "array"}}, "required": ["questions"]}
                 }
             },
             {
                 "type": "function",
                 "function": {
-                    "name": "todo",
-                    "description": "Manage tasks",
-                    "parameters": {"type": "object", "properties": {"action": {"type": "string"}}, "required": ["action"]}
+                    "name": "web_search",
+                    "description": "Search the web",
+                    "parameters": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
                 }
             }
         ],
         "stream": True
     }
     req = urllib.request.Request(
-        "http://127.0.0.1:8333/v1/chat/completions",
+        endpoint,
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
-            "Authorization": "Bearer sk-k3skgrBK1nw8fExaR"
+            "Authorization": f"Bearer {api_key}",
+            "X-Cloak-Client": "oh_my_pi"
         }
     )
-    print("=== Sending Oh My Pi stream request to /v1/chat/completions ===")
+    print(f"=== Sending Oh My Pi stream request to {endpoint} ===")
     try:
         with urllib.request.urlopen(req) as resp:
             print("STATUS:", resp.status)

@@ -39,23 +39,27 @@ A live run is `PASS` only when all of the following are true:
 6. No unknown-tool, schema, retry-loop, plugin panic, or model-gate error occurs.
 7. Controlled debug logging is disabled and truncated again after verification.
 
-## Tool direction
+## Tool direction (Canonical Safe Mapping Set)
 
-Core examples:
+The plugin enforces the 9-tool AGY CLI-native Safe Mapping Set for Oh My Pi (`oh_my_pi` / `omp`):
 
-| OMP | Antigravity |
-| --- | --- |
-| `bash` | `run_command` |
-| `read` | `view_file` |
-| `edit` | `replace_file_content` |
-| `write` | `write_to_file` |
-| `grep` | `grep_search` |
-| `glob` | `list_dir` |
+| OMP (Source) | Antigravity (Target) | Classification |
+| :--- | :--- | :--- |
+| `read` | `view_file` | Transport exception (files, dirs, URLs, `xd://` devices) |
+| `write` | `write_to_file` | Transport exception (files, `xd://` device execution) |
+| `edit` | `replace_file_content` | Semantic alias (preserves OMP hashline wire format) |
+| `bash` | `run_command` | Direct semantic alias |
+| `grep` | `grep_search` | Direct semantic alias |
+| `glob` | `find_by_name` | Direct semantic alias (pattern search) |
+| `task` | `invoke_subagent` | Direct semantic alias (batch subagent spawning) |
+| `ask` | `ask_question` | Direct semantic alias (interactive UI) |
+| `web_search` | `search_web` | Direct semantic alias (when tool is exposed) |
+
+Intentional pass-through tools: `todo`, `hub`, `eval`, `vibe_*` (vibe_spawn, vibe_send, vibe_wait, vibe_kill, vibe_list), and Autoresearch tools (`init_experiment`, `run_experiment`, `log_experiment`, `update_notes`). These remain completely unmutated.
 
 The full mapping table lives in [CONTEXT.md](../CONTEXT.md).
 
-OMP auxiliary devices and MCP servers are typically mounted under `xd://...` and invoked through `read`/`write`; top-level `mcp__*` tools, when present, remain pass-through traffic.
-
+OMP auxiliary devices and MCP servers are typically mounted under `xd://...` and invoked through `read`/`write`; top-level `mcp__*` tools, when present, remain pass-through traffic. No parameter schema translation or `xd://` parameter rewriting is performed.
 ## 1. Discover the real Docker runtime
 
 Do not assume a historical container name or `F:\cliproxy` path. Resolve the active Compose project and bind mounts first:
@@ -165,13 +169,12 @@ For a minimal one-shot smoke instead of the TUI:
 omp --profile cloak-live `
   --model cpa/agy/gemini-3.8-flash `
   --cwd F:\CodeBase\antigravity-cloak `
-  --tools bash,read,edit,write,todo `
+  --tools bash,read,edit,write,grep,glob `
   --no-session `
   --auto-approve `
   --max-time 2m `
   -p "Use bash exactly once to run: git rev-parse --short HEAD. Report the exact output."
 ```
-
 ## 5. Controlled debug proof
 
 `CPA_FILTER_DEBUG` writes full request/response/stream bodies. Enable it only for a small controlled run and never publish the raw log.

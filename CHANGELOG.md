@@ -6,6 +6,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 
 ## [Unreleased]
 
+### Added
+- Adopted the 9-tool AGY CLI-native Safe Mapping Set for Oh My Pi (`read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`) with static source and target identity inventories (Issue #26).
+- Fail-closed Protected OMP routing for explicit OMP markers on `agy/*` routes with strict single-document JSON validation, base identity declaration collision rejection, and exact 503 JSON rejection (`omp_cloak_required`) before upstream execution (Issue #27).
+- Request-scoped active reverse authority: only canonical pairs whose source declaration was actually transformed become active for reverse uncloaking in correlated responses and streams (Issue #27).
+- Durable `ExplicitOMPNonAGYBypass` path for marked OMP traffic on non-`agy/` routes, pinning zero-mutation bypass state by host `RequestID` across request, response, and stream (Issue #27).
+- Request lifecycle management via CLIProxyAPI `request_lifecycle_plugin` and `request.complete` callback, keeping route state logically separate from disposable SSE state with pre-payload rehydration support (Issue #27).
+- Terminal canonical Protected brand policy: `Oh My Pi`, `oh-my-pi`, and `omp` mask to terminal `Antigravity` without operator override or reprocessing, while preserving literal `.omp` path segments and restoring assistant-visible `Antigravity -> omp` (Issue #27).
+- Deterministic release-gate acceptance test suite proving all nine canonical Safe Mapping pairs, transport exceptions, mixed pass-through traffic, RequestID correlation, and lifecycle invariants (Issue #28).
+- Configured isolated `cloak-live` profile with explicit `X-Cloak-Client: oh_my_pi` marker (Issue #28).
+
+### Changed
+- Converted `todo`, `hub`, `eval`, `vibe_*`, and Autoresearch tools into intentional pass-through tools that remain unmutated (Issue #26).
+- Replaced `glob -> list_dir` with `glob -> find_by_name` (Issue #26).
+- Clarified that canonical AGY targets alone are corroboration-only and cannot authoritatively attribute no-marker traffic to OMP (Issue #26).
+- Updated documentation (`README.md`, `CONTEXT.md`, `AGENTS.md`, `docs/verification-checklist.md`, `docs/specs/oh-my-pi-cloaking-spec.md`) and live test fixtures (`tests/test_omp.py`, `tests/test_client.py`) to the shipped Safe Mapping Set and routing contracts (Issue #28).
 ## [0.4.4] - 2026-09-06
 
 ### Fixed

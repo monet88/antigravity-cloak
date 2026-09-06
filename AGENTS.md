@@ -91,8 +91,7 @@ exact key string back to the client and tool names are case-sensitive.
 Supported clients:
 - `claude_code` (PascalCase: `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `ToolSearch`, `Skill`, `Workflow`)
 - `codex` (snake_case: `shell_command`, `apply_patch`, `request_user_input`, `view_image`, `update_plan`, `tool_search`, `get_goal`, `create_goal`, `update_goal`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`)
-- `oh_my_pi` (lowercase: standard tools `read`, `write`, `edit`, `bash`, `grep`, `glob`, `task`, `ask`, `todo`, `hub`, `web_search`, `eval`, plus Vibe Mode `vibe_*` and Autoresearch Mode `*_experiment`, `update_notes`)
-
+- `oh_my_pi` (9-tool Safe Mapping Set: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Intentional pass-through: `todo`, `hub`, `eval`, `vibe_*`, and Autoresearch tools.)
 > Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 > Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
 
@@ -100,8 +99,12 @@ Supported clients:
 - **Oh My Pi (`oh_my_pi`)** mounts MCP servers under the virtual-device protocol (`xd://mcp__<server>_<tool>`) and invokes them through its standard `read`/`write` tools. Those core tools are already cloaked to `view_file`/`write_to_file`, so OMP MCP traffic is protected without a separate top-level mapping.
 - **Do not convert OMP virtual-device MCP calls into `call_mcp_tool`.** That would require additional payload/schema transformation and risks breaking streaming semantics.
 - **Top-level `mcp__*` tools** from clients that expose them directly remain pass-through traffic.
-
-### Two casing rules that bite
+### Oh My Pi Routing & Lifecycle (Issue #25, #26, #27, #28)
+1. **ProtectedAGY Precedence**: Explicit OMP marker (`X-Cloak-Client: oh_my_pi` / `omp` / `oh-my-pi`) on `agy/*` routes bypasses generic `model_prefixes` and enforces fail-closed protection. The request must pass strict single-document JSON admission, declaration collision validation (comparing final base identities), and canonical validation. Any admission failure terminates with an exact HTTP 503 JSON error (`omp_cloak_required`) before upstream execution.
+2. **Request-Scoped Active Reverse**: Only canonical pairs whose source tool was actually declared and transformed in that request become active in the reverse map. Inactive canonical targets and native AGY target-only traffic are never reverse-cloaked.
+3. **ExplicitOMPNonAGYBypass**: Explicit OMP marker on non-`agy/` routes consumes the marker, pins a durable bypass state keyed by host `RequestID`, and performs zero tool or brand mutation across request, response, and stream.
+4. **Lifecycle Ownership**: Route state (`ProtectedAGY` / `ExplicitOMPNonAGYBypass`) is managed by `explicitOMPLifecycleManager` and cleaned only on `request.complete` (`MethodRequestComplete`). Disposable stream sessions are cleaned on `[DONE]`, but pre-payload disposable state can be rehydrated deterministically solely from pinned route state.
+5. **Protected Brand Policy**: `Oh My Pi`, `oh-my-pi`, and `omp` are masked to `Antigravity` as terminal outputs (cannot be overridden or reprocessed by operator custom mappings). Literal `.omp` path segments (`.omp/foo`, `C:\Users\...\.omp\agent`) are strictly preserved. Correlated assistant text restores `Antigravity -> omp` using pinned route authority.
 1. sourceFormat normalization. The proxy sends SourceFormat="claude" for
    Claude Code, but the body-walking branches only understand "anthropic" /
    "openai". normalizeSourceFormat maps claude/antigravity -> anthropic and
