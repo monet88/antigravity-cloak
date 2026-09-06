@@ -1092,7 +1092,7 @@ func TestRewriteRequestBodyCloaksOhMyPiTools(t *testing.T) {
 		t.Errorf("system prompt = %q, want 'Oh My Pi' replaced with 'Antigravity'", sys)
 	}
 
-	// Assert tools cloaked
+	// Assert tools cloaked according to the canonical Safe Mapping Set
 	toolsRaw := parsed["tools"].([]any)
 	expectedMap := map[string]string{
 		"read":       "view_file",
@@ -1100,12 +1100,9 @@ func TestRewriteRequestBodyCloaksOhMyPiTools(t *testing.T) {
 		"edit":       "replace_file_content",
 		"bash":       "run_command",
 		"grep":       "grep_search",
-		"glob":       "list_dir",
+		"glob":       "find_by_name",
 		"task":       "invoke_subagent",
 		"ask":        "ask_question",
-		"todo":       "manage_task",
-		"hub":        "send_message",
-		"eval":       "execute_code",
 		"web_search": "search_web",
 	}
 	cloakedNames := make(map[string]bool, len(toolsRaw))
@@ -1120,7 +1117,19 @@ func TestRewriteRequestBodyCloaksOhMyPiTools(t *testing.T) {
 			t.Errorf("expected cloaked tool %q (from %q) in tools array", want, orig)
 		}
 	}
-
+	// Assert removed static mappings pass through unchanged
+	passThroughExpected := []string{"todo", "hub", "eval"}
+	for _, pt := range passThroughExpected {
+		if !cloakedNames[pt] {
+			t.Errorf("expected intentional pass-through tool %q in tools array", pt)
+		}
+	}
+	staleTargets := []string{"manage_task", "send_message", "execute_code", "list_dir"}
+	for _, st := range staleTargets {
+		if cloakedNames[st] {
+			t.Errorf("stale target %q should not be present in tools array", st)
+		}
+	}
 	// Assert tool_choice cloaked
 	tc := parsed["tool_choice"].(map[string]any)["function"].(map[string]any)
 	if tc["name"] != "run_command" {
@@ -1249,11 +1258,19 @@ func TestDetectClientOhMyPi(t *testing.T) {
 		t.Fatalf("detectClient(%v) = %q, want 'oh_my_pi'", toolNames, client)
 	}
 
-	// Cloaked tool names detection
-	cloakedTargets := []string{"view_file", "run_command", "replace_file_content", "write_to_file", "grep_search", "list_dir", "invoke_subagent", "ask_question", "manage_task", "send_message", "execute_code", "search_web"}
+	// Cloaked tool names detection: target names alone are never sufficient
+	// to attribute to oh_my_pi without an independent signal.
+	cloakedTargets := []string{"view_file", "run_command", "replace_file_content", "write_to_file", "grep_search", "find_by_name", "invoke_subagent", "ask_question", "search_web"}
 	cloakedClient := detectCloakedClient(cloakedTargets)
-	if cloakedClient != "oh_my_pi" {
-		t.Fatalf("detectCloakedClient(%v) = %q, want 'oh_my_pi'", cloakedTargets, cloakedClient)
+	if cloakedClient == "oh_my_pi" {
+		t.Fatalf("detectCloakedClient(%v) = %q, want non-oh_my_pi for standalone targets", cloakedTargets, cloakedClient)
+	}
+	// When independent attribution is present, corroboration succeeds.
+	if !corroborateCloakedTargetOMP(cloakedTargets) {
+		t.Fatalf("corroborateCloakedTargetOMP(%v) = false, want true", cloakedTargets)
+	}
+	if got := detectCloakedClientWithSignal(cloakedTargets, true); got != "oh_my_pi" {
+		t.Fatalf("detectCloakedClientWithSignal(%v, true) = %q, want 'oh_my_pi'", cloakedTargets, got)
 	}
 }
 
@@ -1386,15 +1403,15 @@ func TestMCPPassthroughBothDirections(t *testing.T) {
 		t.Fatal("cached uncloak pattern for oh_my_pi is nil")
 	}
 	chunk := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[" +
-		"{\"index\":0,\"function\":{\"name\":\"execute_code\"}}," +
+		"{\"index\":0,\"function\":{\"name\":\"run_command\"}}," +
 		"{\"index\":1,\"function\":{\"name\":\"mcp__fs__read_file\"}}]}}]}\n\n")
 	streamOut, changedStream := uncloakStreamChunk(chunk, cached)
 	if !changedStream {
 		t.Fatal("expected stream chunk to be uncloaked")
 	}
 	streamStr := string(streamOut)
-	if !strings.Contains(streamStr, `"name":"eval"`) {
-		t.Fatalf("expected execute_code restored to eval: %s", streamStr)
+	if !strings.Contains(streamStr, `"name":"bash"`) {
+		t.Fatalf("expected run_command restored to bash: %s", streamStr)
 	}
 	if !strings.Contains(streamStr, `"name":"mcp__fs__read_file"`) {
 		t.Fatalf("MCP tool name was molested in stream chunk: %s", streamStr)
@@ -1791,37 +1808,61 @@ func TestStreamSessionManagerCleanupStaleSessions(t *testing.T) {
 }
 
 func TestDetectCloakedClientOhMyPiStandardNineTools(t *testing.T) {
-	// Standard default 9 tools sent by Oh My Pi after cloaking
+	// Canonical 9 tools sent by Oh My Pi after cloaking (using find_by_name, not list_dir)
 	ompCloakedTools := []string{
 		"view_file", "write_to_file", "replace_file_content",
-		"run_command", "grep_search", "list_dir",
-		"invoke_subagent", "ask_question", "manage_task",
+		"run_command", "grep_search", "find_by_name",
+		"invoke_subagent", "ask_question", "search_web",
 	}
+	// Target inventory is corroboration-only, never standalone OMP attribution.
+	// For no-marker / uncorrelated traffic, a set containing only canonical AGY
+	// target identities MUST NOT resolve to oh_my_pi solely from target names.
 	got := detectCloakedClient(ompCloakedTools)
-	if got != "oh_my_pi" {
-		t.Fatalf("detectCloakedClient(ompCloakedTools) = %q, want 'oh_my_pi'", got)
+	if got == "oh_my_pi" {
+		t.Fatalf("detectCloakedClient(ompCloakedTools) = %q, want non-oh_my_pi for standalone target names", got)
+	}
+	// When independent OMP attribution is present, corroboration succeeds.
+	if !corroborateCloakedTargetOMP(ompCloakedTools) {
+		t.Fatalf("corroborateCloakedTargetOMP(ompCloakedTools) = false, want true")
+	}
+	if gotCorroborated := detectCloakedClientWithSignal(ompCloakedTools, true); gotCorroborated != "oh_my_pi" {
+		t.Fatalf("detectCloakedClientWithSignal(ompCloakedTools, true) = %q, want 'oh_my_pi'", gotCorroborated)
 	}
 }
+
 func TestDetectCloakedClientNamespaceNormalized(t *testing.T) {
 	// A namespaced (qualified) cloaked set must contribute one observed
 	// identity per declared tool and never inflate the denominator with aliases.
 	qualifiedNine := []string{
 		"functions:view_file", "functions:write_to_file", "functions:replace_file_content",
-		"functions:run_command", "functions:grep_search", "functions:list_dir",
-		"functions:invoke_subagent", "functions:ask_question", "functions:manage_task",
+		"functions:run_command", "functions:grep_search", "functions:find_by_name",
+		"functions:invoke_subagent", "functions:ask_question", "functions:search_web",
 	}
-	if got := detectCloakedClient(qualifiedNine); got != "oh_my_pi" {
-		t.Fatalf("qualified nine => %q, want oh_my_pi", got)
+	// Target-only without attribution must not resolve to oh_my_pi
+	if got := detectCloakedClient(qualifiedNine); got == "oh_my_pi" {
+		t.Fatalf("qualified nine standalone => %q, want non-oh_my_pi", got)
+	}
+	if !corroborateCloakedTargetOMP(qualifiedNine) {
+		t.Fatalf("corroborateCloakedTargetOMP(qualifiedNine) = false, want true")
+	}
+	if got := detectCloakedClientWithSignal(qualifiedNine, true); got != "oh_my_pi" {
+		t.Fatalf("qualified nine with signal => %q, want oh_my_pi", got)
 	}
 
 	// Mixed qualified/unqualified forms of the same tool de-duplicate to one identity.
 	mixed := []string{
 		"view_file", "functions:write_to_file", "default_api:replace_file_content",
-		"run_command", "grep_search", "list_dir",
-		"invoke_subagent", "ask_question", "manage_task",
+		"run_command", "grep_search", "find_by_name",
+		"invoke_subagent", "ask_question", "search_web",
 	}
-	if got := detectCloakedClient(mixed); got != "oh_my_pi" {
-		t.Fatalf("mixed nine => %q, want oh_my_pi", got)
+	if got := detectCloakedClient(mixed); got == "oh_my_pi" {
+		t.Fatalf("mixed nine standalone => %q, want non-oh_my_pi", got)
+	}
+	if !corroborateCloakedTargetOMP(mixed) {
+		t.Fatalf("corroborateCloakedTargetOMP(mixed) = false, want true")
+	}
+	if got := detectCloakedClientWithSignal(mixed, true); got != "oh_my_pi" {
+		t.Fatalf("mixed nine with signal => %q, want oh_my_pi", got)
 	}
 
 	// A set of observed identities that is mostly non-targets (below the 80%
@@ -1834,13 +1875,19 @@ func TestDetectCloakedClientNamespaceNormalized(t *testing.T) {
 	if got := detectCloakedClient(belowThreshold); got != "" {
 		t.Fatalf("below-threshold set should not qualify, got %q", got)
 	}
+	if corroborateCloakedTargetOMP(belowThreshold) {
+		t.Fatalf("corroborateCloakedTargetOMP(belowThreshold) = true, want false")
+	}
+	if got := detectCloakedClientWithSignal(belowThreshold, true); got != "" {
+		t.Fatalf("below-threshold set with signal should not qualify, got %q", got)
+	}
 }
 
 func TestBuildUncloakTableFallbackQualified(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	// Request body is already cloaked with qualified names, and there is no
-	// RequestID pre-registration — the fallback path must still identify the
-	// client from the normalized observed identities.
+	// RequestID pre-registration or independent OMP attribution.
+	// Target names alone MUST NOT authorize OMP reverse mutation.
 	body := `{
 		"tools":[
 			{"type":"function","function":{"name":"functions:view_file"}},
@@ -1848,18 +1895,38 @@ func TestBuildUncloakTableFallbackQualified(t *testing.T) {
 			{"type":"function","function":{"name":"functions:replace_file_content"}},
 			{"type":"function","function":{"name":"functions:run_command"}},
 			{"type":"function","function":{"name":"functions:grep_search"}},
-			{"type":"function","function":{"name":"functions:list_dir"}},
+			{"type":"function","function":{"name":"functions:find_by_name"}},
 			{"type":"function","function":{"name":"functions:invoke_subagent"}},
 			{"type":"function","function":{"name":"functions:ask_question"}},
-			{"type":"function","function":{"name":"functions:manage_task"}}
+			{"type":"function","function":{"name":"functions:search_web"}}
 		]
 	}`
 	uncloakTable, client := buildUncloakTable([]byte(body), "openai")
-	if client != "oh_my_pi" {
-		t.Fatalf("client = %q, want oh_my_pi (uncloakTable=%v)", client, uncloakTable)
+	if client == "oh_my_pi" {
+		t.Fatalf("target-only body must not resolve to oh_my_pi, got client=%q", client)
 	}
-	if uncloakTable == nil || uncloakTable["view_file"] != "read" {
-		t.Fatalf("expected oh_my_pi uncloak mapping view_file->read, got %v", uncloakTable)
+	if uncloakTable != nil && uncloakTable["view_file"] == "read" {
+		t.Fatalf("target-only body must not authorize OMP reverse mutation, got %v", uncloakTable)
+	}
+
+	// When independent source-side evidence exists in the original request,
+	// buildUncloakTable successfully identifies oh_my_pi and builds the table.
+	origBody := `{
+		"tools":[
+			{"type":"function","function":{"name":"functions:read"}},
+			{"type":"function","function":{"name":"functions:write"}},
+			{"type":"function","function":{"name":"functions:edit"}},
+			{"type":"function","function":{"name":"functions:bash"}},
+			{"type":"function","function":{"name":"functions:grep"}},
+			{"type":"function","function":{"name":"functions:glob"}}
+		]
+	}`
+	origTable, origClient := buildUncloakTable([]byte(origBody), "openai")
+	if origClient != "oh_my_pi" {
+		t.Fatalf("origBody client = %q, want 'oh_my_pi'", origClient)
+	}
+	if origTable == nil || origTable["view_file"] != "read" || origTable["find_by_name"] != "glob" {
+		t.Fatalf("expected OMP uncloak table with view_file->read and find_by_name->glob, got %v", origTable)
 	}
 }
 
@@ -1965,10 +2032,10 @@ func TestDetectClientWithNamespacePrefix(t *testing.T) {
 
 func TestRewriteRequestBodyWithNamespacePrefix(t *testing.T) {
 	body := `{
-		"system": "You have access to functions:read and functions:todo.",
+		"system": "You have access to functions:read and functions:task.",
 		"tools": [
 			{"type": "function", "function": {"name": "functions:read", "description": "Read file"}},
-			{"type": "function", "function": {"name": "functions:todo", "description": "Manage tasks"}},
+			{"type": "function", "function": {"name": "functions:task", "description": "Delegate tasks"}},
 			{"type": "function", "function": {"name": "default_api:bash", "description": "Execute command"}}
 		],
 		"messages": [
@@ -2005,8 +2072,8 @@ func TestRewriteRequestBodyWithNamespacePrefix(t *testing.T) {
 	if t0 != "functions:view_file" {
 		t.Errorf("t0 name = %q, want functions:view_file", t0)
 	}
-	if t1 != "functions:manage_task" {
-		t.Errorf("t1 name = %q, want functions:manage_task", t1)
+	if t1 != "functions:invoke_subagent" {
+		t.Errorf("t1 name = %q, want functions:invoke_subagent", t1)
 	}
 	if t2 != "default_api:run_command" {
 		t.Errorf("t2 name = %q, want default_api:run_command", t2)
@@ -2025,7 +2092,7 @@ func TestRewriteRequestBodyWithNamespacePrefix(t *testing.T) {
 
 	// Verify system prompt tool replacement
 	sys := parsed["system"].(string)
-	if strings.Contains(sys, "functions:read") || strings.Contains(sys, "functions:todo") {
+	if strings.Contains(sys, "functions:read") || strings.Contains(sys, "functions:task") {
 		t.Errorf("system prompt leaked original names: %s", sys)
 	}
 }

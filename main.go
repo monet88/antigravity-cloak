@@ -2106,28 +2106,97 @@ var defaultCloakTables = map[string]map[string]string{
 		"read_mcp_resource":           "read_resource",
 	},
 	"oh_my_pi": {
-		"read":            "view_file",
-		"write":           "write_to_file",
-		"edit":            "replace_file_content",
-		"bash":            "run_command",
-		"grep":            "grep_search",
-		"glob":            "list_dir",
-		"task":            "invoke_subagent",
-		"ask":             "ask_question",
-		"todo":            "manage_task",
-		"hub":             "send_message",
-		"web_search":      "search_web",
-		"eval":            "execute_code",
-		"vibe_spawn":      "define_subagent",
-		"vibe_send":       "schedule",
-		"vibe_wait":       "wait",
-		"vibe_kill":       "cancel",
-		"vibe_list":       "list",
-		"init_experiment": "create_goal",
-		"run_experiment":  "call_mcp_tool",
-		"log_experiment":  "update_plan",
-		"update_notes":    "update_goal",
+		"read":       "view_file",
+		"write":      "write_to_file",
+		"edit":       "replace_file_content",
+		"bash":       "run_command",
+		"grep":       "grep_search",
+		"glob":       "find_by_name",
+		"task":       "invoke_subagent",
+		"ask":        "ask_question",
+		"web_search": "search_web",
 	},
+}
+
+// canonicalOMPSafeMappingSet is the canonical nine-tool Safe Mapping Set for Oh My Pi.
+var canonicalOMPSafeMappingSet = map[string]string{
+	"read":       "view_file",
+	"write":      "write_to_file",
+	"edit":       "replace_file_content",
+	"bash":       "run_command",
+	"grep":       "grep_search",
+	"glob":       "find_by_name",
+	"task":       "invoke_subagent",
+	"ask":        "ask_question",
+	"web_search": "search_web",
+}
+
+// ompSourceIdentityInventory contains the static OMP source tool names used
+// for request body detection in detectClient. It contains the nine canonical
+// Safe Mapping Set source names plus former OMP-specific pass-through names:
+// todo, hub, eval, the finite 5 vibe_* tools, and 4 autoresearch tools.
+// Arbitrary operator tool_mappings must not extend this inventory.
+var ompSourceIdentityInventory = map[string]bool{
+	"read":            true,
+	"write":           true,
+	"edit":            true,
+	"bash":            true,
+	"grep":            true,
+	"glob":            true,
+	"task":            true,
+	"ask":             true,
+	"web_search":      true,
+	"todo":            true,
+	"hub":             true,
+	"eval":            true,
+	"vibe_spawn":      true,
+	"vibe_send":       true,
+	"vibe_wait":       true,
+	"vibe_kill":       true,
+	"vibe_list":       true,
+	"init_experiment": true,
+	"run_experiment":  true,
+	"log_experiment":  true,
+	"update_notes":    true,
+}
+
+// ompCloakedTargetIdentityInventory contains the nine canonical AGY-facing
+// target tool names from the Safe Mapping Set.
+// These target identities are corroboration/static evidence only and
+// MUST NEVER be used as standalone attribution without an independent OMP signal.
+var ompCloakedTargetIdentityInventory = map[string]bool{
+	"view_file":            true,
+	"write_to_file":        true,
+	"replace_file_content": true,
+	"run_command":          true,
+	"grep_search":          true,
+	"find_by_name":         true,
+	"invoke_subagent":      true,
+	"ask_question":         true,
+	"search_web":           true,
+}
+
+// corroborateCloakedTargetOMP verifies whether observed tool names match the
+// canonical OMP cloaked-target inventory (>= 3 hits and >= 80% coverage).
+// As required by Issue #26, this is corroboration/validation evidence ONLY
+// and MUST NOT be used as standalone OMP attribution.
+func corroborateCloakedTargetOMP(toolNames []string) bool {
+	if len(toolNames) < 3 {
+		return false
+	}
+	observedSet := make(map[string]bool, len(toolNames))
+	for _, n := range toolNames {
+		_, base := splitToolNamespace(n)
+		observedSet[base] = true
+	}
+	totalObserved := len(observedSet)
+	hits := 0
+	for target := range ompCloakedTargetIdentityInventory {
+		if observedSet[target] {
+			hits++
+		}
+	}
+	return hits >= 3 && hits*minCloakTargetHitDen >= totalObserved*minCloakTargetHitNum
 }
 
 // clientDistinctiveTools lists harness-specific source tool names whose
@@ -2135,8 +2204,8 @@ var defaultCloakTables = map[string]map[string]string{
 // common words ("read", "bash") collide with arbitrary user-defined tools,
 // so those names require several simultaneous matches instead.
 //
-// MUST stay in sync with the matching keys of defaultCloakTables; update both
-// together when a table changes.
+// For Oh My Pi, this matches the distinctive subset of ompSourceIdentityInventory;
+// for other clients, it stays in sync with defaultCloakTables.
 var clientDistinctiveTools = map[string]map[string]bool{
 	"oh_my_pi": {
 		"hub": true, "task": true, "todo": true, "eval": true, "web_search": true,
@@ -3571,8 +3640,10 @@ func extractToolNames(body map[string]any, sourceFormat string) []string {
 }
 
 // detectClient identifies the client from ORIGINAL (uncloaked) tool names.
-// It is data-driven: it checks cloak table keys (source tool names) against
-// the provided tool name list. The client with the most key matches wins.
+// It checks candidate source tool names against the provided tool name list.
+// For oh_my_pi, detection keys off the static ompSourceIdentityInventory and
+// clientDistinctiveTools rather than arbitrary runtime cfg.ToolMappings["oh_my_pi"].
+// The client with the most key matches wins.
 func detectClient(toolNames []string) string {
 	cfg := activeFilterConfig()
 	nameSet := make(map[string]bool, len(toolNames)*2)
@@ -3584,11 +3655,31 @@ func detectClient(toolNames []string) string {
 	}
 	bestClient := ""
 	bestCount := 0
-	for client, cloakTable := range cfg.ToolMappings {
+
+	// Candidates to evaluate: clients from cfg.ToolMappings plus "oh_my_pi"
+	clients := make([]string, 0, len(cfg.ToolMappings)+1)
+	for c := range cfg.ToolMappings {
+		if c != "oh_my_pi" {
+			clients = append(clients, c)
+		}
+	}
+	clients = append(clients, "oh_my_pi")
+	sort.Strings(clients)
+
+	for _, client := range clients {
 		count := 0
-		for orig := range cloakTable {
-			if nameSet[orig] {
-				count++
+		if client == "oh_my_pi" {
+			for orig := range ompSourceIdentityInventory {
+				if nameSet[orig] {
+					count++
+				}
+			}
+		} else {
+			cloakTable := cfg.ToolMappings[client]
+			for orig := range cloakTable {
+				if nameSet[orig] {
+					count++
+				}
 			}
 		}
 
@@ -3644,13 +3735,21 @@ func (m cloakTargetMatch) atFullCoverage() bool {
 // checking cloak TARGET names against the observed tool identities.
 // Namespace prefixes are normalised away so each declared tool contributes a
 // single observed identity and the observed denominator is never inflated by
-// an alias. A candidate qualifies when at least 3 tools match AND it covers
-// at least 80% of the observed unique identities (hits/observed). The static
-// table length is not an alternative qualification path.
-// When multiple distinct tables reach full coverage (hits == tableSize),
-// native Antigravity traffic serving every tool table is indistinguishable,
-// so cloaking is skipped.
+// an alias.
+//
+// Target names alone are NEVER sufficient to attribute traffic to oh_my_pi
+// because all canonical OMP targets are native Antigravity tool names.
+// Non-OMP clients continue to be detected according to their target tables.
 func detectCloakedClient(toolNames []string) string {
+	return detectCloakedClientWithSignal(toolNames, false)
+}
+
+// detectCloakedClientWithSignal extends detectCloakedClient with an explicit
+// attribution signal parameter. When ompAttributed is false, oh_my_pi is excluded
+// from standalone target-based attribution. When ompAttributed is true (e.g. from
+// correlated request state, UA evidence, or source body evidence), the static
+// canonical target inventory is used for corroboration rather than runtime tool_mappings.
+func detectCloakedClientWithSignal(toolNames []string, ompAttributed bool) string {
 	if len(toolNames) < 3 {
 		return ""
 	}
@@ -3663,22 +3762,47 @@ func detectCloakedClient(toolNames []string) string {
 
 	totalObserved := len(observedSet)
 	var matches []cloakTargetMatch
-	for client, cloakTable := range cfg.ToolMappings {
-		if len(cloakTable) == 0 {
-			continue
+
+	var clients []string
+	for client := range cfg.ToolMappings {
+		if client != "oh_my_pi" {
+			clients = append(clients, client)
 		}
+	}
+	if ompAttributed {
+		clients = append(clients, "oh_my_pi")
+	}
+	sort.Strings(clients)
+
+	for _, client := range clients {
 		hits := 0
-		for _, target := range cloakTable {
-			if observedSet[target] {
-				hits++
+		tableSize := 0
+		if client == "oh_my_pi" {
+			tableSize = len(ompCloakedTargetIdentityInventory)
+			for target := range ompCloakedTargetIdentityInventory {
+				if observedSet[target] {
+					hits++
+				}
+			}
+		} else {
+			cloakTable := cfg.ToolMappings[client]
+			tableSize = len(cloakTable)
+			if tableSize == 0 {
+				continue
+			}
+			for _, target := range cloakTable {
+				if observedSet[target] {
+					hits++
+				}
 			}
 		}
+
 		if hits >= 3 && hits*minCloakTargetHitDen >= totalObserved*minCloakTargetHitNum {
 			matches = append(matches, cloakTargetMatch{
 				client:    client,
 				hits:      hits,
 				observed:  totalObserved,
-				tableSize: len(cloakTable),
+				tableSize: tableSize,
 			})
 		}
 	}
