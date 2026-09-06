@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Issue #28 Cloak-Live Acceptance Gate Runner
+Issue #28 Cloak-Live Supplemental Gateway & Model Protocol Runner
 
-Tests all 9 canonical Safe Mapping Set entries through:
-  real OMP request -> gateway -> upstream AGY tool call -> stream reverse -> OMP tool execution -> result continuation.
-Also tests:
-  - Explicit OMP non-AGY bypass on plain gemini-3.8-flash
-  - Protected brand restoration and .omp path preservation
-  - Lifecycle cleanup
+NOTE: This script is a supplemental raw-HTTP protocol harness verifying gateway
+admission, tool declaration cloaking, streamed model tool-call reversing, and
+result continuation at the wire HTTP layer.
+
+Real client execution (OMP TUI/CLI executing native tools, rendering interactive UI,
+and spawning subagents) is separately validated through the real OMP CLI baseline
+in docs/verification-checklist.md.
 """
 
 import json
@@ -373,8 +374,8 @@ def test_brand_restoration():
     payload = {
         "model": PROTECTED_MODEL,
         "messages": [
-            {"role": "system", "content": "You are a helpful assistant. Mention Antigravity in your response."},
-            {"role": "user", "content": "Say: 'Hello from Antigravity and Antigravity'."}
+            {"role": "system", "content": "You are a helpful assistant. Output this exact phrase: 'Hello from Antigravity and Antigravity'."},
+            {"role": "user", "content": "Repeat: 'Hello from Antigravity and Antigravity'."}
         ],
         "stream": True
     }
@@ -383,16 +384,45 @@ def test_brand_restoration():
     content = res["content"]
     print(f"     Received response: {content.strip()}")
 
-    # For oh_my_pi client, Antigravity should be restored to omp in assistant text
-    if "omp" in content or "Oh My Pi" in content:
-        print(f"PASS: Brand restored Antigravity to omp in stream!")
-        return True, "Brand restored Antigravity to omp"
-    elif "Antigravity" not in content:
-        print(f"PASS: Brand Antigravity masked/restored (no Antigravity leaked)")
-        return True, "No Antigravity leaked"
-    else:
-        print(f"NOTE: Content received: {content}")
-        return True, "Brand check completed"
+    # Hard gate: Protected assistant-visible Antigravity must NOT leak.
+    if "Antigravity" in content or "Antigravity" in content:
+        print(f"FAIL: Leaked protected Antigravity brand in assistant stream: {content}")
+        return False, f"Leaked protected brand in assistant stream: {content}"
+
+    # Hard gate: For oh_my_pi client, canonical terminal alias 'omp' must be present
+    if "omp" not in content and "Oh My Pi" not in content:
+        print(f"FAIL: Expected restored canonical brand 'omp' in stream, got: {content}")
+        return False, f"Expected canonical brand 'omp' in stream, got: {content}"
+
+    print(f"PASS: Brand restored Antigravity to omp in stream with zero leakage!")
+    return True, "Brand restored Antigravity to omp with zero leakage"
+
+def test_dot_omp_path_preservation():
+    print(f"\n---> Testing .omp path segment byte-for-byte preservation")
+
+    expected_path = "C:\\Users\\monet\\.omp\\agent and /.omp/config"
+    payload = {
+        "model": PROTECTED_MODEL,
+        "messages": [
+            {"role": "user", "content": f"Repeat this exact path text verbatim: {expected_path}"}
+        ],
+        "stream": True
+    }
+
+    res = send_stream_request(payload, extra_headers={"X-Cloak-Client": "oh_my_pi"})
+    content = res["content"]
+    print(f"     Received path response: {content.strip()}")
+
+    if ".omp" not in content:
+        print(f"FAIL: Expected '.omp' in response, got: {content}")
+        return False, f"Missing '.omp' in response: {content}"
+
+    if ".Antigravity" in content:
+        print(f"FAIL: '.omp' was erroneously corrupted to '.Antigravity': {content}")
+        return False, f"Erronously replaced '.omp' with '.Antigravity': {content}"
+
+    print(f"PASS: .omp path segments preserved byte-for-byte!")
+    return True, ".omp path segments preserved byte-for-byte"
 
 def main():
     print("=================================================================")
@@ -418,6 +448,9 @@ def main():
     ok_brand, msg_brand = test_brand_restoration()
     results["Protected Brand Restoration (Antigravity -> omp)"] = {"pass": ok_brand, "msg": msg_brand}
 
+    # Test .omp path preservation
+    ok_path, msg_path = test_dot_omp_path_preservation()
+    results["Protected Brand .omp Path Preservation"] = {"pass": ok_path, "msg": msg_path}
     print("\n=================================================================")
     print("  LIVE ACCEPTANCE MATRIX SUMMARY")
     print("=================================================================")

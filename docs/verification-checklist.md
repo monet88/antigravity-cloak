@@ -250,7 +250,7 @@ A real interactive OMP task exercised `bash`, `read`, `edit`, and `write`. Corre
 
 ## Validated Issue #28 cloak-live baseline - 2026-09-07
 
-The Issue #28 live acceptance gate verified against the repaired local Docker runtime:
+The Issue #28 live acceptance gate was verified against the repaired local Docker runtime:
 
 - CLIProxyAPI `v7.2.146` (Commit `d31b159`)
 - `antigravity-cloak v0.4.4` (`plugins/linux/amd64/antigravity-cloak-v0.4.4.so`)
@@ -260,17 +260,25 @@ The Issue #28 live acceptance gate verified against the repaired local Docker ru
 - Bypass model route: `gemini-3.8-flash` (`cpa/gemini-3.8-flash`)
 - Deterministic client marker: `X-Cloak-Client: oh_my_pi`
 
-Verification matrix:
-- All 9 canonical Safe Mapping Set entries proven through real OMP request -> gateway cloak -> upstream model streamed tool call -> stream reverse uncloak -> OMP tool execution -> result continuation:
-  1. `read -> view_file -> read` (PASS, verified with real OMP and test harness)
-  2. `write -> write_to_file -> write` (PASS, verified with real OMP and test harness)
-  3. `edit -> replace_file_content -> edit` (PASS, verified with real OMP and test harness)
-  4. `bash -> run_command -> bash` (PASS, verified with real OMP and test harness)
-  5. `grep -> grep_search -> grep` (PASS, verified with real OMP and test harness)
-  6. `glob -> find_by_name -> glob` (PASS, verified with real OMP and test harness)
-  7. `task -> invoke_subagent -> task` (PASS, verified with test harness)
-  8. `ask -> ask_question -> ask` (PASS, verified with test harness)
-  9. `web_search -> search_web -> web_search` (PASS, verified with test harness)
-- Explicit OMP non-AGY bypass on `gemini-3.8-flash`: PASS (zero mutation, tool call preserved as `bash`, durable bypass pinned until `request.complete`).
-- Protected brand restoration: PASS (assistant stream `Hello from Antigravity and Antigravity` restored to `Hello from omp and omp`).
-- Controlled debug provenance captured in `cpa-filter-debug.log`, container recreated without `CPA_FILTER_DEBUG`, and debug log truncated to 0 bytes.
+### 1. Real OMP End-to-End Execution Evidence (100% Native Client Execution)
+All nine canonical mappings were verified directly through native OMP CLI and TUI execution (OMP top-level declaration -> gateway cloak -> streamed AGY tool call -> stream reverse uncloak -> OMP native execution & continuation):
+1. `bash -> run_command -> bash`: Real OMP CLI (`omp -p`) ran `git rev-parse --short HEAD`; model streamed `run_command`, reversed to `bash`, executed natively in OMP, and continuation returned `1cbaf6b`.
+2. `read -> view_file -> read`: Real OMP CLI (`omp -p`) ran file read on `README.md`; model streamed `view_file`, reversed to `read`, executed natively in OMP, and continuation reported `# omp Cloak`.
+3. `write -> write_to_file -> write`: Real OMP CLI (`omp -p`) wrote `.live_smoke_tmp.txt`; model streamed `write_to_file`, reversed to `write`, executed natively in OMP, followed by verification.
+4. `edit -> replace_file_content -> edit`: Real OMP CLI (`omp -p`) edited `.live_smoke_tmp.txt` (`alpha` -> `gamma`); model streamed `replace_file_content`, reversed to `edit`, executed natively in OMP, and continuation verified `gamma beta`.
+5. `grep -> grep_search -> grep`: Real OMP CLI (`omp -p`) searched for `ProtectedAGY` in `issue28_live_gate_test.go`; model streamed `grep_search`, reversed to `grep`, executed natively in OMP, and continuation returned line 630 match.
+6. `glob -> find_by_name -> glob`: Real OMP CLI (`omp -p`) scanned `*.go` at root; model streamed `find_by_name`, reversed to `glob`, executed natively in OMP, and continuation returned the 11 matching Go files.
+7. `task -> invoke_subagent -> task`: Real OMP CLI (`omp -p`) spawned subagent `GetGitRev` to run `git rev-parse --short HEAD`; model streamed `invoke_subagent`, reversed to `task`, OMP executed the subagent task, and continuation reported commit `4faba0f`.
+8. `ask -> ask_question -> ask`: Real interactive OMP TUI session (`omp` in interactive PTY mode); model streamed `ask_question`, reversed to `ask`, OMP rendered the interactive Ask TUI selection dialog ("Do you want apples or oranges?"), user input `ENTER` selected "Apples", OMP executed tool `ask`, returned tool result continuation, and model responded with "🍎 Noted: you selected Apples."
+9. `web_search -> search_web -> web_search`: Isolated `cloak-live` profile was temporarily configured with `providers.webSearchOrder: [exa]` to expose direct top-level `web_search`; real OMP CLI executed `web_search` for `Golang 1.26 release notes`; model streamed `search_web`, reversed to `web_search`, OMP executed real Exa search, and continuation returned comprehensive Go 1.26 release summary. The isolated profile was then restored exactly to `providers.webSearchOrder: []`.
+
+### 2. Supplemental Raw-HTTP Gateway & Protocol Wire Matrix (`tests/test_issue28_live_matrix.py`)
+In addition to real OMP CLI verification, `tests/test_issue28_live_matrix.py` acts as a supplemental raw-HTTP protocol harness against `/v1/chat/completions`:
+- All 9 canonical pairs passed 2-turn simulated wire round-trips with 200 OK continuation.
+- Explicit OMP Non-AGY Bypass on `gemini-3.8-flash`: PASS (zero mutation, tool call preserved as `bash`, durable bypass pinned until `request.complete` with host `RequestID`).
+- Protected Brand Restoration: PASS (hardened check confirms assistant stream `Hello from Antigravity and Antigravity` is restored to `Hello from omp and omp` with zero leaked `Antigravity`).
+- Protected Brand `.omp` Path Preservation: PASS (path segments `C:\Users\monet\.omp\agent` and `/.omp/config` preserved byte-for-byte).
+
+### 3. Lifecycle & Debug Cleanliness
+- Pinned route authority cleaned only on `request.complete` (`MethodRequestComplete`, logged `Outcome=succeeded`).
+- Container recreated without `CPA_FILTER_DEBUG` and `/CLIProxyAPI/logs/cpa-filter-debug.log` truncated to 0 bytes.
