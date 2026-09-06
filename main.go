@@ -872,9 +872,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		cachedUncloak:           protectedCachedUncloak,
 		brandRestorationEnabled: true,
 		expected:                requestChoiceCount(req.Body),
-		disposition:             streamDispositionNone,
 	})
-	globalStreamManager.resetSession("req:"+req.RequestID, "oh_my_pi", protectedCachedUncloak, requestChoiceCount(req.Body))
 
 	return mustEnvelope(resp)
 }
@@ -2209,7 +2207,7 @@ const (
 	routeKindExplicitOMPNonAGYBypass
 )
 
-type streamDisposition int
+type streamDisposition int32
 
 const (
 	streamDispositionNone streamDisposition = iota
@@ -2224,10 +2222,31 @@ type explicitOMPRouteState struct {
 	cachedUncloak           *cachedUncloakPattern
 	brandRestorationEnabled bool
 	expected                int
-	disposition             streamDisposition
+	disposition             atomic.Int32
 	malformed               bool
 }
 
+func (s *explicitOMPRouteState) getDisposition() streamDisposition {
+	if s == nil {
+		return streamDispositionNone
+	}
+	return streamDisposition(s.disposition.Load())
+}
+
+func (s *explicitOMPRouteState) setDisposition(target streamDisposition) {
+	if s == nil {
+		return
+	}
+	for {
+		cur := s.disposition.Load()
+		if streamDisposition(cur) >= target {
+			return
+		}
+		if s.disposition.CompareAndSwap(cur, int32(target)) {
+			return
+		}
+	}
+}
 type explicitOMPLifecycleManager struct {
 	mu     sync.Mutex
 	routes map[string]*explicitOMPRouteState
@@ -2384,7 +2403,7 @@ func (m *streamSessionManager) cleanupStaleLocked() {
 		if strings.HasPrefix(k, "req:") {
 			reqID := strings.TrimPrefix(k, "req:")
 			if route := globalLifecycleManager.getRoute(reqID); route != nil && route.routeKind == routeKindProtectedAGY {
-				if s.payloadStarted || route.disposition == streamDispositionPayloadActive || len(s.tail) > 0 || hasPendingBrandCarry(s) || len(s.laneProgress) > 0 {
+				if s.payloadStarted || route.getDisposition() == streamDispositionPayloadActive || len(s.tail) > 0 || hasPendingBrandCarry(s) || len(s.laneProgress) > 0 {
 					continue
 				}
 			}
@@ -2407,7 +2426,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			debugLog("StreamSessionManager: malformed ProtectedAGY route state key=%s", key)
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
-		if protectedRoute.disposition == streamDispositionCleanTerminal {
+		if protectedRoute.getDisposition() == streamDispositionCleanTerminal {
 			debugLog("StreamSessionManager: late chunk after clean terminal key=%s", key)
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
@@ -2428,7 +2447,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
 		if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
-			if protectedRoute.disposition == streamDispositionNone {
+			if protectedRoute.getDisposition() == streamDispositionNone {
 				m.ensureSession(key, "oh_my_pi", protectedRoute.cachedUncloak, protectedRoute.expected)
 			}
 			return pluginapi.StreamChunkInterceptResponse{}
@@ -2469,11 +2488,11 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 	m.mu.Unlock()
 	if sess == nil {
 		if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
-			if protectedRoute.disposition == streamDispositionPayloadActive {
+			if protectedRoute.getDisposition() == streamDispositionPayloadActive {
 				debugLog("StreamSessionManager: disposable session lost after payload started key=%s", key)
 				return pluginapi.StreamChunkInterceptResponse{}
 			}
-			if protectedRoute.disposition == streamDispositionNone {
+			if protectedRoute.getDisposition() == streamDispositionNone {
 				sess = m.ensureSession(key, "oh_my_pi", protectedRoute.cachedUncloak, protectedRoute.expected)
 			}
 		} else {
@@ -2486,14 +2505,14 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 	if sess.cached == nil && sess.client != "oh_my_pi" {
 		return pluginapi.StreamChunkInterceptResponse{}
 	}
+	m.mu.Lock()
 	if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
-		protectedRoute.disposition = streamDispositionPayloadActive
+		protectedRoute.setDisposition(streamDispositionPayloadActive)
 		sess.payloadStarted = true
 	}
 	cached := sess.cached
 
 	// Reset buffer on first payload chunk (ChunkIndex == 0)
-	m.mu.Lock()
 	if req.ChunkIndex == 0 {
 		sess.tail = nil
 	}
@@ -2574,7 +2593,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			if !hasPendingBrandCarry(sess) {
 				m.deleteSession(key)
 				if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
-					protectedRoute.disposition = streamDispositionCleanTerminal
+					protectedRoute.setDisposition(streamDispositionCleanTerminal)
 				}
 			}
 		}
@@ -2625,7 +2644,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		if done && !hasPendingBrandCarry(sess) {
 			m.deleteSession(key)
 			if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
-				protectedRoute.disposition = streamDispositionCleanTerminal
+				protectedRoute.setDisposition(streamDispositionCleanTerminal)
 			}
 		}
 	}

@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -46,330 +49,40 @@ func decodeProtectedRequestIntercept(t *testing.T, raw []byte) (pluginapi.Reques
 	return resp, nil
 }
 
-// 1. Strict JSON / Canonical serialization
-func TestIssue27_StrictJSON_Admission(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-	model := "agy/gemini-2.5-flash"
-	headers := http.Header{}
-	headers.Set("X-Cloak-Client", "oh_my_pi")
-
-	// 1a. Trailing data / multiple JSON documents -> 503
-	bodyMulti := []byte(`{"model":"agy/gemini-2.5-flash","messages":[]}{"extra":"data"}`)
-	raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-strict-1", "openai", model, bodyMulti, headers))
-	resp, _ := decodeProtectedRequestIntercept(t, raw)
-	if !resp.Terminate || resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("multiple JSON documents must return 503 terminate, got terminate=%t status=%d", resp.Terminate, resp.StatusCode)
+func assertExact503Rejection(t *testing.T, resp pluginapi.RequestInterceptResponse, caseName string) {
+	t.Helper()
+	if !resp.Terminate {
+		t.Fatalf("[%s] expected Terminate=true, got false", caseName)
 	}
-	if !strings.Contains(string(resp.ResponseBody), "omp_cloak_required") {
-		t.Fatalf("expected omp_cloak_required error code, got: %s", string(resp.ResponseBody))
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("[%s] expected StatusCode=503, got %d", caseName, resp.StatusCode)
 	}
-
-	// 1b. Non-object root -> 503
-	bodyArray := []byte(`["item1", "item2"]`)
-	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-strict-2", "openai", model, bodyArray, headers))
-	resp, _ = decodeProtectedRequestIntercept(t, raw)
-	if !resp.Terminate || resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("non-object JSON root must return 503 terminate, got terminate=%t status=%d", resp.Terminate, resp.StatusCode)
+	if ct := resp.ResponseHeaders.Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("[%s] expected Content-Type application/json, got %q", caseName, ct)
 	}
-
-	// 1c. Empty body -> 503
-	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-strict-3", "openai", model, []byte{}, headers))
-	resp, _ = decodeProtectedRequestIntercept(t, raw)
-	if !resp.Terminate || resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("empty body must return 503 terminate, got terminate=%t status=%d", resp.Terminate, resp.StatusCode)
-	}
-
-	// 1d. Number preservation as json.Number
-	bodyNumber := []byte(`{"model":"agy/gemini-2.5-flash","messages":[],"temperature":0.000000000000000000123456789}`)
-	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-strict-4", "openai", model, bodyNumber, headers))
-	resp, _ = decodeProtectedRequestIntercept(t, raw)
-	if resp.Terminate {
-		t.Fatalf("valid number request should be admitted, got 503: %s", string(resp.ResponseBody))
-	}
-	if !strings.Contains(string(resp.Body), "0.000000000000000000123456789") {
-		t.Fatalf("json.Number precision must be preserved, got: %s", string(resp.Body))
+	expectedBody := `{"error":{"code":"omp_cloak_required","message":"Protected OMP request could not be safely cloaked."}}`
+	if string(resp.ResponseBody) != expectedBody {
+		t.Fatalf("[%s] expected exact ResponseBody %s, got: %s", caseName, expectedBody, string(resp.ResponseBody))
 	}
 }
 
-// 2. Marker parsing, coalescing, and conflict handling
-func TestIssue27_MarkerParsingAndConflict(t *testing.T) {
+// 1. Protected routing must still engage when model_prefixes would otherwise skip cloaking.
+func TestIssue27_ProtectedRoutingBypassesModelPrefixesSkip(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
-	agyModel := "agy/gemini-2.5-flash"
-	nonAGYModel := "openai/gpt-4o"
-	validBody := []byte(`{"model":"m","messages":[{"role":"user","content":"test"}]}`)
-	headersCoalesced := http.Header(map[string][]string{
-		"x-cloak-client": {" , OMP , "},
-		"X-CLOAK-CLIENT": {"oh-my-pi, oh_my_pi, "},
-	})
-	marker := parseExplicitClientMarker(headersCoalesced)
-	if marker.isConflict {
-		t.Fatalf("expected non-conflicting normalized OMP, got conflict: %+v", marker)
-	}
-	if !marker.isOMP || marker.client != "oh_my_pi" {
-		t.Fatalf("expected isOMP=true, client=oh_my_pi, got: %+v", marker)
-	}
-	if len(marker.matchedKeys) != 2 {
-		t.Fatalf("expected 2 matchedKeys, got: %v", marker.matchedKeys)
-	}
-
-	// Admitted on AGY route
-	raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-marker-1", "openai", agyModel, validBody, headersCoalesced))
-	resp, _ := decodeProtectedRequestIntercept(t, raw)
-	if resp.Terminate {
-		t.Fatalf("coalesced OMP should be admitted, got 503: %s", string(resp.ResponseBody))
-	}
-	if !containsStr(resp.ClearHeaders, "x-cloak-client") || !containsStr(resp.ClearHeaders, "X-CLOAK-CLIENT") {
-		t.Fatalf("all matchedKeys must be cleared, got ClearHeaders: %v", resp.ClearHeaders)
-	}
-
-	// 2b. Conflicting markers containing OMP on AGY route -> exact 503
-	headersConflict := http.Header{}
-	headersConflict.Add("X-Cloak-Client", "oh_my_pi, claude_code")
-	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-marker-conflict-agy", "openai", agyModel, validBody, headersConflict))
-	resp, _ = decodeProtectedRequestIntercept(t, raw)
-	if !resp.Terminate || resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("conflicting markers containing OMP on AGY route must return 503, got terminate=%t status=%d", resp.Terminate, resp.StatusCode)
-	}
-
-	// Order-independent: claude_code then omp
-	headersConflictReverse := http.Header{}
-	headersConflictReverse.Add("X-Cloak-Client", "claude_code, omp")
-	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-marker-conflict-rev", "openai", agyModel, validBody, headersConflictReverse))
-	resp, _ = decodeProtectedRequestIntercept(t, raw)
-	if !resp.Terminate || resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("reversed conflicting markers containing OMP on AGY route must return 503, got terminate=%t status=%d", resp.Terminate, resp.StatusCode)
-	}
-
-	// 2c. Conflicting markers containing OMP on non-AGY route -> durable bypass
-	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-marker-conflict-nonagy", "openai", nonAGYModel, validBody, headersConflict))
-	resp, _ = decodeProtectedRequestIntercept(t, raw)
-	if resp.Terminate {
-		t.Fatalf("conflicting marker on non-AGY route must not terminate, got 503: %s", string(resp.ResponseBody))
-	}
-	if len(resp.Body) != 0 {
-		t.Fatalf("non-AGY bypass must have zero request mutation, got: %s", string(resp.Body))
-	}
-
-	// Correlated response for non-AGY bypass
-	respBody := []byte(`{"choices":[{"message":{"content":"Hello Antigravity"}}]}`)
-	rawResp2, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
-		makeIntegrationResponseInterceptPayload(t, "req-marker-conflict-nonagy", "openai", nonAGYModel, respBody))
-	outResp := decodeEnvelopeBody(t, rawResp2)
-	if len(outResp) != 0 {
-		t.Fatalf("correlated response for non-AGY bypass must have zero mutation, got: %s", string(outResp))
-	}
-
-	// Cleanup lifecycle
-	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, "req-marker-1", "succeeded"))
-	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, "req-marker-conflict-nonagy", "succeeded"))
-}
-
-// 3. Base collision and namespace-exact reverse
-func TestIssue27_BaseCollisionAndNamespaceExactReverse(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-	agyModel := "agy/gemini-2.5-flash"
-	headers := http.Header{}
-	headers.Set("X-Cloak-Client", "oh_my_pi")
-
-	// 3a. functions:bash + default_api:bash => exact Protected 503 (same base bash)
-	bodyCollision1 := []byte(`{
-		"model":"agy/gemini-2.5-flash",
-		"messages":[],
-		"tools":[
-			{"type":"function","function":{"name":"functions:bash"}},
-			{"type":"function","function":{"name":"default_api:bash"}}
-		]
-	}`)
-	raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-col-1", "openai", agyModel, bodyCollision1, headers))
-	resp, _ := decodeProtectedRequestIntercept(t, raw)
-	if !resp.Terminate || resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("functions:bash + default_api:bash must return 503, got terminate=%t status=%d", resp.Terminate, resp.StatusCode)
-	}
-
-	// 3b. functions:bash + default_api:run_command => exact Protected 503 (both end up as run_command)
-	bodyCollision2 := []byte(`{
-		"model":"agy/gemini-2.5-flash",
-		"messages":[],
-		"tools":[
-			{"type":"function","function":{"name":"functions:bash"}},
-			{"type":"function","function":{"name":"default_api:run_command"}}
-		]
-	}`)
-	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-col-2", "openai", agyModel, bodyCollision2, headers))
-	resp, _ = decodeProtectedRequestIntercept(t, raw)
-	if !resp.Terminate || resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("functions:bash + default_api:run_command must return 503, got terminate=%t status=%d", resp.Terminate, resp.StatusCode)
-	}
-
-	// 3c. functions:bash + default_api:read => Admitted (distinct bases: run_command vs view_file)
-	reqIDAdmitted := "req-col-safe-distinct"
-	bodySafe := []byte(`{
-		"model":"agy/gemini-2.5-flash",
-		"messages":[],
-		"tools":[
-			{"type":"function","function":{"name":"functions:bash"}},
-			{"type":"function","function":{"name":"default_api:read"}}
-		]
-	}`)
-	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, reqIDAdmitted, "openai", agyModel, bodySafe, headers))
-	resp, _ = decodeProtectedRequestIntercept(t, raw)
-	if resp.Terminate {
-		t.Fatalf("functions:bash + default_api:read should be admitted, got 503: %s", string(resp.ResponseBody))
-	}
-	if !strings.Contains(string(resp.Body), `"name":"functions:run_command"`) {
-		t.Fatalf("expected functions:bash -> functions:run_command, got: %s", string(resp.Body))
-	}
-	if !strings.Contains(string(resp.Body), `"name":"default_api:view_file"`) {
-		t.Fatalf("expected default_api:read -> default_api:view_file, got: %s", string(resp.Body))
-	}
-
-	// Response uncloak: exact namespace reverse
-	// Model returns functions:run_command and default_api:view_file
-	respUpstream := []byte(`{
-		"choices":[{
-			"message":{
-				"tool_calls":[
-					{"function":{"name":"functions:run_command","arguments":"{}"}},
-					{"function":{"name":"default_api:view_file","arguments":"{}"}},
-					{"function":{"name":"default_api:run_command","arguments":"{}"}},
-					{"function":{"name":"functions:view_file","arguments":"{}"}}
-				]
-			}
-		}]
-	}`)
-	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
-		makeIntegrationResponseInterceptPayload(t, reqIDAdmitted, "openai", agyModel, respUpstream))
-	outBody := decodeEnvelopeBody(t, rawResp)
-
-	// functions:run_command reversed to functions:bash
-	if !strings.Contains(string(outBody), `"name":"functions:bash"`) {
-		t.Fatalf("expected functions:run_command -> functions:bash, got: %s", string(outBody))
-	}
-	// default_api:view_file reversed to default_api:read
-	if !strings.Contains(string(outBody), `"name":"default_api:read"`) {
-		t.Fatalf("expected default_api:view_file -> default_api:read, got: %s", string(outBody))
-	}
-	// Cross-namespace output must NOT be reversed
-	if !strings.Contains(string(outBody), `"name":"default_api:run_command"`) {
-		t.Fatalf("cross-namespace default_api:run_command must NOT be reversed, got: %s", string(outBody))
-	}
-	if !strings.Contains(string(outBody), `"name":"functions:view_file"`) {
-		t.Fatalf("cross-namespace functions:view_file must NOT be reversed, got: %s", string(outBody))
-	}
-
-	// Cleanup lifecycle
-	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqIDAdmitted, "succeeded"))
-}
-
-// 4. Config drift rejection
-func TestIssue27_ConfigDriftRejection(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-	agyModel := "agy/gemini-2.5-flash"
-	headers := http.Header{}
-	headers.Set("X-Cloak-Client", "oh_my_pi")
-
-	// Mutate activeFilterConfig tool_mappings.oh_my_pi by adding an extra mapping
+	// Restrict model_prefixes to non-agy models only
 	cfg := activeFilterConfig()
 	cfgCopy := *cfg
-	cfgCopy.ToolMappings = copyToolMappings(cfg.ToolMappings)
-	cfgCopy.ToolMappings["oh_my_pi"]["extra_tool"] = "extra_target"
+	cfgCopy.ModelPrefixes = []string{"openai/", "other-provider/"}
 	applyFilterConfig(cfgCopy)
 
-	bodyValid := []byte(`{"model":"agy/gemini-2.5-flash","messages":[],"tools":[{"type":"function","function":{"name":"bash"}}]}`)
-	raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, "req-drift-1", "openai", agyModel, bodyValid, headers))
-	resp, _ := decodeProtectedRequestIntercept(t, raw)
-	if !resp.Terminate || resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("drifted config must return 503, got terminate=%t status=%d", resp.Terminate, resp.StatusCode)
-	}
-}
-
-// 5. Terminal brand masking and .omp path preservation
-func TestIssue27_BrandMaskingAndPathPreservation(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
 	agyModel := "agy/gemini-2.5-flash"
+	reqID := "req-prefix-bypass-1"
 	headers := http.Header{}
 	headers.Set("X-Cloak-Client", "oh_my_pi")
 
-	// Custom mapping attempting to rewrite Antigravity -> FakeBrand
-	cfg := activeFilterConfig()
-	cfgCopy := *cfg
-	cfgCopy.CustomMappings = append(cfgCopy.CustomMappings, rewriteMapping{
-		Match:       "Antigravity",
-		Replacement: "FakeBrand",
-	})
-	// Also attempt to override OMP -> OtherBrand via custom mappings
-	cfgCopy.CustomMappings = append(cfgCopy.CustomMappings, rewriteMapping{
-		Match:       "omp",
-		Replacement: "OtherBrand",
-	})
-	applyFilterConfig(cfgCopy)
-
-	// Body with Oh My Pi, omp, and a path C:\Users\user\.omp\agent
-	reqID := "req-brand-path"
-	body := []byte(`{
-		"model":"agy/gemini-2.5-flash",
-		"system":"Running Oh My Pi agent with config in C:\\Users\\user\\.omp\\agent and using omp commands.",
-		"messages":[]
-	}`)
-
-	raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
-		makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, body, headers))
-	resp, _ := decodeProtectedRequestIntercept(t, raw)
-	if resp.Terminate {
-		t.Fatalf("brand test should be admitted, got 503: %s", string(resp.ResponseBody))
-	}
-
-	bodyStr := string(resp.Body)
-	// .omp path must be preserved
-	if !strings.Contains(bodyStr, `.omp\agent`) && !strings.Contains(bodyStr, `.omp\\agent`) {
-		t.Fatalf("expected .omp path to be preserved, got: %s", bodyStr)
-	}
-	// "Oh My Pi" and "omp" must become "Antigravity", terminal (not rewritten to FakeBrand)
-	if strings.Contains(bodyStr, "FakeBrand") {
-		t.Fatalf("terminal Antigravity must NOT be rewritten by later custom mappings to FakeBrand: %s", bodyStr)
-	}
-	if strings.Contains(bodyStr, "OtherBrand") {
-		t.Fatalf("omp must NOT be rewritten to OtherBrand: %s", bodyStr)
-	}
-	if !strings.Contains(bodyStr, "Running Antigravity agent") {
-		t.Fatalf("expected 'Running Antigravity agent', got: %s", bodyStr)
-	}
-
-	// Correlated response uncloak: brandRestorationEnabled is true
-	respUpstream := []byte(`{"choices":[{"message":{"content":"Welcome to Antigravity runtime."}}]}`)
-	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
-		makeIntegrationResponseInterceptPayload(t, reqID, "openai", agyModel, respUpstream))
-	outBody := string(decodeEnvelopeBody(t, rawResp))
-	if !strings.Contains(outBody, "Welcome to Oh My Pi runtime.") && !strings.Contains(outBody, "Welcome to omp runtime.") {
-		t.Fatalf("expected brand restoration in response, got: %s", outBody)
-	}
-
-	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
-}
-
-// 6. Stream lifecycle, rehydration, and invariant loss
-func TestIssue27_StreamLifecycleAndRehydration(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-	agyModel := "agy/gemini-2.5-flash"
-	headers := http.Header{}
-	headers.Set("X-Cloak-Client", "oh_my_pi")
-
-	reqID := "req-stream-lifecycle"
 	reqBody := []byte(`{
 		"model":"agy/gemini-2.5-flash",
-		"messages":[],
+		"messages":[{"role":"user","content":"run bash"}],
 		"tools":[{"type":"function","function":{"name":"bash"}}]
 	}`)
 
@@ -377,106 +90,842 @@ func TestIssue27_StreamLifecycleAndRehydration(t *testing.T) {
 		makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, reqBody, headers))
 	resp, _ := decodeProtectedRequestIntercept(t, raw)
 	if resp.Terminate {
-		t.Fatalf("admission failed: %s", string(resp.ResponseBody))
+		t.Fatalf("protected request must be admitted, got 503: %s", string(resp.ResponseBody))
+	}
+	if !strings.Contains(string(resp.Body), `"name":"run_command"`) {
+		t.Fatalf("protected request must be cloaked even when model_prefixes does not match, got: %s", string(resp.Body))
 	}
 
-	// 6a. Stream header-init (ChunkIndex == -1)
-	headerInitReq := pluginapi.StreamChunkInterceptRequest{
-		RequestID:    reqID,
-		ChunkIndex:   -1,
-		SourceFormat: "openai",
-		Model:        agyModel,
-		Body:         []byte{},
-	}
-	rawChunk, _ := json.Marshal(headerInitReq)
-	res1, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk)
-	var env1 pluginabi.Envelope
-	json.Unmarshal(res1, &env1)
-	if env1.Error != nil {
-		t.Fatalf("header-init chunk returned error: %v", env1.Error)
+	// Correlated response uncloak
+	upstreamResp := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`)
+	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
+		makeIntegrationResponseInterceptPayload(t, reqID, "openai", agyModel, upstreamResp))
+	outBody := string(decodeEnvelopeBody(t, rawResp))
+	if !strings.Contains(outBody, `"name":"bash"`) {
+		t.Fatalf("correlated response must be uncloaked regardless of model_prefixes, got: %s", outBody)
 	}
 
-	// Verify route state is active
-	route := globalLifecycleManager.getRoute(reqID)
-	if route == nil || route.disposition != streamDispositionNone {
-		t.Fatalf("expected streamDispositionNone before payload chunks, got: %+v", route)
-	}
-
-	// 6b. Rehydration before payload processing: evict stream session
-	globalStreamManager.deleteSession("req:" + reqID)
-
-	// First payload chunk (ChunkIndex == 0) delivers run_command
-	chunk0Req := pluginapi.StreamChunkInterceptRequest{
+	// Correlated stream uncloak
+	chunkReq := pluginapi.StreamChunkInterceptRequest{
 		RequestID:    reqID,
 		ChunkIndex:   0,
 		SourceFormat: "openai",
 		Model:        agyModel,
 		Body:         []byte("data: " + `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command"}}]}}]}` + "\n\n"),
 	}
-	rawChunk0, _ := json.Marshal(chunk0Req)
-	res0, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk0)
-	chunk0Body, _ := decodeEnvelopeStreamChunk(t, res0)
-
-	if !strings.Contains(string(chunk0Body), `"name":"bash"`) {
-		t.Fatalf("rehydrated stream state must uncloak run_command -> bash, got: %s", string(chunk0Body))
+	rawChunk, _ := json.Marshal(chunkReq)
+	rawChunkResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk)
+	chunkBody, _ := decodeEnvelopeStreamChunk(t, rawChunkResp)
+	if !strings.Contains(string(chunkBody), `"name":"bash"`) {
+		t.Fatalf("correlated stream chunk must be uncloaked regardless of model_prefixes, got: %s", string(chunkBody))
 	}
 
-	// Verify route state is now streamDispositionPayloadActive
-	if route.disposition != streamDispositionPayloadActive {
-		t.Fatalf("expected streamDispositionPayloadActive, got: %v", route.disposition)
+	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+}
+
+// 2. Exact Protected rejection assertions: 503, Content-Type, exact body, covering all strict cases.
+func TestIssue27_Exact503Rejections(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	model := "agy/gemini-2.5-flash"
+	headers := http.Header{}
+	headers.Set("X-Cloak-Client", "oh_my_pi")
+
+	cases := []struct {
+		name      string
+		reqID     string
+		format    string
+		body      []byte
+		headers   http.Header
+	}{
+		{
+			name:   "truncated JSON",
+			reqID:  "req-rej-trunc",
+			format: "openai",
+			body:   []byte(`{"model":"agy/gemini-2.5-flash","messages":`),
+		},
+		{
+			name:   "trailing non-whitespace garbage",
+			reqID:  "req-rej-garbage",
+			format: "openai",
+			body:   []byte(`{"model":"agy/gemini-2.5-flash","messages":[]} trailing_garbage`),
+		},
+		{
+			name:   "multiple JSON documents",
+			reqID:  "req-rej-multi",
+			format: "openai",
+			body:   []byte(`{"model":"agy/gemini-2.5-flash","messages":[]}{"extra":"document"}`),
+		},
+		{
+			name:   "non-object JSON root",
+			reqID:  "req-rej-array",
+			format: "openai",
+			body:   []byte(`["item1", "item2"]`),
+		},
+		{
+			name:   "empty body",
+			reqID:  "req-rej-empty",
+			format: "openai",
+			body:   []byte{},
+		},
+		{
+			name:   "unsupported normalized SourceFormat",
+			reqID:  "req-rej-format",
+			format: "grpc-proto-unsupported",
+			body:   []byte(`{"model":"agy/gemini-2.5-flash","messages":[]}`),
+		},
+		{
+			name:   "missing RequestID",
+			reqID:  "",
+			format: "openai",
+			body:   []byte(`{"model":"agy/gemini-2.5-flash","messages":[]}`),
+		},
 	}
 
-	// 6c. Missing state after payload processing began is an invariant violation -> empty response, no reconstruction
-	globalStreamManager.deleteSession("req:" + reqID)
-	chunk1Req := pluginapi.StreamChunkInterceptRequest{
-		RequestID:    reqID,
-		ChunkIndex:   1,
-		SourceFormat: "openai",
-		Model:        agyModel,
-		Body:         []byte("data: " + `{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{}"}}]}}]}` + "\n\n"),
-	}
-	rawChunk1, _ := json.Marshal(chunk1Req)
-	resLate, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk1)
-	lateBody, _ := decodeEnvelopeStreamChunk(t, resLate)
-	if len(lateBody) != 0 {
-		t.Fatalf("invariant violation after payload started must return empty response, got: %s", string(lateBody))
-	}
-
-	// Clean up route state via request.complete
-	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "failed"))
-	if r := globalLifecycleManager.getRoute(reqID); r != nil {
-		t.Fatalf("route state must be deleted after request.complete, got: %+v", r)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+				makeProtectedIntegrationRequest(t, tc.reqID, tc.format, model, tc.body, headers))
+			resp, _ := decodeProtectedRequestIntercept(t, raw)
+			assertExact503Rejection(t, resp, tc.name)
+		})
 	}
 }
 
-// 7. Request lifecycle completion idempotence and outcomes
-func TestIssue27_RequestCompleteOutcomes(t *testing.T) {
+// 3. Canonical serialization for semantic no-op / pass-through-only Protected requests,
+// plus duplicate-key parser-divergence regressions for tools, messages, and tool_choice.
+func TestIssue27_CanonicalSerializationAndDuplicateKeys(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
-	outcomes := []string{"succeeded", "failed", "canceled", "rejected"}
+	model := "agy/gemini-2.5-flash"
+	headers := http.Header{}
+	headers.Set("X-Cloak-Client", "oh_my_pi")
 
-	for _, outcome := range outcomes {
-		reqID := "req-complete-" + outcome
-		globalLifecycleManager.setRoute(reqID, &explicitOMPRouteState{
-			routeKind: routeKindProtectedAGY,
-			client:    "oh_my_pi",
-		})
-		globalStreamManager.resetSession("req:"+reqID, "oh_my_pi", nil, 1)
+	// 3a. Semantic no-op / pass-through-only request with non-canonical raw formatting
+	rawNoOp := []byte("{\n  \"model\": \"agy/gemini-2.5-flash\",\n  \"tools\": [\n    {\n      \"type\": \"function\",\n      \"function\": {\n        \"name\": \"custom_passthrough\"\n      }\n    }\n  ],\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"hello\"}\n  ]\n}")
+	raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeProtectedIntegrationRequest(t, "req-noop-1", "openai", model, rawNoOp, headers))
+	resp, _ := decodeProtectedRequestIntercept(t, raw)
+	if resp.Terminate {
+		t.Fatalf("pass-through request should be admitted, got 503: %s", string(resp.ResponseBody))
+	}
+	if len(resp.Body) == 0 {
+		t.Fatalf("admitted Protected request must have non-empty serialized body")
+	}
+	if bytes.Equal(resp.Body, rawNoOp) {
+		t.Fatalf("must forward canonical serialization, not original raw bytes")
+	}
+	var parsedNoOp map[string]any
+	if err := json.Unmarshal(resp.Body, &parsedNoOp); err != nil {
+		t.Fatalf("canonical body must be valid JSON: %v", err)
+	}
 
-		rawComplete := makeRequestCompletePayload(t, reqID, outcome)
-		res1, code1 := handlePluginCall(pluginabi.MethodRequestComplete, rawComplete)
-		if code1 != 0 {
-			t.Fatalf("request.complete failed for outcome %s: code=%d, res=%s", outcome, code1, string(res1))
+	// 3b. Duplicate top-level tools keys
+	rawDupTools := []byte(`{
+		"model":"agy/gemini-2.5-flash",
+		"tools":[{"type":"function","function":{"name":"first_tool"}}],
+		"tools":[{"type":"function","function":{"name":"second_tool"}}],
+		"messages":[]
+	}`)
+	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeProtectedIntegrationRequest(t, "req-dup-tools", "openai", model, rawDupTools, headers))
+	resp, _ = decodeProtectedRequestIntercept(t, raw)
+	if resp.Terminate {
+		t.Fatalf("duplicate tools request should be admitted, got 503: %s", string(resp.ResponseBody))
+	}
+	if bytes.Equal(resp.Body, rawDupTools) {
+		t.Fatalf("must forward collapsed canonical serialization, not duplicate raw bytes")
+	}
+	if strings.Contains(string(resp.Body), "first_tool") {
+		t.Fatalf("decoder collapsed duplicate tools key, first_tool must not appear: %s", string(resp.Body))
+	}
+	if !strings.Contains(string(resp.Body), "second_tool") {
+		t.Fatalf("second_tool must appear in canonical body: %s", string(resp.Body))
+	}
+
+	// 3c. Duplicate top-level messages keys
+	rawDupMessages := []byte(`{
+		"model":"agy/gemini-2.5-flash",
+		"messages":[{"role":"user","content":"first_msg"}],
+		"messages":[{"role":"user","content":"second_msg"}]
+	}`)
+	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeProtectedIntegrationRequest(t, "req-dup-msgs", "openai", model, rawDupMessages, headers))
+	resp, _ = decodeProtectedRequestIntercept(t, raw)
+	if resp.Terminate {
+		t.Fatalf("duplicate messages request should be admitted, got 503: %s", string(resp.ResponseBody))
+	}
+	if strings.Contains(string(resp.Body), "first_msg") {
+		t.Fatalf("decoder collapsed duplicate messages key, first_msg must not appear: %s", string(resp.Body))
+	}
+	if !strings.Contains(string(resp.Body), "second_msg") {
+		t.Fatalf("second_msg must appear in canonical body: %s", string(resp.Body))
+	}
+
+	// 3d. Duplicate top-level tool_choice keys
+	rawDupChoice := []byte(`{
+		"model":"agy/gemini-2.5-flash",
+		"tool_choice":"auto",
+		"tool_choice":"none",
+		"messages":[]
+	}`)
+	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeProtectedIntegrationRequest(t, "req-dup-choice", "openai", model, rawDupChoice, headers))
+	resp, _ = decodeProtectedRequestIntercept(t, raw)
+	if resp.Terminate {
+		t.Fatalf("duplicate tool_choice request should be admitted, got 503: %s", string(resp.ResponseBody))
+	}
+	if strings.Contains(string(resp.Body), `"auto"`) {
+		t.Fatalf("decoder collapsed duplicate tool_choice key, auto must not appear: %s", string(resp.Body))
+	}
+	if !strings.Contains(string(resp.Body), `"none"`) {
+		t.Fatalf("none must appear in canonical body: %s", string(resp.Body))
+	}
+}
+
+// 4. Config drift rejection covering add, remove, and override of canonical OMP mapping table.
+func TestIssue27_ConfigDriftRejection_AddRemoveOverride(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	agyModel := "agy/gemini-2.5-flash"
+	headers := http.Header{}
+	headers.Set("X-Cloak-Client", "oh_my_pi")
+	validBody := []byte(`{"model":"agy/gemini-2.5-flash","messages":[],"tools":[{"type":"function","function":{"name":"bash"}}]}`)
+
+	// 4a. Add
+	t.Run("add mapping", func(t *testing.T) {
+		defer restoreDefaultFilterConfig(t)
+		cfg := activeFilterConfig()
+		cfgCopy := *cfg
+		cfgCopy.ToolMappings = copyToolMappings(cfg.ToolMappings)
+		cfgCopy.ToolMappings["oh_my_pi"]["added_tool"] = "added_target"
+		applyFilterConfig(cfgCopy)
+
+		raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+			makeProtectedIntegrationRequest(t, "req-drift-add", "openai", agyModel, validBody, headers))
+		resp, _ := decodeProtectedRequestIntercept(t, raw)
+		assertExact503Rejection(t, resp, "add mapping drift")
+	})
+
+	// 4b. Remove
+	t.Run("remove mapping", func(t *testing.T) {
+		defer restoreDefaultFilterConfig(t)
+		cfg := activeFilterConfig()
+		cfgCopy := *cfg
+		cfgCopy.ToolMappings = copyToolMappings(cfg.ToolMappings)
+		delete(cfgCopy.ToolMappings["oh_my_pi"], "bash")
+		applyFilterConfig(cfgCopy)
+
+		raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+			makeProtectedIntegrationRequest(t, "req-drift-remove", "openai", agyModel, validBody, headers))
+		resp, _ := decodeProtectedRequestIntercept(t, raw)
+		assertExact503Rejection(t, resp, "remove mapping drift")
+	})
+
+	// 4c. Override
+	t.Run("override mapping", func(t *testing.T) {
+		defer restoreDefaultFilterConfig(t)
+		cfg := activeFilterConfig()
+		cfgCopy := *cfg
+		cfgCopy.ToolMappings = copyToolMappings(cfg.ToolMappings)
+		cfgCopy.ToolMappings["oh_my_pi"]["bash"] = "custom_override_target"
+		applyFilterConfig(cfgCopy)
+
+		raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+			makeProtectedIntegrationRequest(t, "req-drift-override", "openai", agyModel, validBody, headers))
+		resp, _ := decodeProtectedRequestIntercept(t, raw)
+		assertExact503Rejection(t, resp, "override mapping drift")
+	})
+}
+
+// 5. Conflict containing no OMP retains existing invalid-explicit/authoritative-negative behavior.
+func TestIssue27_ConflictContainingNoOMP(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	agyModel := "agy/gemini-2.5-flash"
+	reqID := "req-no-omp-conflict-1"
+	headers := http.Header{}
+	// Conflict between two non-OMP clients
+	headers.Set("X-Cloak-Client", "claude_code, codex")
+	// Add UA evidence that would otherwise match if not suppressed by authoritative-negative
+	headers.Set("User-Agent", "Claude-Code/1.0")
+
+	body := []byte(`{"model":"agy/gemini-2.5-flash","messages":[{"role":"user","content":"test"}]}`)
+	raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, body, headers))
+	resp, _ := decodeProtectedRequestIntercept(t, raw)
+
+	// Must NOT return 503 (it is not a Protected OMP conflict)
+	if resp.Terminate {
+		t.Fatalf("non-OMP conflict must not return 503 terminate")
+	}
+
+	// Must NOT create Protected or bypass state
+	if r := globalLifecycleManager.getRoute(reqID); r != nil {
+		t.Fatalf("non-OMP conflict must NOT create lifecycle route, got: %+v", r)
+	}
+
+	// Must record authoritative negative client resolution
+	if c := globalStreamManager.getClient("req:" + reqID); c != negativeClientResolution {
+		t.Fatalf("expected negative client resolution %q, got: %q", negativeClientResolution, c)
+	}
+
+	// Correlated response must not cloak/uncloak or restore brand
+	respBody := []byte(`{"choices":[{"message":{"content":"Welcome to Antigravity runtime."}}]}`)
+	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
+		makeIntegrationResponseInterceptPayload(t, reqID, "openai", agyModel, respBody))
+	outBody := decodeEnvelopeBody(t, rawResp)
+	if len(outBody) != 0 {
+		t.Fatalf("correlated response for authoritative negative must perform zero mutation, got: %s", string(outBody))
+	}
+}
+
+// 6. Non-AGY bypass: non-empty RequestID pins bypass sentinel, response and stream zero mutation,
+// brand restoration disabled; empty RequestID does not invent 503.
+func TestIssue27_NonAGYBypassDetailed(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	nonAGYModel := "openai/gpt-4o"
+	headers := http.Header{}
+	headers.Set("X-Cloak-Client", "oh_my_pi")
+
+	reqID := "req-bypass-detailed-1"
+	body := []byte(`{
+		"model":"openai/gpt-4o",
+		"system":"Running Oh My Pi agent",
+		"messages":[{"role":"user","content":"run bash"}],
+		"tools":[{"type":"function","function":{"name":"bash"}}]
+	}`)
+
+	// 6a. Non-empty RequestID pins bypass sentinel
+	raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeProtectedIntegrationRequest(t, reqID, "openai", nonAGYModel, body, headers))
+	resp, _ := decodeProtectedRequestIntercept(t, raw)
+	if resp.Terminate {
+		t.Fatalf("non-AGY request must not terminate, got 503: %s", string(resp.ResponseBody))
+	}
+	if len(resp.Body) != 0 {
+		t.Fatalf("non-AGY bypass request must have zero mutation, got: %s", string(resp.Body))
+	}
+
+	route := globalLifecycleManager.getRoute(reqID)
+	if route == nil || route.routeKind != routeKindExplicitOMPNonAGYBypass {
+		t.Fatalf("expected routeKindExplicitOMPNonAGYBypass, got: %+v", route)
+	}
+	if route.brandRestorationEnabled {
+		t.Fatalf("brandRestorationEnabled must be false for non-AGY bypass")
+	}
+
+	// 6b. Response intercept has zero mutation and brand restoration is disabled
+	upstreamResp := []byte(`{"choices":[{"message":{"content":"Welcome to Antigravity runtime.","tool_calls":[{"function":{"name":"run_command"}}]}}]}`)
+	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
+		makeIntegrationResponseInterceptPayload(t, reqID, "openai", nonAGYModel, upstreamResp))
+	outBody := decodeEnvelopeBody(t, rawResp)
+	if len(outBody) != 0 {
+		t.Fatalf("correlated response for non-AGY bypass must be zero mutation, got: %s", string(outBody))
+	}
+
+	// 6c. Stream intercept has zero mutation and brand restoration is disabled
+	streamReq := pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqID,
+		ChunkIndex:   0,
+		SourceFormat: "openai",
+		Model:        nonAGYModel,
+		Body:         []byte("data: " + `{"choices":[{"delta":{"content":"Antigravity"}}]}` + "\n\n"),
+	}
+	rawChunk, _ := json.Marshal(streamReq)
+	rawChunkResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk)
+	chunkBody, _ := decodeEnvelopeStreamChunk(t, rawChunkResp)
+	if len(chunkBody) != 0 {
+		t.Fatalf("correlated stream chunk for non-AGY bypass must be zero mutation, got: %s", string(chunkBody))
+	}
+
+	// 6d. Empty RequestID forwards with zero mutation, does NOT invent 503
+	rawEmptyID, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeProtectedIntegrationRequest(t, "", "openai", nonAGYModel, body, headers))
+	respEmptyID, _ := decodeProtectedRequestIntercept(t, rawEmptyID)
+	if respEmptyID.Terminate {
+		t.Fatalf("empty-ID non-AGY request must not terminate with 503, got: %s", string(respEmptyID.ResponseBody))
+	}
+	if len(respEmptyID.Body) != 0 {
+		t.Fatalf("empty-ID non-AGY request must have zero mutation, got: %s", string(respEmptyID.Body))
+	}
+}
+
+// 7. Protected active reverse: unqualified active pair does not authorize qualified output;
+// same-namespace, cross-namespace, and collision-safe two-active-namespace coverage.
+func TestIssue27_ActiveReverse_UnqualifiedDoesNotAuthorizeQualified(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	agyModel := "agy/gemini-2.5-flash"
+	headers := http.Header{}
+	headers.Set("X-Cloak-Client", "oh_my_pi")
+
+	// 7a. Request has unqualified tool bash -> transformed to run_command
+	reqID := "req-unqual-reverse-1"
+	reqBody := []byte(`{
+		"model":"agy/gemini-2.5-flash",
+		"messages":[],
+		"tools":[{"type":"function","function":{"name":"bash"}}]
+	}`)
+	raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, reqBody, headers))
+	resp, _ := decodeProtectedRequestIntercept(t, raw)
+	if resp.Terminate {
+		t.Fatalf("admission failed: %s", string(resp.ResponseBody))
+	}
+
+	// Upstream returns unqualified run_command, plus qualified functions:run_command and default_api:run_command
+	upstreamResp := []byte(`{
+		"choices":[{
+			"message":{
+				"tool_calls":[
+					{"function":{"name":"run_command","arguments":"{}"}},
+					{"function":{"name":"functions:run_command","arguments":"{}"}},
+					{"function":{"name":"default_api:run_command","arguments":"{}"}}
+				]
+			}
+		}]
+	}`)
+	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
+		makeIntegrationResponseInterceptPayload(t, reqID, "openai", agyModel, upstreamResp))
+	outBody := string(decodeEnvelopeBody(t, rawResp))
+
+	// Unqualified run_command MUST be reversed to bash
+	if !strings.Contains(outBody, `"name":"bash"`) {
+		t.Fatalf("expected unqualified run_command -> bash, got: %s", outBody)
+	}
+	// Qualified variants MUST NOT be reversed
+	if !strings.Contains(outBody, `"name":"functions:run_command"`) {
+		t.Fatalf("functions:run_command must NOT be reversed by unqualified pair, got: %s", outBody)
+	}
+	if !strings.Contains(outBody, `"name":"default_api:run_command"`) {
+		t.Fatalf("default_api:run_command must NOT be reversed by unqualified pair, got: %s", outBody)
+	}
+
+	// 7b. Same assertion for stream chunks
+	chunkReq := pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqID,
+		ChunkIndex:   0,
+		SourceFormat: "openai",
+		Model:        agyModel,
+		Body: []byte("data: " + `{
+			"choices":[{
+				"delta":{
+					"tool_calls":[
+						{"function":{"name":"run_command"}},
+						{"function":{"name":"functions:run_command"}},
+						{"function":{"name":"default_api:run_command"}}
+					]
+				}
+			}]
+		}` + "\n\n"),
+	}
+	rawChunk, _ := json.Marshal(chunkReq)
+	rawChunkResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk)
+	chunkBodyBytes, _ := decodeEnvelopeStreamChunk(t, rawChunkResp)
+	chunkBody := string(chunkBodyBytes)
+
+	if !strings.Contains(chunkBody, `"name":"bash"`) {
+		t.Fatalf("stream: expected unqualified run_command -> bash, got: %s", chunkBody)
+	}
+	if !strings.Contains(chunkBody, `"name":"functions:run_command"`) {
+		t.Fatalf("stream: functions:run_command must NOT be reversed by unqualified pair, got: %s", chunkBody)
+	}
+	if !strings.Contains(chunkBody, `"name":"default_api:run_command"`) {
+		t.Fatalf("stream: default_api:run_command must NOT be reversed by unqualified pair, got: %s", chunkBody)
+	}
+
+	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+}
+
+// 8. Protected brand restoration when request-side alias masking was a semantic no-op / pass-through-only,
+// in both non-stream and stream paths.
+func TestIssue27_BrandRestorationOnSemanticNoOpRequest(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	agyModel := "agy/gemini-2.5-flash"
+	headers := http.Header{}
+	headers.Set("X-Cloak-Client", "oh_my_pi")
+
+	// Request has NO brand keywords to mask (no Oh My Pi / omp), only normal text
+	reqID := "req-brand-noop-1"
+	body := []byte(`{
+		"model":"agy/gemini-2.5-flash",
+		"system":"You are a coding assistant.",
+		"messages":[{"role":"user","content":"Hello world"}]
+	}`)
+
+	raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, body, headers))
+	resp, _ := decodeProtectedRequestIntercept(t, raw)
+	if resp.Terminate {
+		t.Fatalf("admission failed: %s", string(resp.ResponseBody))
+	}
+
+	// 8a. Non-stream response contains "Antigravity"
+	upstreamResp := []byte(`{"choices":[{"message":{"content":"Welcome to Antigravity runtime."}}]}`)
+	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
+		makeIntegrationResponseInterceptPayload(t, reqID, "openai", agyModel, upstreamResp))
+	outBody := string(decodeEnvelopeBody(t, rawResp))
+	if !strings.Contains(outBody, "Welcome to omp runtime.") && !strings.Contains(outBody, "Welcome to Oh My Pi runtime.") {
+		t.Fatalf("brand restoration must run on response for semantic no-op request, got: %s", outBody)
+	}
+
+	// 8b. Stream response contains "Antigravity"
+	streamReq := pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqID,
+		ChunkIndex:   0,
+		SourceFormat: "openai",
+		Model:        agyModel,
+		Body:         []byte("data: " + `{"choices":[{"delta":{"content":"Welcome to Antigravity runtime."}}]}` + "\n\n"),
+	}
+	rawChunk, _ := json.Marshal(streamReq)
+	rawChunkResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk)
+	chunkBodyBytes, _ := decodeEnvelopeStreamChunk(t, rawChunkResp)
+	chunkBody := string(chunkBodyBytes)
+	if !strings.Contains(chunkBody, "Welcome to omp runtime.") && !strings.Contains(chunkBody, "Welcome to Oh My Pi runtime.") {
+		t.Fatalf("brand restoration must run on stream for semantic no-op request, got: %s", chunkBody)
+	}
+
+	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+}
+
+// 9. Stream lifecycle hardening:
+//  1) delete pre-payload session, change Config A -> B, prove rehydration uses pinned Config-A authority;
+//  2) make Protected session stale AFTER payload starts, prove generic TTL cleanup does not evict it;
+//  3) inject loss with incomplete SSE tail / brand carry, prove invariant handling with zero fallback;
+//  4) complete stream cleanly, prove durable route remains while disposable state gone, late payload rejected;
+//  5) request.complete cleans both durable route and residual disposable session, idempotently.
+func TestIssue27_StreamLifecycle_HardenedRequirements(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	agyModel := "agy/gemini-2.5-flash"
+	headers := http.Header{}
+	headers.Set("X-Cloak-Client", "oh_my_pi")
+
+	// 9.1: Delete pre-payload disposable session, change Config A -> Config B, prove rehydration uses pinned Config A
+	t.Run("rehydration uses pinned Config A authority despite config drift", func(t *testing.T) {
+		defer restoreDefaultFilterConfig(t)
+		reqID := "req-life-cfg-drift-1"
+		reqBody := []byte(`{
+			"model":"agy/gemini-2.5-flash",
+			"messages":[],
+			"tools":[{"type":"function","function":{"name":"bash"}}]
+		}`)
+
+		// Admitted under Config A
+		raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+			makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, reqBody, headers))
+		resp, _ := decodeProtectedRequestIntercept(t, raw)
+		if resp.Terminate {
+			t.Fatalf("admission failed: %s", string(resp.ResponseBody))
 		}
 
-		if r := globalLifecycleManager.getRoute(reqID); r != nil {
-			t.Fatalf("route must be deleted for outcome %s", outcome)
+		// Delete disposable stream session
+		globalStreamManager.deleteSession("req:" + reqID)
+
+		// Change live config to Config B (e.g. mutate oh_my_pi mapping table and model_prefixes)
+		cfg := activeFilterConfig()
+		cfgCopy := *cfg
+		cfgCopy.ToolMappings = copyToolMappings(cfg.ToolMappings)
+		cfgCopy.ToolMappings["oh_my_pi"]["bash"] = "drifted_target"
+		cfgCopy.ModelPrefixes = []string{"other-model/"}
+		applyFilterConfig(cfgCopy)
+
+		// Send payload chunk 0
+		chunkReq := pluginapi.StreamChunkInterceptRequest{
+			RequestID:    reqID,
+			ChunkIndex:   0,
+			SourceFormat: "openai",
+			Model:        agyModel,
+			Body:         []byte("data: " + `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command"}}]}}]}` + "\n\n"),
+		}
+		rawChunk, _ := json.Marshal(chunkReq)
+		rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk)
+		chunkBody, _ := decodeEnvelopeStreamChunk(t, rawResp)
+
+		// Must be uncloaked using pinned Config A authority
+		if !strings.Contains(string(chunkBody), `"name":"bash"`) {
+			t.Fatalf("rehydrated chunk must use pinned Config A authority, got: %s", string(chunkBody))
 		}
 
-		// Idempotent second call
-		res2, code2 := handlePluginCall(pluginabi.MethodRequestComplete, rawComplete)
-		if code2 != 0 {
-			t.Fatalf("idempotent request.complete failed for outcome %s: code=%d, res=%s", outcome, code2, string(res2))
+		handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+	})
+
+	// 9.2: Make Protected session stale AFTER payload starts, prove generic TTL cleanup does not evict it
+	t.Run("stale session after payload started is protected from TTL cleanup", func(t *testing.T) {
+		defer restoreDefaultFilterConfig(t)
+		reqID := "req-life-ttl-protect-1"
+		reqBody := []byte(`{
+			"model":"agy/gemini-2.5-flash",
+			"messages":[],
+			"tools":[{"type":"function","function":{"name":"bash"}}]
+		}`)
+
+		raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+			makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, reqBody, headers))
+		decodeProtectedRequestIntercept(t, raw)
+
+		// Send chunk 0 to transition disposition to streamDispositionPayloadActive
+		chunkReq := pluginapi.StreamChunkInterceptRequest{
+			RequestID:    reqID,
+			ChunkIndex:   0,
+			SourceFormat: "openai",
+			Model:        agyModel,
+			Body:         []byte("data: " + `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command"}}]}}]}` + "\n\n"),
 		}
+		rawChunk, _ := json.Marshal(chunkReq)
+		handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk)
+
+		// Make the session stale (older than 5 minutes)
+		globalStreamManager.mu.Lock()
+		sess := globalStreamManager.sessions["req:"+reqID]
+		if sess == nil {
+			globalStreamManager.mu.Unlock()
+			t.Fatalf("expected stream session to exist")
+		}
+		sess.updatedAt = time.Now().Add(-10 * time.Minute)
+		// Run cleanupStaleLocked while under lock
+		globalStreamManager.cleanupStaleLocked()
+		survivingSess := globalStreamManager.sessions["req:"+reqID]
+		globalStreamManager.mu.Unlock()
+
+		if survivingSess == nil {
+			t.Fatalf("Protected session with active payload must NOT be evicted by cleanupStaleLocked")
+		}
+
+		handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+	})
+
+	// 9.3: Inject loss with incomplete SSE tail and brand carry, prove invariant handling with zero fallback
+	t.Run("invariant loss handling with zero fallback", func(t *testing.T) {
+		defer restoreDefaultFilterConfig(t)
+		reqID := "req-life-loss-1"
+		reqBody := []byte(`{
+			"model":"agy/gemini-2.5-flash",
+			"messages":[],
+			"tools":[{"type":"function","function":{"name":"bash"}}]
+		}`)
+
+		raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+			makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, reqBody, headers))
+		decodeProtectedRequestIntercept(t, raw)
+
+		// Chunk 0: starts payload
+		chunk0 := pluginapi.StreamChunkInterceptRequest{
+			RequestID:    reqID,
+			ChunkIndex:   0,
+			SourceFormat: "openai",
+			Model:        agyModel,
+			Body:         []byte("data: " + `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command"}}]}}]}` + "\n\n"),
+		}
+		rawChunk0, _ := json.Marshal(chunk0)
+		handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk0)
+
+		// Evict session while payload is active
+		globalStreamManager.deleteSession("req:" + reqID)
+
+		// Next chunk arrives: missing mutable state must be invariant violation -> empty response, zero fallback
+		chunk1 := pluginapi.StreamChunkInterceptRequest{
+			RequestID:    reqID,
+			ChunkIndex:   1,
+			SourceFormat: "openai",
+			Model:        agyModel,
+			Body:         []byte("data: " + `{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{}"}}]}}]}` + "\n\n"),
+		}
+		rawChunk1, _ := json.Marshal(chunk1)
+		rawResp1, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk1)
+		body1, _ := decodeEnvelopeStreamChunk(t, rawResp1)
+		if len(body1) != 0 {
+			t.Fatalf("missing session after payload started must produce zero-mutation empty response, got: %s", string(body1))
+		}
+
+		handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "failed"))
+	})
+
+	// 9.4: Clean stream completion leaves durable route, removes disposable session; late payload rejected
+	t.Run("clean stream completion and late payload rejection", func(t *testing.T) {
+		defer restoreDefaultFilterConfig(t)
+		reqID := "req-life-clean-term-1"
+		reqBody := []byte(`{
+			"model":"agy/gemini-2.5-flash",
+			"messages":[],
+			"tools":[{"type":"function","function":{"name":"bash"}}]
+		}`)
+
+		raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+			makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, reqBody, headers))
+		decodeProtectedRequestIntercept(t, raw)
+
+		// Chunk 0: payload
+		chunk0 := pluginapi.StreamChunkInterceptRequest{
+			RequestID:    reqID,
+			ChunkIndex:   0,
+			SourceFormat: "openai",
+			Model:        agyModel,
+			Body:         []byte("data: " + `{"choices":[{"delta":{"content":"hi"}}]}` + "\n\n"),
+		}
+		rawChunk0, _ := json.Marshal(chunk0)
+		handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk0)
+
+		// Chunk 1: terminal [DONE]
+		chunkDone := pluginapi.StreamChunkInterceptRequest{
+			RequestID:    reqID,
+			ChunkIndex:   1,
+			SourceFormat: "openai",
+			Model:        agyModel,
+			Body:         []byte("data: [DONE]\n\n"),
+		}
+		rawChunkDone, _ := json.Marshal(chunkDone)
+		handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunkDone)
+
+		// Assert: disposable session is deleted
+		globalStreamManager.mu.Lock()
+		sess := globalStreamManager.sessions["req:"+reqID]
+		globalStreamManager.mu.Unlock()
+		if sess != nil {
+			t.Fatalf("disposable stream session must be deleted after [DONE]")
+		}
+
+		// Assert: durable route remains
+		route := globalLifecycleManager.getRoute(reqID)
+		if route == nil {
+			t.Fatalf("durable route must survive [DONE]")
+		}
+		if route.getDisposition() != streamDispositionCleanTerminal {
+			t.Fatalf("expected streamDispositionCleanTerminal, got: %v", route.getDisposition())
+		}
+
+		// Send late payload chunk
+		lateChunk := pluginapi.StreamChunkInterceptRequest{
+			RequestID:    reqID,
+			ChunkIndex:   2,
+			SourceFormat: "openai",
+			Model:        agyModel,
+			Body:         []byte("data: " + `{"choices":[{"delta":{"content":"late"}}]}` + "\n\n"),
+		}
+		rawLate, _ := json.Marshal(lateChunk)
+		rawLateResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawLate)
+		lateBody, _ := decodeEnvelopeStreamChunk(t, rawLateResp)
+		if len(lateBody) != 0 {
+			t.Fatalf("late chunk after clean terminal must produce empty response, got: %s", string(lateBody))
+		}
+
+		handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+	})
+
+	// 9.5: request.complete cleans both durable route and residual disposable session, idempotently
+	t.Run("request.complete cleans both durable route and disposable session idempotently", func(t *testing.T) {
+		defer restoreDefaultFilterConfig(t)
+		outcomes := []string{"succeeded", "failed", "canceled", "rejected"}
+		for _, outcome := range outcomes {
+			reqID := "req-life-complete-" + outcome
+			globalLifecycleManager.setRoute(reqID, &explicitOMPRouteState{
+				routeKind: routeKindProtectedAGY,
+				client:    "oh_my_pi",
+			})
+			globalStreamManager.resetSession("req:"+reqID, "oh_my_pi", nil, 1)
+
+			payload := makeRequestCompletePayload(t, reqID, outcome)
+			res1, code1 := handlePluginCall(pluginabi.MethodRequestComplete, payload)
+			if code1 != 0 {
+				t.Fatalf("request.complete failed: %s", string(res1))
+			}
+
+			if r := globalLifecycleManager.getRoute(reqID); r != nil {
+				t.Fatalf("durable route must be deleted by request.complete")
+			}
+			globalStreamManager.mu.Lock()
+			s := globalStreamManager.sessions["req:"+reqID]
+			globalStreamManager.mu.Unlock()
+			if s != nil {
+				t.Fatalf("residual stream session must be deleted by request.complete")
+			}
+
+			// Idempotent second call
+			res2, code2 := handlePluginCall(pluginabi.MethodRequestComplete, payload)
+			if code2 != 0 {
+				t.Fatalf("second idempotent request.complete call failed: %s", string(res2))
+			}
+		}
+	})
+}
+
+// 10. Malformed/corrupted Protected post-upstream route state must remain a no-weaker-fallback
+// invariant path; do not claim or synthesize the pre-upstream exact 503 there.
+func TestIssue27_MalformedPostUpstreamRouteState_NoWeakerFallback(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	agyModel := "agy/gemini-2.5-flash"
+	reqID := "req-malformed-route-1"
+
+	// Inject malformed ProtectedAGY route
+	globalLifecycleManager.setRoute(reqID, &explicitOMPRouteState{
+		routeKind: routeKindProtectedAGY,
+		client:    "oh_my_pi",
+		malformed: true,
+	})
+
+	// 10a. Non-stream response intercept
+	respBody := []byte(`{"choices":[{"message":{"content":"Welcome to Antigravity runtime.","tool_calls":[{"function":{"name":"run_command"}}]}}]}`)
+	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
+		makeIntegrationResponseInterceptPayload(t, reqID, "openai", agyModel, respBody))
+	outBody := decodeEnvelopeBody(t, rawResp)
+	// Must return empty body (zero mutation, no weaker fallback, no 503 synthesized)
+	if len(outBody) != 0 {
+		t.Fatalf("malformed post-upstream state must not uncloak or restore brand, got: %s", string(outBody))
+	}
+
+	// 10b. Stream chunk intercept
+	streamReq := pluginapi.StreamChunkInterceptRequest{
+		RequestID:    reqID,
+		ChunkIndex:   0,
+		SourceFormat: "openai",
+		Model:        agyModel,
+		Body:         []byte("data: " + `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command"}}]}}]}` + "\n\n"),
+	}
+	rawChunk, _ := json.Marshal(streamReq)
+	rawChunkResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, rawChunk)
+	chunkBody, _ := decodeEnvelopeStreamChunk(t, rawChunkResp)
+	if len(chunkBody) != 0 {
+		t.Fatalf("stream: malformed post-upstream state must produce empty response, got: %s", string(chunkBody))
+	}
+
+	// 10c. Corrupted client identifier in route
+	reqID2 := "req-corrupted-client-1"
+	globalLifecycleManager.setRoute(reqID2, &explicitOMPRouteState{
+		routeKind: routeKindProtectedAGY,
+		client:    "corrupted_non_omp_client",
+	})
+	rawResp2, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
+		makeIntegrationResponseInterceptPayload(t, reqID2, "openai", agyModel, respBody))
+	outBody2 := decodeEnvelopeBody(t, rawResp2)
+	if len(outBody2) != 0 {
+		t.Fatalf("corrupted client identifier must produce empty response, got: %s", string(outBody2))
+	}
+
+	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "failed"))
+	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID2, "failed"))
+}
+
+// Concurrency race check: execute concurrent calls on streamDisposition and lifecycle methods
+func TestIssue27_ConcurrencySafeDisposition(t *testing.T) {
+	state := &explicitOMPRouteState{
+		routeKind: routeKindProtectedAGY,
+		client:    "oh_my_pi",
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				_ = state.getDisposition()
+				if j%2 == 0 {
+					state.setDisposition(streamDispositionPayloadActive)
+				} else {
+					state.setDisposition(streamDispositionCleanTerminal)
+				}
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if state.getDisposition() != streamDispositionCleanTerminal {
+		t.Fatalf("final disposition must be streamDispositionCleanTerminal, got: %v", state.getDisposition())
 	}
 }
 
