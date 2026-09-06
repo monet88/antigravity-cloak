@@ -96,10 +96,10 @@ custom_mappings:
 		t.Fatalf("code = %d, want 0; body=%s", code, raw)
 	}
 
-	if got, rewritten := rewriteRequestBody([]byte(`{"system":"You are Codex."}`), "openai"); rewritten {
+	if got, rewritten, _ := rewriteRequestBodyWithClient([]byte(`{"system":"You are Codex."}`), "openai", "claude_code"); rewritten {
 		t.Fatalf("Codex rewritten after disabling defaults; body=%s", got)
 	}
-	got, rewritten := rewriteRequestBody([]byte(`{"system":"route this Cursor session"}`), "openai")
+	got, rewritten, _ := rewriteRequestBodyWithClient([]byte(`{"system":"route this Cursor session"}`), "openai", "claude_code")
 	if !rewritten {
 		t.Fatalf("Cursor rewritten = false, want true")
 	}
@@ -124,7 +124,7 @@ custom_mappings: |
 	tests := []string{"Cursor", "Windsurf", "JetBrains AI"}
 	for _, keyword := range tests {
 		t.Run(keyword, func(t *testing.T) {
-			got, rewritten := rewriteRequestBody([]byte(`{"system":"route this `+keyword+` session"}`), "openai")
+			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(`{"system":"route this `+keyword+` session"}`), "openai", "claude_code")
 			if !rewritten {
 				t.Fatalf("%s rewritten = false, want true", keyword)
 			}
@@ -169,10 +169,10 @@ custom_mappings:
 		t.Fatalf("error code = %q, want invalid_config", envelope.Error.Code)
 	}
 
-	if _, rewritten := rewriteRequestBody([]byte(`{"system":"route this Cursor session"}`), "openai"); !rewritten {
+	if _, rewritten, _ := rewriteRequestBodyWithClient([]byte(`{"system":"route this Cursor session"}`), "openai", "claude_code"); !rewritten {
 		t.Fatalf("Cursor rewritten = false after invalid config, want previous config retained")
 	}
-	if got, rewritten := rewriteRequestBody([]byte(`{"system":"You are Codex."}`), "openai"); rewritten {
+	if got, rewritten, _ := rewriteRequestBodyWithClient([]byte(`{"system":"You are Codex."}`), "openai", "claude_code"); rewritten {
 		t.Fatalf("Codex rewritten after invalid config, want previous disabled-default state retained; body=%s", got)
 	}
 }

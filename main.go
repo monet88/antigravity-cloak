@@ -2631,49 +2631,13 @@ func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
 	return out
 }
 
-// rewriteRequestBody is a backward-compatible helper for callers and tests that
-// rewrite a request body directly. When a supported client is detected from
-// tools in body, it delegates to rewriteRequestBodyWithClient. When no client is
-// detected, it preserves the helper contract by applying brand rewriting
-// without tool cloaking.
+// rewriteRequestBody is a helper for callers and tests that rewrite a request body
+// directly. Body mutation only occurs after a supported coding client is resolved
+// from the request body. When no supported client is resolved, zero request-body
+// mutation is performed.
 func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
-	raw, changed, client := rewriteRequestBodyWithClient(body, sourceFormat, "")
-	if changed || client != "" {
-		return raw, changed
-	}
-	return rewriteRequestBodyBrandOnly(body, sourceFormat)
-}
-
-func rewriteRequestBodyBrandOnly(body []byte, sourceFormat string) ([]byte, bool) {
-	var root any
-	if err := safeUnmarshal(body, &root); err != nil {
-		return nil, false
-	}
-	rootMap, ok := root.(map[string]any)
-	if !ok {
-		return nil, false
-	}
-	changed := false
-	cfg := activeFilterConfig()
-	mappings := effectiveMappings(cfg)
-	rewritten, sysChanged := rewriteSystemFields(rootMap, mappings)
-	rootMap = rewritten.(map[string]any)
-	changed = changed || sysChanged
-
-	descChanged := rewriteToolDescriptions(rootMap, mappings, nil, sourceFormat)
-	changed = changed || descChanged
-
-	sysMsgChanged := rewriteSystemMessages(rootMap, mappings, nil)
-	changed = changed || sysMsgChanged
-
-	if !changed {
-		return nil, false
-	}
-	raw, err := safeMarshal(rootMap)
-	if err != nil {
-		return nil, false
-	}
-	return raw, true
+	raw, changed, _ := rewriteRequestBodyWithClient(body, sourceFormat, "")
+	return raw, changed
 }
 
 // rewriteRequestBodyWithClient rewrites brand text and cloaks tool names. When
