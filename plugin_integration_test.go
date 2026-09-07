@@ -185,10 +185,9 @@ func TestIntegration_OhMyPi_DefaultTools_SSEStreamLifecycle(t *testing.T) {
 		"view_file",
 		"replace_file_content",
 		"grep_search",
-		"list_dir",
+		"find_by_name",
 		"invoke_subagent",
 		"ask_question",
-		"manage_task",
 		"write_to_file",
 	}
 	for _, exp := range expectedCloaked {
@@ -196,7 +195,13 @@ func TestIntegration_OhMyPi_DefaultTools_SSEStreamLifecycle(t *testing.T) {
 			t.Errorf("expected cloaked tool %q in request tools, got: %v", exp, toolNames)
 		}
 	}
-	if toolNames["bash"] || toolNames["read"] || toolNames["edit"] {
+	if !toolNames["todo"] {
+		t.Errorf("expected pass-through tool 'todo' in request tools, got: %v", toolNames)
+	}
+	if toolNames["list_dir"] || toolNames["manage_task"] {
+		t.Errorf("stale mappings list_dir or manage_task found in request tools: %v", toolNames)
+	}
+	if toolNames["bash"] || toolNames["read"] || toolNames["edit"] || toolNames["glob"] {
 		t.Errorf("uncloaked client tool names leaked in request: %v", toolNames)
 	}
 
@@ -326,19 +331,26 @@ func TestIntegration_OhMyPi_VibeMode_Streaming(t *testing.T) {
 		cloakedNames = append(cloakedNames, item.(map[string]any)["function"].(map[string]any)["name"].(string))
 	}
 
-	// Verify vibe tools cloaked to Antigravity equivalents (vibe_spawn -> define_subagent, vibe_send -> schedule)
-	if !containsStr(cloakedNames, "define_subagent") || !containsStr(cloakedNames, "schedule") {
-		t.Fatalf("vibe mode tools cloaking failed: %v", cloakedNames)
+	// Vibe tools serve as detection evidence but intentionally pass through unchanged.
+	// Only canonical Safe Mapping tools (read, bash) transform.
+	if !containsStr(cloakedNames, "vibe_spawn") || !containsStr(cloakedNames, "vibe_send") || !containsStr(cloakedNames, "vibe_list") {
+		t.Fatalf("vibe mode tools should pass through unchanged, got: %v", cloakedNames)
+	}
+	if !containsStr(cloakedNames, "view_file") || !containsStr(cloakedNames, "run_command") {
+		t.Fatalf("safe mapping tools failed to cloak: %v", cloakedNames)
+	}
+	if containsStr(cloakedNames, "define_subagent") || containsStr(cloakedNames, "schedule") {
+		t.Fatalf("stale vibe targets should not be present: %v", cloakedNames)
 	}
 
-	// Stream chunk returning define_subagent -> must uncloak to vibe_spawn
-	sseChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"define_subagent\"}}]}}]}\n\n"
+	// Stream chunk returning run_command -> must uncloak to bash
+	sseChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
 	chunkPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, []byte(sseChunk), nil)
 	chunkResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, chunkPayload)
 	out := string(decodeEnvelopeBody(t, chunkResp))
 
-	if !strings.Contains(out, `"name":"vibe_spawn"`) {
-		t.Errorf("expected define_subagent to uncloak to vibe_spawn, got: %s", out)
+	if !strings.Contains(out, `"name":"bash"`) {
+		t.Errorf("expected run_command to uncloak to bash, got: %s", out)
 	}
 }
 
@@ -381,19 +393,26 @@ func TestIntegration_OhMyPi_AutoresearchMode_Streaming(t *testing.T) {
 		cloakedNames = append(cloakedNames, item.(map[string]any)["function"].(map[string]any)["name"].(string))
 	}
 
-	// Verify autoresearch tools cloaked to Antigravity equivalents (init_experiment -> create_goal, run_experiment -> call_mcp_tool)
-	if !containsStr(cloakedNames, "create_goal") || !containsStr(cloakedNames, "call_mcp_tool") {
-		t.Fatalf("autoresearch mode tools cloaking failed: %v", cloakedNames)
+	// Autoresearch tools serve as detection evidence but intentionally pass through unchanged.
+	// Only canonical Safe Mapping tools (read, bash) transform.
+	if !containsStr(cloakedNames, "init_experiment") || !containsStr(cloakedNames, "run_experiment") || !containsStr(cloakedNames, "log_experiment") || !containsStr(cloakedNames, "update_notes") {
+		t.Fatalf("autoresearch mode tools should pass through unchanged, got: %v", cloakedNames)
+	}
+	if !containsStr(cloakedNames, "view_file") || !containsStr(cloakedNames, "run_command") {
+		t.Fatalf("safe mapping tools failed to cloak: %v", cloakedNames)
+	}
+	if containsStr(cloakedNames, "create_goal") || containsStr(cloakedNames, "call_mcp_tool") {
+		t.Fatalf("stale autoresearch targets should not be present: %v", cloakedNames)
 	}
 
-	// Stream chunk returning call_mcp_tool -> must uncloak to run_experiment
-	sseChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"call_mcp_tool\"}}]}}]}\n\n"
+	// Stream chunk returning run_command -> must uncloak to bash
+	sseChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
 	chunkPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, []byte(sseChunk), nil)
 	chunkResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, chunkPayload)
 	out := string(decodeEnvelopeBody(t, chunkResp))
 
-	if !strings.Contains(out, `"name":"run_experiment"`) {
-		t.Errorf("expected call_mcp_tool to uncloak to run_experiment, got: %s", out)
+	if !strings.Contains(out, `"name":"bash"`) {
+		t.Errorf("expected run_command to uncloak to bash, got: %s", out)
 	}
 }
 
@@ -753,6 +772,7 @@ func TestIntegration_OfflineMockServer_VibeMode_Roundtrip(t *testing.T) {
 			map[string]any{"type": "function", "function": map[string]any{"name": "vibe_spawn", "description": "Spawn subagent"}},
 			map[string]any{"type": "function", "function": map[string]any{"name": "vibe_send", "description": "Send to subagent"}},
 			map[string]any{"type": "function", "function": map[string]any{"name": "vibe_list", "description": "List subagents"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "bash", "description": "Run shell"}},
 		},
 		"stream": true,
 	}
@@ -763,23 +783,31 @@ func TestIntegration_OfflineMockServer_VibeMode_Roundtrip(t *testing.T) {
 		t.Fatalf("request.intercept_before code=%d", code)
 	}
 	cloakedBody := decodeEnvelopeBody(t, rawResp)
-	if !strings.Contains(string(cloakedBody), `"name":"define_subagent"`) {
-		t.Fatalf("vibe_spawn not cloaked to define_subagent: %s", string(cloakedBody))
+	// Vibe tools must pass through unchanged
+	if !strings.Contains(string(cloakedBody), `"name":"vibe_spawn"`) {
+		t.Fatalf("vibe_spawn did not pass through: %s", string(cloakedBody))
 	}
-	if !strings.Contains(string(cloakedBody), `"name":"schedule"`) {
-		t.Fatalf("vibe_send not cloaked to schedule: %s", string(cloakedBody))
+	if !strings.Contains(string(cloakedBody), `"name":"vibe_send"`) {
+		t.Fatalf("vibe_send did not pass through: %s", string(cloakedBody))
+	}
+	// bash must be cloaked to run_command
+	if !strings.Contains(string(cloakedBody), `"name":"run_command"`) {
+		t.Fatalf("bash not cloaked to run_command: %s", string(cloakedBody))
+	}
+	if strings.Contains(string(cloakedBody), `"name":"define_subagent"`) || strings.Contains(string(cloakedBody), `"name":"schedule"`) {
+		t.Fatalf("stale vibe targets present in cloaked body: %s", string(cloakedBody))
 	}
 
 	// Model replies with a standalone JSON chunk (no \n\n framing).
-	chunkBody := `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"define_subagent","arguments":"{}"}}]}}]}`
+	chunkBody := `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
 	rawChunk, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk,
 		makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, []byte(chunkBody), nil))
 	clientFinal := string(decodeEnvelopeBody(t, rawChunk))
-	if strings.Contains(clientFinal, "define_subagent") {
-		t.Errorf("vibe Antigravity name leaked to client: %s", clientFinal)
+	if strings.Contains(clientFinal, "run_command") {
+		t.Errorf("Antigravity name leaked to client: %s", clientFinal)
 	}
-	if !strings.Contains(clientFinal, `"name":"vibe_spawn"`) {
-		t.Errorf("vibe_spawn not restored to client: %s", clientFinal)
+	if !strings.Contains(clientFinal, `"name":"bash"`) {
+		t.Errorf("bash not restored to client: %s", clientFinal)
 	}
 }
 

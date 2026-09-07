@@ -1,10 +1,15 @@
+import os
 import urllib.request
 import json
 import traceback
 
 def test_messages():
+    base_url = os.environ.get("CPA_BASE_URL", "http://127.0.0.1:8317")
+    api_key = os.environ.get("CPA_API_KEY", "Tonight123")
+    model = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
+
     payload = {
-        "model": "agy/gemini-3.7-flash",
+        "model": model,
         "messages": [{"role": "user", "content": "Run git status using Bash"}],
         "system": "You are Claude Code, Anthropic's official CLI.",
         "tools": [
@@ -17,16 +22,16 @@ def test_messages():
         "max_tokens": 4096
     }
     req = urllib.request.Request(
-        "http://127.0.0.1:8333/v1/messages",
+        f"{base_url}/v1/messages",
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
-            "x-api-key": "sk-k3skgrBK1nw8fExaR",
-            "Authorization": "Bearer sk-k3skgrBK1nw8fExaR",
+            "x-api-key": api_key,
+            "Authorization": f"Bearer {api_key}",
             "anthropic-version": "2023-06-01"
         }
     )
-    print("=== Testing /v1/messages (Claude Code) ===")
+    print(f"=== Testing {base_url}/v1/messages (Claude Code) ===")
     try:
         with urllib.request.urlopen(req) as resp:
             print("STATUS:", resp.status)
@@ -38,8 +43,12 @@ def test_messages():
         traceback.print_exc()
 
 def test_chat_completions():
+    base_url = os.environ.get("CPA_BASE_URL", "http://127.0.0.1:8317")
+    api_key = os.environ.get("CPA_API_KEY", "Tonight123")
+    model = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
+
     payload = {
-        "model": "agy/gemini-3.7-flash",
+        "model": model,
         "messages": [
             {"role": "system", "content": "You are OpenCode, an AI coding assistant."},
             {"role": "user", "content": "Run git status using bash"}
@@ -53,14 +62,14 @@ def test_chat_completions():
         "stream": True
     }
     req = urllib.request.Request(
-        "http://127.0.0.1:8333/v1/chat/completions",
+        f"{base_url}/v1/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
         headers={
             "Content-Type": "application/json",
-            "Authorization": "Bearer sk-k3skgrBK1nw8fExaR"
+            "Authorization": f"Bearer {api_key}"
         }
     )
-    print("\n=== Testing /v1/chat/completions (OpenCode / Oh My Pi) ===")
+    print(f"\n=== Testing {base_url}/v1/chat/completions (OpenCode / Oh My Pi) ===")
     try:
         with urllib.request.urlopen(req) as resp:
             print("STATUS:", resp.status)

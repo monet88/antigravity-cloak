@@ -1,5 +1,14 @@
-# Spec: Oh My Pi Tool Cloaking & Upstream Signal Sync
+# Spec: Oh My Pi Tool Cloaking & Upstream Signal Sync (Superseded by #25)
 
+> **SUPERSEDED BY SPEC #25 / ISSUE #25**
+> The original 12-tool / Vibe / Autoresearch mapping contract described in this historical document has been superseded by the AGY CLI-native Safe Mapping Set (Issue #25, #26, #27, #28).
+> In the current contract:
+> - The canonical Safe Mapping Set contains exactly 9 entries (`read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`).
+> - `glob` maps to `find_by_name`, not `list_dir`.
+> - `todo`, `hub`, `eval`, all `vibe_*` tools, and Autoresearch tools (`init_experiment`, etc.) are intentional pass-through tools.
+> - Reverse mapping is request-scoped to active canonical pairs actually transformed on that request.
+> - Protected OMP on `agy/*` fails closed with exact 503 JSON rejection; explicit non-AGY OMP requests take the durable zero-mutation bypass path.
+> Refer to **[CONTEXT.md](../../CONTEXT.md)** and **[docs/research/antigravity-tool-surface-2026-09-06.md](../research/antigravity-tool-surface-2026-09-06.md)** for current normative specifications.
 ## Problem Statement
 
 Coding CLI agents (such as Claude Code, OpenAI Codex, and Oh My Pi) interact with upstream LLM gateways using client-specific tool names and brand identifiers in system prompts. When routing requests to Antigravity backends via CLIProxyAPI, these custom tool names and agent signatures cause incompatibilities, model hallucinations, or rejection. Furthermore, upstream coding-filter additions (50+ keywords from new AI coding tools and assistants) need to be absorbed into the cloaking mechanism without adopting rigid blocking behavior.

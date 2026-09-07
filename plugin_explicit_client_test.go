@@ -207,23 +207,25 @@ func TestIntegration_ExplicitClient_BeatsBodyClassification(t *testing.T) {
 
 	clientReq := map[string]any{
 		"model":    model,
+		"system":   "You are Claude Code, Anthropic's official CLI.",
 		"messages": []any{map[string]any{"role": "user", "content": "run"}},
 		"tools": []any{
-			map[string]any{"type": "function", "function": map[string]any{"name": "Bash"}},
-			map[string]any{"type": "function", "function": map[string]any{"name": "Edit"}},
-			map[string]any{"type": "function", "function": map[string]any{"name": "Read"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "bash"}},
 		},
 	}
 	clientReqBytes, _ := json.Marshal(clientReq)
 
 	rawResp, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
 		makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, clientReqBytes, headers))
-	_, respHeaders, clearHeaders := decodeEnvelopeRequestIntercept(t, rawResp)
+	body, respHeaders, clearHeaders := decodeEnvelopeRequestIntercept(t, rawResp)
 	if !containsStr(clearHeaders, explicitClientHeader) {
 		t.Fatalf("ClearHeaders=%v, want to include %q", clearHeaders, explicitClientHeader)
 	}
 	if headerContainsFold(respHeaders, explicitClientHeader) {
 		t.Fatalf("X-Cloak-Client still present in resp.Headers: %v", respHeaders)
+	}
+	if !strings.Contains(string(body), `"name":"run_command"`) {
+		t.Fatalf("expected request cloak bash -> run_command, got: %s", body)
 	}
 
 	// The response must be uncloaked via the oh_my_pi table (bash, lowercase),
@@ -458,9 +460,23 @@ func TestIntegration_ExplicitClient_EmptyPrefixesAllowsAllModels(t *testing.T) {
 	b, _ := json.Marshal(clientReq)
 	rawResp, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
 		makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, b, headers))
-	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
-	if !strings.Contains(string(body), `"name":"view_file"`) {
-		t.Fatalf("empty model_prefixes must allow cloaking for any model, got: %s", body)
+	body, respHeaders, clearHeaders := decodeEnvelopeRequestIntercept(t, rawResp)
+	if len(body) != 0 {
+		t.Fatalf("explicit OMP on non-AGY model must not mutate request, got: %s", body)
+	}
+	if !containsStr(clearHeaders, explicitClientHeader) {
+		t.Fatalf("ClearHeaders=%v, want to include %q", clearHeaders, explicitClientHeader)
+	}
+	if headerContainsFold(respHeaders, explicitClientHeader) {
+		t.Fatalf("X-Cloak-Client still present in resp.Headers: %v", respHeaders)
+	}
+
+	// Correlated response must also be zero mutation
+	respBody := []byte(`{"choices":[{"message":{"content":"Hello Antigravity world"}}]}`)
+	rawResp2, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter, makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, respBody))
+	out := decodeEnvelopeBody(t, rawResp2)
+	if len(out) != 0 {
+		t.Fatalf("correlated response for non-AGY bypass must perform zero mutation, got: %s", out)
 	}
 }
 

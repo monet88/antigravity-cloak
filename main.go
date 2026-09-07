@@ -42,6 +42,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net/http"
 	"os"
 	"regexp"
@@ -195,6 +196,8 @@ func handlePluginCall(method string, request []byte) ([]byte, int) {
 		return handleRequestInterceptBefore(request), 0
 	case pluginabi.MethodRequestInterceptAfter:
 		return mustEnvelope(pluginapi.RequestInterceptResponse{}), 0
+	case pluginabi.MethodRequestComplete:
+		return handleRequestComplete(request), 0
 	case pluginabi.MethodResponseInterceptAfter:
 		return handleResponseIntercept(request), 0
 	case pluginabi.MethodResponseInterceptStreamChunk:
@@ -202,6 +205,20 @@ func handlePluginCall(method string, request []byte) ([]byte, int) {
 	default:
 		return mustErrorEnvelope("unknown_method", fmt.Sprintf("unknown method %q", method)), 0
 	}
+}
+
+func handleRequestComplete(request []byte) []byte {
+	var comp pluginapi.RequestCompletion
+	if err := json.Unmarshal(request, &comp); err != nil {
+		debugLog("handleRequestComplete: decode error %v", err)
+		return mustErrorEnvelope("invalid_request", err.Error())
+	}
+	debugLog("handleRequestComplete: RequestID=%q Outcome=%s", comp.RequestID, comp.Outcome)
+	if comp.RequestID != "" {
+		globalLifecycleManager.deleteRoute(comp.RequestID)
+		globalStreamManager.deleteSession("req:" + comp.RequestID)
+	}
+	return mustEnvelope(struct{}{})
 }
 
 func handlePluginLifecycle(request []byte) []byte {
@@ -223,6 +240,7 @@ func registrationResponse() any {
 			ModelRouter            bool `json:"model_router"`
 			Executor               bool `json:"executor"`
 			RequestInterceptor     bool `json:"request_interceptor"`
+			RequestLifecyclePlugin bool `json:"request_lifecycle_plugin"`
 			ResponseInterceptor    bool `json:"response_interceptor"`
 			StreamChunkInterceptor bool `json:"response_stream_interceptor"`
 		} `json:"capabilities"`
@@ -240,10 +258,12 @@ func registrationResponse() any {
 			ModelRouter            bool `json:"model_router"`
 			Executor               bool `json:"executor"`
 			RequestInterceptor     bool `json:"request_interceptor"`
+			RequestLifecyclePlugin bool `json:"request_lifecycle_plugin"`
 			ResponseInterceptor    bool `json:"response_interceptor"`
 			StreamChunkInterceptor bool `json:"response_stream_interceptor"`
 		}{
 			RequestInterceptor:     true,
+			RequestLifecyclePlugin: true,
 			ResponseInterceptor:    true,
 			StreamChunkInterceptor: true,
 		},
@@ -316,6 +336,546 @@ func modelAllowsCloak(model, requestedModel string) bool {
 	}
 	return false
 }
+func isAGYRoute(model, requestedModel string) bool {
+	return strings.HasPrefix(strings.TrimSpace(model), "agy/") ||
+		strings.HasPrefix(strings.TrimSpace(requestedModel), "agy/")
+}
+
+func protected503Response(resp pluginapi.RequestInterceptResponse) []byte {
+	resp.Terminate = true
+	resp.StatusCode = http.StatusServiceUnavailable // 503
+	resp.ResponseHeaders = http.Header{
+		"Content-Type": []string{"application/json"},
+	}
+	resp.ResponseBody = []byte(`{"error":{"code":"omp_cloak_required","message":"Protected OMP request could not be safely cloaked."}}`)
+	return mustEnvelope(resp)
+}
+
+func decodeStrictProtectedJSON(data []byte) (map[string]any, bool) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return nil, false
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+
+	var root any
+	if err := dec.Decode(&root); err != nil {
+		return nil, false
+	}
+	rootMap, ok := root.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return nil, false
+	}
+	return rootMap, true
+}
+
+type protectedDeclInfo struct {
+	originalFullName string
+	prefix           string
+	base             string
+	finalBase        string
+	transformed      bool
+}
+
+func inspectAndValidateProtectedTools(rootMap map[string]any, format string) ([]protectedDeclInfo, error) {
+	toolsRaw, ok := rootMap["tools"].([]any)
+	if !ok || len(toolsRaw) == 0 {
+		return nil, nil
+	}
+	var decls []protectedDeclInfo
+	for _, tRaw := range toolsRaw {
+		tMap, ok := tRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		var name string
+		if format == "openai" {
+			if fn, ok := tMap["function"].(map[string]any); ok {
+				name, _ = fn["name"].(string)
+			}
+		} else if format == "anthropic" {
+			name, _ = tMap["name"].(string)
+		}
+		if name == "" {
+			continue
+		}
+		prefix, base := splitToolNamespace(name)
+		targetBase, isMapped := canonicalOMPSafeMappingSet[base]
+		var finalBase string
+		var transformed bool
+		if isMapped {
+			finalBase = targetBase
+			transformed = true
+		} else {
+			finalBase = base
+			transformed = false
+		}
+		decls = append(decls, protectedDeclInfo{
+			originalFullName: name,
+			prefix:           prefix,
+			base:             base,
+			finalBase:        finalBase,
+			transformed:      transformed,
+		})
+	}
+
+	byFinalBase := make(map[string][]protectedDeclInfo)
+	for _, d := range decls {
+		byFinalBase[d.finalBase] = append(byFinalBase[d.finalBase], d)
+	}
+	for fb, group := range byFinalBase {
+		if len(group) > 1 {
+			hasTransformed := false
+			for _, d := range group {
+				if d.transformed {
+					hasTransformed = true
+					break
+				}
+			}
+			if hasTransformed {
+				return nil, fmt.Errorf("declaration collision for final base identity %q", fb)
+			}
+		}
+	}
+	return decls, nil
+}
+
+func cloakProtectedToolNames(rootMap map[string]any, cloakTable map[string]string, sourceFormat string) bool {
+	changed := false
+
+	if toolsRaw, ok := rootMap["tools"].([]any); ok {
+		for _, tRaw := range toolsRaw {
+			tMap, ok := tRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if sourceFormat == "openai" {
+				if fn, ok := tMap["function"].(map[string]any); ok {
+					if name, ok := fn["name"].(string); ok {
+						prefix, base := splitToolNamespace(name)
+						if target, exists := cloakTable[base]; exists {
+							fn["name"] = prefix + target
+							changed = true
+						}
+					}
+				}
+			} else if sourceFormat == "anthropic" {
+				if name, ok := tMap["name"].(string); ok {
+					prefix, base := splitToolNamespace(name)
+					if target, exists := cloakTable[base]; exists {
+						tMap["name"] = prefix + target
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	if msgsRaw, ok := rootMap["messages"].([]any); ok {
+		for _, mRaw := range msgsRaw {
+			msg, ok := mRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if sourceFormat == "openai" {
+				if calls, ok := msg["tool_calls"].([]any); ok {
+					for _, cRaw := range calls {
+						call, ok := cRaw.(map[string]any)
+						if !ok {
+							continue
+						}
+						fn, ok := call["function"].(map[string]any)
+						if !ok {
+							continue
+						}
+						if name, ok := fn["name"].(string); ok {
+							prefix, base := splitToolNamespace(name)
+							if target, exists := cloakTable[base]; exists {
+								fn["name"] = prefix + target
+								changed = true
+							}
+						}
+					}
+				}
+				if msg["role"] == "tool" {
+					if name, ok := msg["name"].(string); ok {
+						prefix, base := splitToolNamespace(name)
+						if target, exists := cloakTable[base]; exists {
+							msg["name"] = prefix + target
+							changed = true
+						}
+					}
+				}
+			} else if sourceFormat == "anthropic" {
+				if contents, ok := msg["content"].([]any); ok {
+					for _, cntRaw := range contents {
+						cnt, ok := cntRaw.(map[string]any)
+						if !ok {
+							continue
+						}
+						if cnt["type"] == "tool_use" {
+							if name, ok := cnt["name"].(string); ok {
+								prefix, base := splitToolNamespace(name)
+								if target, exists := cloakTable[base]; exists {
+									cnt["name"] = prefix + target
+									changed = true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if tc, ok := rootMap["tool_choice"].(map[string]any); ok {
+		if sourceFormat == "openai" {
+			if fn, ok := tc["function"].(map[string]any); ok {
+				if name, ok := fn["name"].(string); ok {
+					prefix, base := splitToolNamespace(name)
+					if target, exists := cloakTable[base]; exists {
+						fn["name"] = prefix + target
+						changed = true
+					}
+				}
+			}
+		} else if sourceFormat == "anthropic" {
+			if name, ok := tc["name"].(string); ok {
+				prefix, base := splitToolNamespace(name)
+				if target, exists := cloakTable[base]; exists {
+					tc["name"] = prefix + target
+					changed = true
+				}
+			}
+		}
+	}
+
+	return changed
+}
+
+func validateProtectedPostTransform(rootMap map[string]any, sourceFormat string) bool {
+	hasUncloakedSource := func(name string) bool {
+		_, base := splitToolNamespace(name)
+		_, exists := canonicalOMPSafeMappingSet[base]
+		return exists
+	}
+
+	if toolsRaw, ok := rootMap["tools"].([]any); ok {
+		for _, tRaw := range toolsRaw {
+			if tMap, ok := tRaw.(map[string]any); ok {
+				if sourceFormat == "openai" {
+					if fn, ok := tMap["function"].(map[string]any); ok {
+						if name, ok := fn["name"].(string); ok {
+							if hasUncloakedSource(name) {
+								return false
+							}
+						}
+					}
+				} else if sourceFormat == "anthropic" {
+					if name, ok := tMap["name"].(string); ok {
+						if hasUncloakedSource(name) {
+							return false
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if msgsRaw, ok := rootMap["messages"].([]any); ok {
+		for _, mRaw := range msgsRaw {
+			if msg, ok := mRaw.(map[string]any); ok {
+				if sourceFormat == "openai" {
+					if calls, ok := msg["tool_calls"].([]any); ok {
+						for _, cRaw := range calls {
+							if call, ok := cRaw.(map[string]any); ok {
+								if fn, ok := call["function"].(map[string]any); ok {
+									if name, ok := fn["name"].(string); ok {
+										if hasUncloakedSource(name) {
+											return false
+										}
+									}
+								}
+							}
+						}
+					}
+					if msg["role"] == "tool" {
+						if name, ok := msg["name"].(string); ok {
+							if hasUncloakedSource(name) {
+								return false
+							}
+						}
+					}
+				} else if sourceFormat == "anthropic" {
+					if contents, ok := msg["content"].([]any); ok {
+						for _, cntRaw := range contents {
+							if cnt, ok := cntRaw.(map[string]any); ok {
+								if cnt["type"] == "tool_use" {
+									if name, ok := cnt["name"].(string); ok {
+										if hasUncloakedSource(name) {
+											return false
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if tc, ok := rootMap["tool_choice"].(map[string]any); ok {
+		if sourceFormat == "openai" {
+			if fn, ok := tc["function"].(map[string]any); ok {
+				if name, ok := fn["name"].(string); ok {
+					if hasUncloakedSource(name) {
+						return false
+					}
+				}
+			}
+		} else if sourceFormat == "anthropic" {
+			if name, ok := tc["name"].(string); ok {
+				if hasUncloakedSource(name) {
+					return false
+				}
+			}
+		}
+	}
+
+	return true
+}
+
+const protectedBrandSentinel = "\x00__ANTIGRAVITY_PROTECTED_OMP_BRAND__\x00"
+
+var mandatoryProtectedOMPAliases = []string{
+	"Oh My Pi",
+	"oh-my-pi",
+	"omp",
+}
+
+func isOMPAlias(match string) bool {
+	m := strings.ToLower(strings.TrimSpace(match))
+	return m == "omp" || m == "oh-my-pi" || m == "oh my pi"
+}
+
+func rewriteProtectedBrandText(text string, cfg *filterConfig) (string, bool) {
+	if text == "" {
+		return text, false
+	}
+	current := text
+	changed := false
+	for _, alias := range mandatoryProtectedOMPAliases {
+		if next, rep := replaceBrandKeyword(current, alias, protectedBrandSentinel); rep {
+			current = next
+			changed = true
+		}
+	}
+
+	var nonOMPMappings []rewriteMapping
+	if cfg.UseDefaultKeywords {
+		for _, m := range defaultRewriteMappings {
+			if !isOMPAlias(m.Match) {
+				nonOMPMappings = append(nonOMPMappings, m)
+			}
+		}
+	}
+	for _, m := range cfg.CustomMappings {
+		if !isOMPAlias(m.Match) {
+			nonOMPMappings = append(nonOMPMappings, m)
+		}
+	}
+	normalized := normalizeMappings(nonOMPMappings)
+	for _, m := range normalized {
+		if next, rep := replaceBrandKeyword(current, m.Match, m.Replacement); rep {
+			current = next
+			changed = true
+		}
+	}
+
+	if strings.Contains(current, protectedBrandSentinel) {
+		current = strings.ReplaceAll(current, protectedBrandSentinel, "Antigravity")
+	}
+
+	return current, changed
+}
+
+func rewriteProtectedBrandValue(value any, cfg *filterConfig) any {
+	switch typed := value.(type) {
+	case string:
+		next, _ := rewriteProtectedBrandText(typed, cfg)
+		return next
+	case map[string]any:
+		for k, v := range typed {
+			typed[k] = rewriteProtectedBrandValue(v, cfg)
+		}
+		return typed
+	case []any:
+		for i, v := range typed {
+			typed[i] = rewriteProtectedBrandValue(v, cfg)
+		}
+		return typed
+	default:
+		return value
+	}
+}
+
+func rewriteProtectedBrand(rootMap map[string]any, sourceFormat string) {
+	cfg := activeFilterConfig()
+
+	if sysVal, ok := rootMap["system"]; ok {
+		rootMap["system"] = rewriteProtectedBrandValue(sysVal, cfg)
+	}
+
+	if msgsRaw, ok := rootMap["messages"].([]any); ok {
+		for _, mRaw := range msgsRaw {
+			if msg, ok := mRaw.(map[string]any); ok {
+				if role, ok := msg["role"].(string); ok && role == "system" {
+					if content, exists := msg["content"]; exists {
+						msg["content"] = rewriteProtectedBrandValue(content, cfg)
+					}
+				}
+			}
+		}
+	}
+
+	if toolsRaw, ok := rootMap["tools"].([]any); ok {
+		for _, tRaw := range toolsRaw {
+			if tMap, ok := tRaw.(map[string]any); ok {
+				if sourceFormat == "openai" {
+					if fn, ok := tMap["function"].(map[string]any); ok {
+						if desc, ok := fn["description"].(string); ok {
+							if next, c := rewriteProtectedBrandText(desc, cfg); c {
+								fn["description"] = next
+							}
+						}
+					}
+				} else if sourceFormat == "anthropic" {
+					if desc, ok := tMap["description"].(string); ok {
+						if next, c := rewriteProtectedBrandText(desc, cfg); c {
+							tMap["description"] = next
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if cachedCloak := cfg.cloakRegexCache["oh_my_pi"]; cachedCloak != nil {
+		if sysVal, ok := rootMap["system"]; ok {
+			next, sysToolChanged := replaceToolNamesInValue(sysVal, cachedCloak)
+			if sysToolChanged {
+				rootMap["system"] = next
+			}
+		}
+		if msgsRaw, ok := rootMap["messages"].([]any); ok {
+			for _, mRaw := range msgsRaw {
+				if msg, ok := mRaw.(map[string]any); ok {
+					if role, ok := msg["role"].(string); ok && role == "system" {
+						if content, exists := msg["content"]; exists {
+							toolNext, toolChanged := replaceToolNamesInValue(content, cachedCloak)
+							if toolChanged {
+								msg["content"] = toolNext
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+}
+
+func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.RequestInterceptResponse, format string) []byte {
+	if req.RequestID == "" {
+		debugLog("handleProtectedAGY: missing RequestID")
+		return protected503Response(resp)
+	}
+
+	if format != "openai" && format != "anthropic" {
+		debugLog("handleProtectedAGY: unsupported source format %q", format)
+		return protected503Response(resp)
+	}
+
+	rootMap, ok := decodeStrictProtectedJSON(req.Body)
+	if !ok {
+		debugLog("handleProtectedAGY: strict JSON decode failed")
+		return protected503Response(resp)
+	}
+
+	effective := activeFilterConfig().ToolMappings["oh_my_pi"]
+	if len(effective) != len(canonicalOMPSafeMappingSet) {
+		debugLog("handleProtectedAGY: effective mapping count mismatch: %d != %d", len(effective), len(canonicalOMPSafeMappingSet))
+		return protected503Response(resp)
+	}
+	for orig, target := range canonicalOMPSafeMappingSet {
+		if effective[orig] != target {
+			debugLog("handleProtectedAGY: effective mapping mismatch for %q: got %q, want %q", orig, effective[orig], target)
+			return protected503Response(resp)
+		}
+	}
+
+	decls, collisionErr := inspectAndValidateProtectedTools(rootMap, format)
+	if collisionErr != nil {
+		debugLog("handleProtectedAGY: declaration collision: %v", collisionErr)
+		return protected503Response(resp)
+	}
+
+	activeReverse := make(map[string]string)
+	for _, d := range decls {
+		if d.transformed {
+			transformedFullName := d.prefix + d.finalBase
+			activeReverse[transformedFullName] = d.originalFullName
+		}
+	}
+	var protectedCachedUncloak *cachedUncloakPattern
+	if len(activeReverse) > 0 {
+		targets := make([]string, 0, len(activeReverse))
+		lookup := make(map[string]string, len(activeReverse))
+		for targetFull, origFull := range activeReverse {
+			targets = append(targets, regexp.QuoteMeta(targetFull))
+			lookup[targetFull] = origFull
+		}
+		pattern := `"name"\s*:\s*"(` + strings.Join(targets, "|") + `)"`
+		if re, err := regexp.Compile(pattern); err == nil {
+			protectedCachedUncloak = &cachedUncloakPattern{
+				re:        re,
+				lookup:    lookup,
+				exactOnly: true,
+			}
+		}
+	}
+
+	cloakProtectedToolNames(rootMap, canonicalOMPSafeMappingSet, format)
+	rewriteProtectedBrand(rootMap, format)
+
+	if !validateProtectedPostTransform(rootMap, format) {
+		debugLog("handleProtectedAGY: post-transform validation failed")
+		return protected503Response(resp)
+	}
+
+	canonicalBytes, err := safeMarshal(rootMap)
+	if err != nil {
+		debugLog("handleProtectedAGY: safeMarshal failed: %v", err)
+		return protected503Response(resp)
+	}
+	resp.Body = canonicalBytes
+
+	globalLifecycleManager.setRoute(req.RequestID, &explicitOMPRouteState{
+		routeKind:               routeKindProtectedAGY,
+		client:                  "oh_my_pi",
+		activeReverse:           activeReverse,
+		cachedUncloak:           protectedCachedUncloak,
+		brandRestorationEnabled: true,
+		expected:                requestChoiceCount(canonicalBytes),
+	})
+
+	return mustEnvelope(resp)
+}
 
 func handleRequestInterceptBefore(request []byte) []byte {
 	var req pluginapi.RequestInterceptRequest
@@ -324,36 +884,58 @@ func handleRequestInterceptBefore(request []byte) []byte {
 	}
 
 	resp := pluginapi.RequestInterceptResponse{}
-	explicitClient, matchedKeys, explicitPresent, explicitValid := resolveExplicitClient(req.Headers)
-	if explicitPresent {
-		// Consume the plugin-owned control header on both host header contracts:
-		// ClearHeaders covers a merging host; the before-auth interceptor applies
-		// resp.Headers as the final set, so the filtered clone provides every
-		// non-owned inbound header verbatim. Inbound request headers are canonical
-		// MIME keys (Go net/http), so the host can always drop the owned key; a
-		// non-canonically-spelled stored key is a host-contract limitation outside
-		// this plugin's control and cannot be produced by the real HTTP stack.
-		resp.ClearHeaders = matchedKeys
-		resp.Headers = filteredHeaders(req.Headers, matchedKeys)
+	marker := parseExplicitClientMarker(req.Headers)
+	if marker.present {
+		resp.ClearHeaders = marker.matchedKeys
+		resp.Headers = filteredHeaders(req.Headers, marker.matchedKeys)
 	}
 
 	format := normalizeSourceFormat(req.SourceFormat)
-	debugLog("handleRequestInterceptBefore: SourceFormat=%s (normalized=%s) ToFormat=%q Model=%q RequestedModel=%q explicitClient=%q valid=%t Body=%s", req.SourceFormat, format, req.ToFormat, req.Model, req.RequestedModel, explicitClient, explicitValid, string(req.Body))
+	isAGY := isAGYRoute(req.Model, req.RequestedModel)
+	debugLog("handleRequestInterceptBefore: SourceFormat=%s (normalized=%s) ToFormat=%q Model=%q RequestedModel=%q isAGY=%t marker=%+v",
+		req.SourceFormat, format, req.ToFormat, req.Model, req.RequestedModel, isAGY, marker)
+
+	if marker.isConflict && marker.conflictContainsOMP {
+		if isAGY {
+			debugLog("handleRequestInterceptBefore: conflicting marker containing OMP on AGY route -> exact 503")
+			return protected503Response(resp)
+		}
+		debugLog("handleRequestInterceptBefore: conflicting marker containing OMP on non-AGY route -> durable bypass")
+		if req.RequestID != "" {
+			globalLifecycleManager.setRoute(req.RequestID, &explicitOMPRouteState{
+				routeKind: routeKindExplicitOMPNonAGYBypass,
+				client:    "oh_my_pi",
+			})
+		}
+		return mustEnvelope(resp)
+	}
+
+	if !marker.isConflict && marker.isOMP {
+		if isAGY {
+			debugLog("handleRequestInterceptBefore: explicit OMP on AGY route -> ProtectedAGY admission")
+			return handleProtectedAGY(&req, resp, format)
+		}
+		debugLog("handleRequestInterceptBefore: explicit OMP on non-AGY route -> durable bypass")
+		if req.RequestID != "" {
+			globalLifecycleManager.setRoute(req.RequestID, &explicitOMPRouteState{
+				routeKind: routeKindExplicitOMPNonAGYBypass,
+				client:    "oh_my_pi",
+			})
+		}
+		return mustEnvelope(resp)
+	}
+
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleRequestInterceptBefore: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(resp)
 	}
 
-	// Precedence: valid explicit owned header > verified positive UA evidence
-	// > existing body Client Gate. An invalid explicit value bypasses UA and
-	// falls directly to body classification so a weaker signal cannot hide
-	// operator misconfiguration.
 	forcedClient := ""
-	if explicitPresent {
-		if explicitValid {
-			forcedClient = explicitClient
+	if marker.present {
+		if marker.valid {
+			forcedClient = marker.client
 		} else {
-			debugLog("handleRequestInterceptBefore: invalid explicit client %q, falling back to body detection", explicitClient)
+			debugLog("handleRequestInterceptBefore: invalid explicit client %q, falling back to body detection", marker.client)
 		}
 	} else if uaClient, ok := resolveUserAgentClient(req.Headers); ok {
 		forcedClient = uaClient
@@ -367,11 +949,7 @@ func handleRequestInterceptBefore(request []byte) []byte {
 			if cached != nil && cached.re != nil {
 				globalStreamManager.resetSession("req:"+req.RequestID, client, cached, requestChoiceCount(req.Body))
 			}
-		} else if explicitPresent && !explicitValid {
-			// Precedence ran to completion with UA suppressed and the body
-			// classifying nothing: record the authoritative negative so the
-			// response/stream paths cannot re-infer a weaker client from the
-			// surviving User-Agent after this interceptor consumed the header.
+		} else if marker.present && !marker.valid {
 			debugLog("handleRequestInterceptBefore: negative client resolution recorded for RequestID=%s", req.RequestID)
 			globalStreamManager.resetSession("req:"+req.RequestID, negativeClientResolution, nil, requestChoiceCount(req.Body))
 		}
@@ -390,7 +968,42 @@ func handleResponseIntercept(request []byte) []byte {
 	}
 
 	format := normalizeSourceFormat(req.SourceFormat)
-	debugLog("handleResponseIntercept: SourceFormat=%s (normalized=%s) RequestBody=%s Body=%s", req.SourceFormat, format, string(req.RequestBody), string(req.Body))
+	debugLog("handleResponseIntercept: SourceFormat=%s (normalized=%s) RequestBody=%s Body=%s RequestID=%s",
+		req.SourceFormat, format, string(req.RequestBody), string(req.Body), req.RequestID)
+
+	if req.RequestID != "" {
+		if route := globalLifecycleManager.getRoute(req.RequestID); route != nil {
+			if route.routeKind == routeKindExplicitOMPNonAGYBypass {
+				debugLog("handleResponseIntercept: correlated ExplicitOMPNonAGYBypass -> zero mutation")
+				return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+			}
+			if route.routeKind == routeKindProtectedAGY {
+				if route.malformed || route.client != "oh_my_pi" {
+					debugLog("invariant violation: malformed ProtectedAGY route state for RequestID=%s", req.RequestID)
+					return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+				}
+				modified := req.Body
+				changed := false
+				if len(route.activeReverse) > 0 {
+					if m, c := uncloakResponseBodyExact(req.Body, route.activeReverse, format); c {
+						modified = m
+						changed = true
+					}
+				}
+				if route.brandRestorationEnabled {
+					if rev, c := reverseBrandInResponseBody(modified, format); c {
+						modified = rev
+						changed = true
+					}
+				}
+				if !changed {
+					return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+				}
+				return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
+			}
+		}
+	}
+
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleResponseIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
@@ -407,8 +1020,6 @@ func handleResponseIntercept(request []byte) []byte {
 			}
 		}
 	}
-	// Weaker-evidence recovery runs only when request-time correlation is
-	// genuinely unavailable; a recorded negative resolution suppresses it.
 	if !correlated && uncloakTable == nil {
 		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
 			uncloakTable = effectiveUncloakTable(uaClient)
@@ -458,7 +1069,26 @@ func handleStreamChunkIntercept(request []byte) []byte {
 	}
 
 	format := normalizeSourceFormat(req.SourceFormat)
-	debugLog("handleStreamChunkIntercept: SourceFormat=%s (normalized=%s) ChunkIndex=%d Body=%s", req.SourceFormat, format, req.ChunkIndex, string(req.Body))
+	debugLog("handleStreamChunkIntercept: SourceFormat=%s (normalized=%s) ChunkIndex=%d Body=%s RequestID=%s",
+		req.SourceFormat, format, req.ChunkIndex, string(req.Body), req.RequestID)
+
+	if req.RequestID != "" {
+		if route := globalLifecycleManager.getRoute(req.RequestID); route != nil {
+			if route.routeKind == routeKindExplicitOMPNonAGYBypass {
+				debugLog("handleStreamChunkIntercept: correlated ExplicitOMPNonAGYBypass -> zero mutation")
+				return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+			}
+			if route.routeKind == routeKindProtectedAGY {
+				if route.malformed || route.client != "oh_my_pi" {
+					debugLog("invariant violation: malformed ProtectedAGY route state for RequestID=%s", req.RequestID)
+					return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+				}
+				resp := globalStreamManager.processChunk(&req, format)
+				return mustEnvelope(resp)
+			}
+		}
+	}
+
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleStreamChunkIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
@@ -467,7 +1097,6 @@ func handleStreamChunkIntercept(request []byte) []byte {
 	resp := globalStreamManager.processChunk(&req, format)
 	return mustEnvelope(resp)
 }
-
 func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]string, string) {
 	var reqRoot map[string]any
 	if err := safeUnmarshal(requestBody, &reqRoot); err != nil {
@@ -558,6 +1187,23 @@ func uncloakResponseBody(body []byte, uncloakTable map[string]string, sourceForm
 	}
 
 	changed := uncloakJSONNode(root, uncloakTable, sourceFormat)
+	if !changed {
+		return nil, false
+	}
+	raw, err := safeMarshal(root)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+func uncloakResponseBodyExact(body []byte, uncloakTable map[string]string, sourceFormat string) ([]byte, bool) {
+	var root any
+	if err := safeUnmarshal(body, &root); err != nil {
+		return nil, false
+	}
+
+	changed := uncloakJSONNodeExact(root, uncloakTable, sourceFormat)
 	if !changed {
 		return nil, false
 	}
@@ -727,7 +1373,14 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 		}
 		// loc[2]:loc[3] is capture group 1 (the tool name)
 		toolName := bodyStr[loc[2]:loc[3]]
-		if orig, ok := lookupUncloak(toolName, cached.lookup); ok {
+		var orig string
+		var ok bool
+		if cached.exactOnly {
+			orig, ok = cached.lookup[toolName]
+		} else {
+			orig, ok = lookupUncloak(toolName, cached.lookup)
+		}
+		if ok {
 			buf.WriteString(bodyStr[lastEnd:loc[2]])
 			buf.WriteString(orig)
 			lastEnd = loc[3]
@@ -1529,7 +2182,9 @@ type streamSession struct {
 	brandCarries map[string]*brandLane
 	// expected is the request's OpenAI "n" (choices per completion),
 	// minimum 1; gates standalone stream-end detection.
-	expected int
+	expected       int
+	laneProgress   map[int]bool
+	payloadStarted bool
 }
 
 const (
@@ -1543,6 +2198,100 @@ type streamSessionManager struct {
 }
 
 var globalStreamManager = newStreamSessionManager()
+
+type explicitOMPRouteKind int
+
+const (
+	routeKindNone explicitOMPRouteKind = iota
+	routeKindProtectedAGY
+	routeKindExplicitOMPNonAGYBypass
+)
+
+type streamDisposition int32
+
+const (
+	streamDispositionNone streamDisposition = iota
+	streamDispositionPayloadActive
+	streamDispositionCleanTerminal
+)
+
+type explicitOMPRouteState struct {
+	routeKind               explicitOMPRouteKind
+	client                  string
+	activeReverse           map[string]string
+	cachedUncloak           *cachedUncloakPattern
+	brandRestorationEnabled bool
+	expected                int
+	disposition             atomic.Int32
+	malformed               bool
+}
+
+func (s *explicitOMPRouteState) getDisposition() streamDisposition {
+	if s == nil {
+		return streamDispositionNone
+	}
+	return streamDisposition(s.disposition.Load())
+}
+
+func (s *explicitOMPRouteState) setDisposition(target streamDisposition) {
+	if s == nil {
+		return
+	}
+	for {
+		cur := s.disposition.Load()
+		if streamDisposition(cur) >= target {
+			return
+		}
+		if s.disposition.CompareAndSwap(cur, int32(target)) {
+			return
+		}
+	}
+}
+type explicitOMPLifecycleManager struct {
+	mu     sync.Mutex
+	routes map[string]*explicitOMPRouteState
+}
+
+var globalLifecycleManager = newExplicitOMPLifecycleManager()
+
+func newExplicitOMPLifecycleManager() *explicitOMPLifecycleManager {
+	return &explicitOMPLifecycleManager{
+		routes: make(map[string]*explicitOMPRouteState),
+	}
+}
+
+func (m *explicitOMPLifecycleManager) setRoute(requestID string, state *explicitOMPRouteState) {
+	if requestID == "" || state == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.routes[requestID] = state
+}
+
+func (m *explicitOMPLifecycleManager) getRoute(requestID string) *explicitOMPRouteState {
+	if requestID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.routes[requestID]
+}
+
+func (m *explicitOMPLifecycleManager) deleteRoute(requestID string) {
+	if requestID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.routes, requestID)
+}
+
+func (m *explicitOMPLifecycleManager) reset() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.routes = make(map[string]*explicitOMPRouteState)
+}
 
 func newStreamSessionManager() *streamSessionManager {
 	return &streamSessionManager{
@@ -1651,6 +2400,14 @@ func (m *streamSessionManager) deleteSession(key string) {
 func (m *streamSessionManager) cleanupStaleLocked() {
 	cutoff := time.Now().Add(-5 * time.Minute)
 	for k, s := range m.sessions {
+		if strings.HasPrefix(k, "req:") {
+			reqID := strings.TrimPrefix(k, "req:")
+			if route := globalLifecycleManager.getRoute(reqID); route != nil && route.routeKind == routeKindProtectedAGY {
+				if s.payloadStarted || route.getDisposition() == streamDispositionPayloadActive || len(s.tail) > 0 || hasPendingBrandCarry(s) || len(s.laneProgress) > 0 {
+					continue
+				}
+			}
+		}
 		if s.updatedAt.Before(cutoff) {
 			delete(m.sessions, k)
 		}
@@ -1659,6 +2416,21 @@ func (m *streamSessionManager) cleanupStaleLocked() {
 
 func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptRequest, format string) pluginapi.StreamChunkInterceptResponse {
 	key := m.sessionKey(req)
+
+	var protectedRoute *explicitOMPRouteState
+	if req.RequestID != "" {
+		protectedRoute = globalLifecycleManager.getRoute(req.RequestID)
+	}
+	if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
+		if protectedRoute.malformed || protectedRoute.client != "oh_my_pi" {
+			debugLog("StreamSessionManager: malformed ProtectedAGY route state key=%s", key)
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
+		if protectedRoute.getDisposition() == streamDispositionCleanTerminal {
+			debugLog("StreamSessionManager: late chunk after clean terminal key=%s", key)
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
+	}
 
 	// Header-init chunk: schema_version >= 3 delivers OriginalRequest/RequestBody
 	// here. Nothing to uncloak on this chunk; register the stream's session so
@@ -1672,6 +2444,12 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		// If session was already pre-registered by request intercept, keep it.
 		if sessClient := m.getClient(key); sessClient != "" {
 			debugLog("StreamSessionManager: header-init using pre-registered session key=%s client=%s", key, sessClient)
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
+		if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
+			if protectedRoute.getDisposition() == streamDispositionNone {
+				m.ensureSession(key, "oh_my_pi", protectedRoute.cachedUncloak, protectedRoute.expected)
+			}
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
 		detectSrc := detectionRequestBody(req.OriginalRequest, req.RequestBody)
@@ -1709,15 +2487,32 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 	sess := m.sessions[key]
 	m.mu.Unlock()
 	if sess == nil {
-		sess = m.ensureFallbackSession(req, format, key)
+		if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
+			if protectedRoute.getDisposition() == streamDispositionPayloadActive {
+				debugLog("StreamSessionManager: disposable session lost after payload started key=%s", key)
+				return pluginapi.StreamChunkInterceptResponse{}
+			}
+			if protectedRoute.getDisposition() == streamDispositionNone {
+				sess = m.ensureSession(key, "oh_my_pi", protectedRoute.cachedUncloak, protectedRoute.expected)
+			}
+		} else {
+			sess = m.ensureFallbackSession(req, format, key)
+		}
 	}
-	if sess == nil || sess.cached == nil || sess.cached.re == nil {
+	if sess == nil {
 		return pluginapi.StreamChunkInterceptResponse{}
+	}
+	if sess.cached == nil && sess.client != "oh_my_pi" {
+		return pluginapi.StreamChunkInterceptResponse{}
+	}
+	m.mu.Lock()
+	if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
+		protectedRoute.setDisposition(streamDispositionPayloadActive)
+		sess.payloadStarted = true
 	}
 	cached := sess.cached
 
 	// Reset buffer on first payload chunk (ChunkIndex == 0)
-	m.mu.Lock()
 	if req.ChunkIndex == 0 {
 		sess.tail = nil
 	}
@@ -1744,8 +2539,16 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			return pluginapi.StreamChunkInterceptResponse{DropChunk: true}
 		}
 
-		modified, changed := uncloakStreamChunk(completeEvents, cached)
-		if !changed {
+		var modified []byte
+		changed := false
+		if cached != nil && cached.re != nil {
+			if mod, ch := uncloakStreamChunk(completeEvents, cached); ch {
+				modified = mod
+				changed = true
+			} else {
+				modified = completeEvents
+			}
+		} else {
 			modified = completeEvents
 		}
 		brandChanged := false
@@ -1789,6 +2592,9 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			}
 			if !hasPendingBrandCarry(sess) {
 				m.deleteSession(key)
+				if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
+					protectedRoute.setDisposition(streamDispositionCleanTerminal)
+				}
 			}
 		}
 		if !overallChanged {
@@ -1802,8 +2608,16 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 	sess.updatedAt = time.Now()
 	m.mu.Unlock()
 
-	modified, changed := uncloakStreamChunk(req.Body, cached)
-	if !changed {
+	var modified []byte
+	changed := false
+	if cached != nil && cached.re != nil {
+		if mod, ch := uncloakStreamChunk(req.Body, cached); ch {
+			modified = mod
+			changed = true
+		} else {
+			modified = req.Body
+		}
+	} else {
 		modified = req.Body
 	}
 	if sess.client == "oh_my_pi" {
@@ -1829,6 +2643,9 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		}
 		if done && !hasPendingBrandCarry(sess) {
 			m.deleteSession(key)
+			if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
+				protectedRoute.setDisposition(streamDispositionCleanTerminal)
+			}
 		}
 	}
 	if !changed {
@@ -1902,7 +2719,23 @@ func splitSSEEvents(data []byte) (completeEvents []byte, incompleteTail []byte) 
 }
 
 func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat string) bool {
+	return uncloakJSONNodeOpt(node, uncloakTable, sourceFormat, false)
+}
+
+func uncloakJSONNodeExact(node any, uncloakTable map[string]string, sourceFormat string) bool {
+	return uncloakJSONNodeOpt(node, uncloakTable, sourceFormat, true)
+}
+
+func uncloakJSONNodeOpt(node any, uncloakTable map[string]string, sourceFormat string, exactOnly bool) bool {
 	changed := false
+
+	lookupFn := lookupUncloak
+	if exactOnly {
+		lookupFn = func(name string, table map[string]string) (string, bool) {
+			orig, exists := table[name]
+			return orig, exists
+		}
+	}
 
 	switch typed := node.(type) {
 	case map[string]any:
@@ -1913,7 +2746,7 @@ func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat stri
 						if tc, ok := tcRaw.(map[string]any); ok {
 							if fn, ok := tc["function"].(map[string]any); ok {
 								if name, ok := fn["name"].(string); ok {
-									if orig, exists := lookupUncloak(name, uncloakTable); exists {
+									if orig, exists := lookupFn(name, uncloakTable); exists {
 										fn["name"] = orig
 										changed = true
 									}
@@ -1929,7 +2762,7 @@ func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat stri
 						if tc, ok := tcRaw.(map[string]any); ok {
 							if fn, ok := tc["function"].(map[string]any); ok {
 								if name, ok := fn["name"].(string); ok {
-									if orig, exists := lookupUncloak(name, uncloakTable); exists {
+									if orig, exists := lookupFn(name, uncloakTable); exists {
 										fn["name"] = orig
 										changed = true
 									}
@@ -1942,7 +2775,7 @@ func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat stri
 		} else if sourceFormat == "anthropic" {
 			if typeVal, ok := typed["type"].(string); ok && typeVal == "tool_use" {
 				if name, ok := typed["name"].(string); ok {
-					if orig, exists := lookupUncloak(name, uncloakTable); exists {
+					if orig, exists := lookupFn(name, uncloakTable); exists {
 						typed["name"] = orig
 						changed = true
 					}
@@ -1951,14 +2784,14 @@ func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat stri
 		}
 
 		for _, v := range typed {
-			if childChanged := uncloakJSONNode(v, uncloakTable, sourceFormat); childChanged {
+			if childChanged := uncloakJSONNodeOpt(v, uncloakTable, sourceFormat, exactOnly); childChanged {
 				changed = true
 			}
 		}
 
 	case []any:
 		for _, v := range typed {
-			if childChanged := uncloakJSONNode(v, uncloakTable, sourceFormat); childChanged {
+			if childChanged := uncloakJSONNodeOpt(v, uncloakTable, sourceFormat, exactOnly); childChanged {
 				changed = true
 			}
 		}
@@ -2106,28 +2939,97 @@ var defaultCloakTables = map[string]map[string]string{
 		"read_mcp_resource":           "read_resource",
 	},
 	"oh_my_pi": {
-		"read":            "view_file",
-		"write":           "write_to_file",
-		"edit":            "replace_file_content",
-		"bash":            "run_command",
-		"grep":            "grep_search",
-		"glob":            "list_dir",
-		"task":            "invoke_subagent",
-		"ask":             "ask_question",
-		"todo":            "manage_task",
-		"hub":             "send_message",
-		"web_search":      "search_web",
-		"eval":            "execute_code",
-		"vibe_spawn":      "define_subagent",
-		"vibe_send":       "schedule",
-		"vibe_wait":       "wait",
-		"vibe_kill":       "cancel",
-		"vibe_list":       "list",
-		"init_experiment": "create_goal",
-		"run_experiment":  "call_mcp_tool",
-		"log_experiment":  "update_plan",
-		"update_notes":    "update_goal",
+		"read":       "view_file",
+		"write":      "write_to_file",
+		"edit":       "replace_file_content",
+		"bash":       "run_command",
+		"grep":       "grep_search",
+		"glob":       "find_by_name",
+		"task":       "invoke_subagent",
+		"ask":        "ask_question",
+		"web_search": "search_web",
 	},
+}
+
+// canonicalOMPSafeMappingSet is the canonical nine-tool Safe Mapping Set for Oh My Pi.
+var canonicalOMPSafeMappingSet = map[string]string{
+	"read":       "view_file",
+	"write":      "write_to_file",
+	"edit":       "replace_file_content",
+	"bash":       "run_command",
+	"grep":       "grep_search",
+	"glob":       "find_by_name",
+	"task":       "invoke_subagent",
+	"ask":        "ask_question",
+	"web_search": "search_web",
+}
+
+// ompSourceIdentityInventory contains the static OMP source tool names used
+// for request body detection in detectClient. It contains the nine canonical
+// Safe Mapping Set source names plus former OMP-specific pass-through names:
+// todo, hub, eval, the finite 5 vibe_* tools, and 4 autoresearch tools.
+// Arbitrary operator tool_mappings must not extend this inventory.
+var ompSourceIdentityInventory = map[string]bool{
+	"read":            true,
+	"write":           true,
+	"edit":            true,
+	"bash":            true,
+	"grep":            true,
+	"glob":            true,
+	"task":            true,
+	"ask":             true,
+	"web_search":      true,
+	"todo":            true,
+	"hub":             true,
+	"eval":            true,
+	"vibe_spawn":      true,
+	"vibe_send":       true,
+	"vibe_wait":       true,
+	"vibe_kill":       true,
+	"vibe_list":       true,
+	"init_experiment": true,
+	"run_experiment":  true,
+	"log_experiment":  true,
+	"update_notes":    true,
+}
+
+// ompCloakedTargetIdentityInventory contains the nine canonical AGY-facing
+// target tool names from the Safe Mapping Set.
+// These target identities are corroboration/static evidence only and
+// MUST NEVER be used as standalone attribution without an independent OMP signal.
+var ompCloakedTargetIdentityInventory = map[string]bool{
+	"view_file":            true,
+	"write_to_file":        true,
+	"replace_file_content": true,
+	"run_command":          true,
+	"grep_search":          true,
+	"find_by_name":         true,
+	"invoke_subagent":      true,
+	"ask_question":         true,
+	"search_web":           true,
+}
+
+// corroborateCloakedTargetOMP verifies whether observed tool names match the
+// canonical OMP cloaked-target inventory (>= 3 hits and >= 80% coverage).
+// As required by Issue #26, this is corroboration/validation evidence ONLY
+// and MUST NOT be used as standalone OMP attribution.
+func corroborateCloakedTargetOMP(toolNames []string) bool {
+	if len(toolNames) < 3 {
+		return false
+	}
+	observedSet := make(map[string]bool, len(toolNames))
+	for _, n := range toolNames {
+		_, base := splitToolNamespace(n)
+		observedSet[base] = true
+	}
+	totalObserved := len(observedSet)
+	hits := 0
+	for target := range ompCloakedTargetIdentityInventory {
+		if observedSet[target] {
+			hits++
+		}
+	}
+	return hits >= 3 && hits*minCloakTargetHitDen >= totalObserved*minCloakTargetHitNum
 }
 
 // clientDistinctiveTools lists harness-specific source tool names whose
@@ -2135,8 +3037,8 @@ var defaultCloakTables = map[string]map[string]string{
 // common words ("read", "bash") collide with arbitrary user-defined tools,
 // so those names require several simultaneous matches instead.
 //
-// MUST stay in sync with the matching keys of defaultCloakTables; update both
-// together when a table changes.
+// For Oh My Pi, this matches the distinctive subset of ompSourceIdentityInventory;
+// for other clients, it stays in sync with defaultCloakTables.
 var clientDistinctiveTools = map[string]map[string]bool{
 	"oh_my_pi": {
 		"hub": true, "task": true, "todo": true, "eval": true, "web_search": true,
@@ -2219,8 +3121,9 @@ type cachedCloakPatterns struct {
 // cachedUncloakPattern holds a pre-compiled regex for stream chunk uncloaking.
 // Pattern matches: "name"\s*:\s*"(target1|target2|...)" in raw bytes.
 type cachedUncloakPattern struct {
-	re     *regexp.Regexp
-	lookup map[string]string // matched target → original name
+	re        *regexp.Regexp
+	lookup    map[string]string // matched target → original name
+	exactOnly bool              // when true, do not fall back to namespace base stripping
 }
 
 var (
@@ -2427,6 +3330,88 @@ func filteredHeaders(headers http.Header, remove []string) http.Header {
 	return out
 }
 
+type explicitMarkerResult struct {
+	matchedKeys         []string
+	present             bool
+	uniqueClients       []string
+	isOMP               bool
+	isConflict          bool
+	conflictContainsOMP bool
+	client              string
+	valid               bool
+}
+
+func parseExplicitClientMarker(headers http.Header) explicitMarkerResult {
+	var res explicitMarkerResult
+	if headers == nil {
+		return res
+	}
+	var matchedKeys []string
+	var rawValues []string
+	for k, vs := range headers {
+		if strings.EqualFold(k, explicitClientHeader) {
+			matchedKeys = append(matchedKeys, k)
+			rawValues = append(rawValues, vs...)
+		}
+	}
+	if len(matchedKeys) == 0 {
+		return res
+	}
+	sort.Strings(matchedKeys)
+	res.matchedKeys = matchedKeys
+	res.present = true
+
+	clientSet := make(map[string]struct{})
+	for _, raw := range rawValues {
+		parts := strings.Split(raw, ",")
+		for _, part := range parts {
+			token := strings.TrimSpace(part)
+			if token == "" {
+				continue
+			}
+			norm := normalizeExplicitClientToken(token)
+			if norm != "" {
+				clientSet[norm] = struct{}{}
+			}
+		}
+	}
+
+	for c := range clientSet {
+		res.uniqueClients = append(res.uniqueClients, c)
+	}
+	sort.Strings(res.uniqueClients)
+
+	if len(res.uniqueClients) == 1 {
+		res.client = res.uniqueClients[0]
+		if res.client == "oh_my_pi" {
+			res.isOMP = true
+			res.valid = true
+		} else {
+			table := activeFilterConfig().ToolMappings[res.client]
+			res.valid = len(table) > 0
+		}
+	} else if len(res.uniqueClients) > 1 {
+		res.isConflict = true
+		for _, c := range res.uniqueClients {
+			if c == "oh_my_pi" {
+				res.conflictContainsOMP = true
+				break
+			}
+		}
+	}
+	return res
+}
+
+func normalizeExplicitClientToken(token string) string {
+	lower := strings.ToLower(strings.TrimSpace(token))
+	switch lower {
+	case "oh_my_pi", "omp", "oh-my-pi":
+		return "oh_my_pi"
+	default:
+		return normalizeClientKey(token)
+	}
+}
+
 // resolveExplicitClient reads the plugin-owned X-Cloak-Client header from the
 // inbound request headers. It returns the normalized client key, every stored
 // header key spelling that matches the owned header case-insensitively, whether
@@ -2435,30 +3420,8 @@ func filteredHeaders(headers http.Header, remove []string) http.Header {
 // so the interceptor can clear every variant; the client value is derived from
 // the lexicographically first spelling for deterministic selection.
 func resolveExplicitClient(headers http.Header) (client string, matchedKeys []string, present, valid bool) {
-	if headers == nil {
-		return "", nil, false, false
-	}
-	for k := range headers {
-		if strings.EqualFold(k, explicitClientHeader) {
-			matchedKeys = append(matchedKeys, k)
-		}
-	}
-	if len(matchedKeys) == 0 {
-		return "", nil, false, false
-	}
-	sort.Strings(matchedKeys)
-	value := ""
-	if vs := headers[matchedKeys[0]]; len(vs) > 0 {
-		value = vs[0]
-	}
-	client = normalizeClientKey(value)
-	if client == "" {
-		return client, matchedKeys, true, false
-	}
-	if table := activeFilterConfig().ToolMappings[client]; len(table) == 0 {
-		return client, matchedKeys, true, false
-	}
-	return client, matchedKeys, true, true
+	m := parseExplicitClientMarker(headers)
+	return m.client, m.matchedKeys, m.present, m.valid
 }
 
 // resolveUserAgentClient returns a client derived from conservative
@@ -3571,8 +4534,10 @@ func extractToolNames(body map[string]any, sourceFormat string) []string {
 }
 
 // detectClient identifies the client from ORIGINAL (uncloaked) tool names.
-// It is data-driven: it checks cloak table keys (source tool names) against
-// the provided tool name list. The client with the most key matches wins.
+// It checks candidate source tool names against the provided tool name list.
+// For oh_my_pi, detection keys off the static ompSourceIdentityInventory and
+// clientDistinctiveTools rather than arbitrary runtime cfg.ToolMappings["oh_my_pi"].
+// The client with the most key matches wins.
 func detectClient(toolNames []string) string {
 	cfg := activeFilterConfig()
 	nameSet := make(map[string]bool, len(toolNames)*2)
@@ -3584,11 +4549,31 @@ func detectClient(toolNames []string) string {
 	}
 	bestClient := ""
 	bestCount := 0
-	for client, cloakTable := range cfg.ToolMappings {
+
+	// Candidates to evaluate: clients from cfg.ToolMappings plus "oh_my_pi"
+	clients := make([]string, 0, len(cfg.ToolMappings)+1)
+	for c := range cfg.ToolMappings {
+		if c != "oh_my_pi" {
+			clients = append(clients, c)
+		}
+	}
+	clients = append(clients, "oh_my_pi")
+	sort.Strings(clients)
+
+	for _, client := range clients {
 		count := 0
-		for orig := range cloakTable {
-			if nameSet[orig] {
-				count++
+		if client == "oh_my_pi" {
+			for orig := range ompSourceIdentityInventory {
+				if nameSet[orig] {
+					count++
+				}
+			}
+		} else {
+			cloakTable := cfg.ToolMappings[client]
+			for orig := range cloakTable {
+				if nameSet[orig] {
+					count++
+				}
 			}
 		}
 
@@ -3644,13 +4629,21 @@ func (m cloakTargetMatch) atFullCoverage() bool {
 // checking cloak TARGET names against the observed tool identities.
 // Namespace prefixes are normalised away so each declared tool contributes a
 // single observed identity and the observed denominator is never inflated by
-// an alias. A candidate qualifies when at least 3 tools match AND it covers
-// at least 80% of the observed unique identities (hits/observed). The static
-// table length is not an alternative qualification path.
-// When multiple distinct tables reach full coverage (hits == tableSize),
-// native Antigravity traffic serving every tool table is indistinguishable,
-// so cloaking is skipped.
+// an alias.
+//
+// Target names alone are NEVER sufficient to attribute traffic to oh_my_pi
+// because all canonical OMP targets are native Antigravity tool names.
+// Non-OMP clients continue to be detected according to their target tables.
 func detectCloakedClient(toolNames []string) string {
+	return detectCloakedClientWithSignal(toolNames, false)
+}
+
+// detectCloakedClientWithSignal extends detectCloakedClient with an explicit
+// attribution signal parameter. When ompAttributed is false, oh_my_pi is excluded
+// from standalone target-based attribution. When ompAttributed is true (e.g. from
+// correlated request state, UA evidence, or source body evidence), the static
+// canonical target inventory is used for corroboration rather than runtime tool_mappings.
+func detectCloakedClientWithSignal(toolNames []string, ompAttributed bool) string {
 	if len(toolNames) < 3 {
 		return ""
 	}
@@ -3663,22 +4656,47 @@ func detectCloakedClient(toolNames []string) string {
 
 	totalObserved := len(observedSet)
 	var matches []cloakTargetMatch
-	for client, cloakTable := range cfg.ToolMappings {
-		if len(cloakTable) == 0 {
-			continue
+
+	var clients []string
+	for client := range cfg.ToolMappings {
+		if client != "oh_my_pi" {
+			clients = append(clients, client)
 		}
+	}
+	if ompAttributed {
+		clients = append(clients, "oh_my_pi")
+	}
+	sort.Strings(clients)
+
+	for _, client := range clients {
 		hits := 0
-		for _, target := range cloakTable {
-			if observedSet[target] {
-				hits++
+		tableSize := 0
+		if client == "oh_my_pi" {
+			tableSize = len(ompCloakedTargetIdentityInventory)
+			for target := range ompCloakedTargetIdentityInventory {
+				if observedSet[target] {
+					hits++
+				}
+			}
+		} else {
+			cloakTable := cfg.ToolMappings[client]
+			tableSize = len(cloakTable)
+			if tableSize == 0 {
+				continue
+			}
+			for _, target := range cloakTable {
+				if observedSet[target] {
+					hits++
+				}
 			}
 		}
+
 		if hits >= 3 && hits*minCloakTargetHitDen >= totalObserved*minCloakTargetHitNum {
 			matches = append(matches, cloakTargetMatch{
 				client:    client,
 				hits:      hits,
 				observed:  totalObserved,
-				tableSize: len(cloakTable),
+				tableSize: tableSize,
 			})
 		}
 	}
