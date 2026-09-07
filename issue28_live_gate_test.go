@@ -811,3 +811,474 @@ func TestIssue28_NamespaceCollisionRejection_BaseIdentity(t *testing.T) {
 		handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
 	}
 }
+
+func makeProtectedIntegrationRequestWithModels(t *testing.T, reqID, format, model, requestedModel string, body []byte, headers http.Header) []byte {
+	t.Helper()
+	req := pluginapi.RequestInterceptRequest{
+		RequestID:      reqID,
+		SourceFormat:   format,
+		Model:          model,
+		RequestedModel: requestedModel,
+		Body:           body,
+		Headers:        headers,
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	return b
+}
+
+func TestIssue28_ExplicitMarker_DeterministicCoverage(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+
+	agyModel := "agy/gemini-2.5-flash"
+	nonAGYModel := "openai/gpt-4o"
+	validBody := []byte(`{"model":"agy/gemini-2.5-flash","messages":[{"role":"user","content":"hi"}]}`)
+	validNonAGYBody := []byte(`{"model":"openai/gpt-4o","messages":[{"role":"user","content":"hi"}]}`)
+
+	// 1. Equivalent repeated OMP aliases independent of order and empty comma tokens
+	t.Run("EquivalentRepeatedOMPAliases_AGY_Admitted", func(t *testing.T) {
+		testCases := []struct {
+			name    string
+			headers func() http.Header
+		}{
+			{
+				name: "canonical_omp_repeated_forward",
+				headers: func() http.Header {
+					h := http.Header{}
+					h.Set("X-Cloak-Client", "oh_my_pi, omp, oh-my-pi")
+					return h
+				},
+			},
+			{
+				name: "canonical_omp_repeated_reverse",
+				headers: func() http.Header {
+					h := http.Header{}
+					h.Set("X-Cloak-Client", "oh-my-pi, omp, oh_my_pi")
+					return h
+				},
+			},
+			{
+				name: "canonical_omp_with_empty_comma_tokens_and_spaces",
+				headers: func() http.Header {
+					h := http.Header{}
+					h.Set("X-Cloak-Client", " , oh_my_pi , , omp, , oh-my-pi , ")
+					return h
+				},
+			},
+			{
+				name: "canonical_omp_multiple_case_insensitive_header_keys",
+				headers: func() http.Header {
+					return http.Header(map[string][]string{
+						"X-Cloak-Client": {"oh_my_pi"},
+						"x-cloak-client": {"omp , "},
+						"X-CLOAK-CLIENT": {" , oh-my-pi"},
+					})
+				},
+			},
+		}
+
+		for idx, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				reqID := fmt.Sprintf("req-marker-equiv-%d", idx)
+				headers := tc.headers()
+				raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+					makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, validBody, headers))
+				resp, err := decodeProtectedRequestIntercept(t, raw)
+				if err != nil {
+					t.Fatalf("decode intercept: %v", err)
+				}
+				if resp.Terminate {
+					t.Fatalf("expected admitted ProtectedAGY, got termination: %s", string(resp.ResponseBody))
+				}
+				// Verify all owned header variants are cleared
+				for k := range headers {
+					cleared := false
+					for _, c := range resp.ClearHeaders {
+						if strings.EqualFold(k, c) {
+							cleared = true
+							break
+						}
+					}
+					if !cleared {
+						t.Fatalf("header key %q was not marked in ClearHeaders (%v)", k, resp.ClearHeaders)
+					}
+					if resp.Headers != nil && resp.Headers.Get(k) != "" {
+						t.Fatalf("header %q leaked into forwarded request headers", k)
+					}
+				}
+				route := globalLifecycleManager.getRoute(reqID)
+				if route == nil || route.routeKind != routeKindProtectedAGY {
+					t.Fatalf("expected routeKindProtectedAGY, got %+v", route)
+				}
+				handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+			})
+		}
+	})
+
+	// 2. Equivalent repeated OMP aliases on Non-AGY -> durable zero-mutation bypass
+	t.Run("EquivalentRepeatedOMPAliases_NonAGY_DurableBypass", func(t *testing.T) {
+		headers := http.Header(map[string][]string{
+			"X-Cloak-Client": {"omp, oh_my_pi"},
+			"x-cloak-client": {" , oh-my-pi, "},
+		})
+
+		reqID := "req-marker-nonagy-equiv-1"
+		raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+			makeProtectedIntegrationRequest(t, reqID, "openai", nonAGYModel, validNonAGYBody, headers))
+		resp, err := decodeProtectedRequestIntercept(t, raw)
+		if err != nil {
+			t.Fatalf("decode intercept: %v", err)
+		}
+		if resp.Terminate {
+			t.Fatalf("expected bypass, got termination: %s", string(resp.ResponseBody))
+		}
+		if len(resp.Body) > 0 {
+			t.Fatalf("bypass route must not mutate body, got %s", string(resp.Body))
+		}
+		// Headers consumed
+		for k := range headers {
+			cleared := false
+			for _, c := range resp.ClearHeaders {
+				if strings.EqualFold(k, c) {
+					cleared = true
+					break
+				}
+			}
+			if !cleared {
+				t.Fatalf("header key %q was not marked in ClearHeaders (%v)", k, resp.ClearHeaders)
+			}
+		}
+		route := globalLifecycleManager.getRoute(reqID)
+		if route == nil || route.routeKind != routeKindExplicitOMPNonAGYBypass {
+			t.Fatalf("expected routeKindExplicitOMPNonAGYBypass, got %+v", route)
+		}
+		handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+	})
+
+	// 3. OMP+non-OMP conflicts in both orders on AGY with exact protected 503 and zero upstream
+	t.Run("OMP_NonOMP_Conflicts_AGY_Exact503_ZeroUpstream", func(t *testing.T) {
+		testCases := []struct {
+			name    string
+			headers func() http.Header
+		}{
+			{
+				name: "omp_first_then_claude_code",
+				headers: func() http.Header {
+					h := http.Header{}
+					h.Set("X-Cloak-Client", "oh_my_pi, claude_code")
+					return h
+				},
+			},
+			{
+				name: "claude_code_first_then_omp",
+				headers: func() http.Header {
+					h := http.Header{}
+					h.Set("X-Cloak-Client", "claude_code, oh_my_pi")
+					return h
+				},
+			},
+			{
+				name: "omp_alias_then_codex",
+				headers: func() http.Header {
+					h := http.Header{}
+					h.Set("X-Cloak-Client", "omp, codex")
+					return h
+				},
+			},
+			{
+				name: "codex_then_oh-my-pi_alias",
+				headers: func() http.Header {
+					h := http.Header{}
+					h.Set("X-Cloak-Client", "codex, oh-my-pi")
+					return h
+				},
+			},
+			{
+				name: "split_headers_with_empty_tokens",
+				headers: func() http.Header {
+					return http.Header(map[string][]string{
+						"X-Cloak-Client": {" , claude_code , "},
+						"x-cloak-client": {" , omp, "},
+					})
+				},
+			},
+		}
+
+		for idx, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				reqID := fmt.Sprintf("req-conflict-agy-%d", idx)
+				headers := tc.headers()
+				raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+					makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, validBody, headers))
+				resp, err := decodeProtectedRequestIntercept(t, raw)
+				if err != nil {
+					t.Fatalf("decode intercept: %v", err)
+				}
+				assertExact503Rejection(t, resp, tc.name)
+				// Zero-upstream guarantee: body must be empty
+				if len(resp.Body) > 0 {
+					t.Fatalf("zero-upstream violated: resp.Body must be empty, got %s", string(resp.Body))
+				}
+				// All headers consumed
+				for k := range headers {
+					cleared := false
+					for _, c := range resp.ClearHeaders {
+						if strings.EqualFold(k, c) {
+							cleared = true
+							break
+						}
+					}
+					if !cleared {
+						t.Fatalf("header key %q was not marked in ClearHeaders (%v)", k, resp.ClearHeaders)
+					}
+				}
+				// No route should be pinned on 503 rejection
+				if route := globalLifecycleManager.getRoute(reqID); route != nil {
+					t.Fatalf("route must not be pinned on 503 rejection, got %+v", route)
+				}
+			})
+		}
+	})
+
+	// 4. OMP+non-OMP conflicts in both orders on Non-AGY with durable zero-mutation bypass
+	t.Run("OMP_NonOMP_Conflicts_NonAGY_DurableZeroMutationBypass", func(t *testing.T) {
+		testCases := []struct {
+			name    string
+			headers func() http.Header
+		}{
+			{
+				name: "nonagy_omp_first_then_claude_code",
+				headers: func() http.Header {
+					h := http.Header{}
+					h.Set("X-Cloak-Client", "oh_my_pi, claude_code")
+					return h
+				},
+			},
+			{
+				name: "nonagy_claude_code_first_then_omp",
+				headers: func() http.Header {
+					h := http.Header{}
+					h.Set("X-Cloak-Client", "claude_code, oh_my_pi")
+					return h
+				},
+			},
+			{
+				name: "nonagy_split_headers_omp_codex",
+				headers: func() http.Header {
+					return http.Header(map[string][]string{
+						"X-Cloak-Client": {"omp"},
+						"x-cloak-client": {"codex"},
+					})
+				},
+			},
+		}
+
+		for idx, tc := range testCases {
+			t.Run(tc.name, func(t *testing.T) {
+				reqID := fmt.Sprintf("req-conflict-nonagy-%d", idx)
+				headers := tc.headers()
+				raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+					makeProtectedIntegrationRequest(t, reqID, "openai", nonAGYModel, validNonAGYBody, headers))
+				resp, err := decodeProtectedRequestIntercept(t, raw)
+				if err != nil {
+					t.Fatalf("decode intercept: %v", err)
+				}
+				if resp.Terminate {
+					t.Fatalf("expected non-AGY conflict to bypass, got termination: %s", string(resp.ResponseBody))
+				}
+				if len(resp.Body) > 0 {
+					t.Fatalf("zero-mutation violated: resp.Body must be empty, got %s", string(resp.Body))
+				}
+				for k := range headers {
+					cleared := false
+					for _, c := range resp.ClearHeaders {
+						if strings.EqualFold(k, c) {
+							cleared = true
+							break
+						}
+					}
+					if !cleared {
+						t.Fatalf("header key %q was not marked in ClearHeaders (%v)", k, resp.ClearHeaders)
+					}
+				}
+				route := globalLifecycleManager.getRoute(reqID)
+				if route == nil || route.routeKind != routeKindExplicitOMPNonAGYBypass {
+					t.Fatalf("expected routeKindExplicitOMPNonAGYBypass, got %+v", route)
+				}
+				// Correlated response receives zero mutation
+				dummyResp := []byte(`{"choices":[{"message":{"content":"Hello Antigravity"}}]}`)
+				rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
+					makeIntegrationResponseInterceptPayload(t, reqID, "openai", nonAGYModel, dummyResp))
+				outBody := decodeEnvelopeBody(t, rawResp)
+				if len(outBody) > 0 {
+					t.Fatalf("expected zero mutation in correlated response on bypass, got %s", string(outBody))
+				}
+				handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+			})
+		}
+	})
+
+	// 5. Preserve consumption of every owned case-insensitive header occurrence
+	t.Run("PreserveConsumptionOfEveryOwnedCaseInsensitiveHeaderOccurrence", func(t *testing.T) {
+		headers := http.Header(map[string][]string{
+			"X-Cloak-Client": {"oh_my_pi"},
+			"x-cloak-client": {"omp"},
+			"X-CLOAK-CLIENT": {"oh-my-pi"},
+			"X-cLoAk-cLiEnT": {"omp"},
+		})
+
+		reqID := "req-all-case-variants"
+		raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+			makeProtectedIntegrationRequest(t, reqID, "openai", agyModel, validBody, headers))
+		resp, err := decodeProtectedRequestIntercept(t, raw)
+		if err != nil {
+			t.Fatalf("decode intercept: %v", err)
+		}
+		if resp.Terminate {
+			t.Fatalf("unexpected termination: %s", string(resp.ResponseBody))
+		}
+		if len(resp.ClearHeaders) != 4 {
+			t.Fatalf("expected 4 ClearHeaders entries, got %d (%v)", len(resp.ClearHeaders), resp.ClearHeaders)
+		}
+		for _, expectedKey := range []string{"X-Cloak-Client", "x-cloak-client", "X-CLOAK-CLIENT", "X-cLoAk-cLiEnT"} {
+			found := false
+			for _, c := range resp.ClearHeaders {
+				if c == expectedKey {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Fatalf("expected %q in ClearHeaders, got %v", expectedKey, resp.ClearHeaders)
+			}
+		}
+		handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+	})
+}
+
+func TestIssue28_AGYRouting_DirectAndExplicitIntegration(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+
+	// 1. Direct unit assertions on isAGYRoute
+	directCases := []struct {
+		model          string
+		requestedModel string
+		expected       bool
+		reason         string
+	}{
+		// Model-only
+		{"agy/gemini-2.5-flash", "", true, "Model-only agy/ prefix"},
+		{"agy/", "", true, "Model-only minimal agy/ prefix"},
+		// RequestedModel-only
+		{"", "agy/gemini-2.5-flash", true, "RequestedModel-only agy/ prefix"},
+		{"", "agy/", true, "RequestedModel-only minimal agy/ prefix"},
+		// Disagreement
+		{"agy/gemini-2.5-flash", "openai/gpt-4o", true, "Disagreement: Model has agy/, RequestedModel does not"},
+		{"openai/gpt-4o", "agy/gemini-2.5-flash", true, "Disagreement: RequestedModel has agy/, Model does not"},
+		{"agy/model-a", "anthropic/claude-3-5", true, "Disagreement: Model has agy/, RequestedModel is Claude"},
+		// Leading/trailing whitespace
+		{"  agy/gemini-2.5-flash  ", "", true, "Model with leading and trailing spaces"},
+		{"", " \t\r\n agy/gemini-2.5-flash \n\t ", true, "RequestedModel with tabs and newlines"},
+		{" \n agy/m \t ", " \r openai/m \n ", true, "Both have whitespace, Model matches"},
+		// Neither-side AGY
+		{"openai/gpt-4o", "anthropic/claude-3-5-sonnet", false, "Neither side is agy/"},
+		{"", "", false, "Both empty"},
+		{"   ", " \t\n ", false, "Both whitespace only"},
+		{"other/agy/model", "", false, "Prefix inside path does not match"},
+		// Case-sensitivity of agy/ prefix
+		{"AGY/gemini-2.5-flash", "", false, "Uppercase AGY/ prefix"},
+		{"", "Agy/gemini-2.5-flash", false, "Mixed case Agy/ prefix"},
+		{"AGY/gemini-2.5-flash", "Agy/gemini-2.5-flash", false, "Both non-lowercase agy/"},
+	}
+
+	for _, c := range directCases {
+		got := isAGYRoute(c.model, c.requestedModel)
+		if got != c.expected {
+			t.Errorf("[%s] isAGYRoute(%q, %q) = %v, expected %v", c.reason, c.model, c.requestedModel, got, c.expected)
+		}
+	}
+
+	// 2. Integration routing: explicit OMP must be ProtectedAGY when either trimmed Model
+	// or RequestedModel has case-sensitive prefix agy/, regardless of generic model_prefixes.
+	// Configure restrictive model_prefixes that DO NOT include agy/
+	handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("model_prefixes: [\"unrelated-provider/\"]")))
+
+	headers := http.Header{}
+	headers.Set("X-Cloak-Client", "oh_my_pi")
+	body := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
+
+	integrationCases := []struct {
+		name              string
+		model             string
+		requestedModel    string
+		expectedRouteKind explicitOMPRouteKind
+	}{
+		{
+			name:              "model_only_agy",
+			model:             "agy/gemini-2.5-flash",
+			requestedModel:    "",
+			expectedRouteKind: routeKindProtectedAGY,
+		},
+		{
+			name:              "requested_model_only_agy",
+			model:             "openai/gpt-4o",
+			requestedModel:    "agy/gemini-2.5-flash",
+			expectedRouteKind: routeKindProtectedAGY,
+		},
+		{
+			name:              "disagreement_model_agy",
+			model:             "agy/gemini-2.5-flash",
+			requestedModel:    "openai/gpt-4o",
+			expectedRouteKind: routeKindProtectedAGY,
+		},
+		{
+			name:              "disagreement_requested_model_agy",
+			model:             "anthropic/claude-3-5",
+			requestedModel:    "agy/gemini-2.5-flash",
+			expectedRouteKind: routeKindProtectedAGY,
+		},
+		{
+			name:              "whitespace_trimmed_agy",
+			model:             "  agy/gemini-2.5-flash \t ",
+			requestedModel:    "",
+			expectedRouteKind: routeKindProtectedAGY,
+		},
+		{
+			name:              "neither_side_agy_bypass",
+			model:             "openai/gpt-4o",
+			requestedModel:    "anthropic/claude-3-5",
+			expectedRouteKind: routeKindExplicitOMPNonAGYBypass,
+		},
+		{
+			name:              "uppercase_agy_treated_as_non_agy_bypass",
+			model:             "AGY/gemini-2.5-flash",
+			requestedModel:    "AGY/gemini-2.5-flash",
+			expectedRouteKind: routeKindExplicitOMPNonAGYBypass,
+		},
+	}
+
+	for idx, tc := range integrationCases {
+		t.Run(tc.name, func(t *testing.T) {
+			reqID := fmt.Sprintf("req-agy-routing-%d", idx)
+			raw, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+				makeProtectedIntegrationRequestWithModels(t, reqID, "openai", tc.model, tc.requestedModel, body, headers))
+			resp, err := decodeProtectedRequestIntercept(t, raw)
+			if err != nil {
+				t.Fatalf("decode intercept: %v", err)
+			}
+			if resp.Terminate {
+				t.Fatalf("unexpected termination: %s", string(resp.ResponseBody))
+			}
+			route := globalLifecycleManager.getRoute(reqID)
+			if route == nil {
+				t.Fatalf("expected pinned route for %s, got nil", reqID)
+			}
+			if route.routeKind != tc.expectedRouteKind {
+				t.Fatalf("expected routeKind=%v, got %v", tc.expectedRouteKind, route.routeKind)
+			}
+			handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqID, "succeeded"))
+		})
+	}
+}

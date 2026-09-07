@@ -13,11 +13,11 @@ in docs/verification-checklist.md.
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.request
 import urllib.error
-
 ENDPOINT = os.environ.get("CPA_ENDPOINT", "http://127.0.0.1:8317/v1/chat/completions")
 API_KEY = os.environ.get("CPA_API_KEY", "Tonight123")
 PROTECTED_MODEL = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
@@ -385,15 +385,14 @@ def test_brand_restoration():
     print(f"     Received response: {content.strip()}")
 
     # Hard gate: Protected assistant-visible Antigravity must NOT leak.
-    if "Antigravity" in content or "Antigravity" in content:
+    if re.search(r"antigravity", content, re.IGNORECASE):
         print(f"FAIL: Leaked protected Antigravity brand in assistant stream: {content}")
         return False, f"Leaked protected brand in assistant stream: {content}"
 
-    # Hard gate: For oh_my_pi client, canonical terminal alias 'omp' must be present
-    if "omp" not in content and "Oh My Pi" not in content:
-        print(f"FAIL: Expected restored canonical brand 'omp' in stream, got: {content}")
-        return False, f"Expected canonical brand 'omp' in stream, got: {content}"
-
+    # Hard gate: For oh_my_pi client, canonical terminal alias 'omp' must be present as a standalone token.
+    if not re.search(r"\bomp\b", content, re.IGNORECASE):
+        print(f"FAIL: Expected restored standalone canonical brand 'omp' in stream, got: {content}")
+        return False, f"Expected standalone canonical brand 'omp' in stream, got: {content}"
     print(f"PASS: Brand restored Antigravity to omp in stream with zero leakage!")
     return True, "Brand restored Antigravity to omp with zero leakage"
 

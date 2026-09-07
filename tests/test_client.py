@@ -5,7 +5,7 @@ import traceback
 
 def test_messages():
     base_url = os.environ.get("CPA_BASE_URL", "http://127.0.0.1:8317")
-    api_key = os.environ.get("CPA_API_KEY", "Tonight123@")
+    api_key = os.environ.get("CPA_API_KEY", "Tonight123")
     model = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
 
     payload = {
@@ -44,7 +44,7 @@ def test_messages():
 
 def test_chat_completions():
     base_url = os.environ.get("CPA_BASE_URL", "http://127.0.0.1:8317")
-    api_key = os.environ.get("CPA_API_KEY", "Tonight123@")
+    api_key = os.environ.get("CPA_API_KEY", "Tonight123")
     model = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
 
     payload = {

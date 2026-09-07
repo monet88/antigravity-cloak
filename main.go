@@ -871,7 +871,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		activeReverse:           activeReverse,
 		cachedUncloak:           protectedCachedUncloak,
 		brandRestorationEnabled: true,
-		expected:                requestChoiceCount(req.Body),
+		expected:                requestChoiceCount(canonicalBytes),
 	})
 
 	return mustEnvelope(resp)

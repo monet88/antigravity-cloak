@@ -279,6 +279,43 @@ func TestIssue27_CanonicalSerializationAndDuplicateKeys(t *testing.T) {
 	if !strings.Contains(string(resp.Body), `"none"`) {
 		t.Fatalf("none must appear in canonical body: %s", string(resp.Body))
 	}
+
+	// 3e. Duplicate top-level n keys (choice count): canonicalization and pinned route alignment
+	rawDupN := []byte(`{
+		"model":"agy/gemini-2.5-flash",
+		"n":1,
+		"n":3,
+		"messages":[]
+	}`)
+	reqIDDupN := "req-dup-n"
+	raw, _ = handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeProtectedIntegrationRequest(t, reqIDDupN, "openai", model, rawDupN, headers))
+	resp, _ = decodeProtectedRequestIntercept(t, raw)
+	if resp.Terminate {
+		t.Fatalf("duplicate n request should be admitted, got 503: %s", string(resp.ResponseBody))
+	}
+	if bytes.Equal(resp.Body, rawDupN) {
+		t.Fatalf("must forward collapsed canonical serialization, not duplicate raw bytes")
+	}
+	var parsedDupN map[string]any
+	if err := safeUnmarshal(resp.Body, &parsedDupN); err != nil {
+		t.Fatalf("unmarshal canonical body: %v", err)
+	}
+	canonicalN, ok := jsonIndexValue(parsedDupN["n"])
+	if !ok || canonicalN != 3 {
+		t.Fatalf("expected canonical body to have n=3, got %v", parsedDupN["n"])
+	}
+	route := globalLifecycleManager.getRoute(reqIDDupN)
+	if route == nil {
+		t.Fatalf("expected pinned route for %s, got nil", reqIDDupN)
+	}
+	if route.expected != 3 {
+		t.Fatalf("expected route.expected == 3 matching canonical object, got %d", route.expected)
+	}
+	if route.expected != requestChoiceCount(resp.Body) {
+		t.Fatalf("route.expected (%d) does not match requestChoiceCount(resp.Body) (%d)", route.expected, requestChoiceCount(resp.Body))
+	}
+	handlePluginCall(pluginabi.MethodRequestComplete, makeRequestCompletePayload(t, reqIDDupN, "succeeded"))
 }
 
 // 4. Config drift rejection covering add, remove, and override of canonical OMP mapping table.
