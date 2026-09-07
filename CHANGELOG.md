@@ -6,6 +6,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-07
 ### Added
 - Adopted the 9-tool AGY CLI-native Safe Mapping Set for Oh My Pi (`read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`) with static source and target identity inventories (Issue #26).
 - Fail-closed Protected OMP routing for explicit OMP markers on `agy/*` routes with strict single-document JSON validation, base identity declaration collision rejection, and exact 503 JSON rejection (`omp_cloak_required`) before upstream execution (Issue #27).
@@ -21,6 +22,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 - Replaced `glob -> list_dir` with `glob -> find_by_name` (Issue #26).
 - Clarified that canonical AGY targets alone are corroboration-only and cannot authoritatively attribute no-marker traffic to OMP (Issue #26).
 - Updated documentation (`README.md`, `CONTEXT.md`, `AGENTS.md`, `docs/verification-checklist.md`, `docs/specs/oh-my-pi-cloaking-spec.md`) and live test fixtures (`tests/test_omp.py`, `tests/test_client.py`) to the shipped Safe Mapping Set and routing contracts (Issue #28).
+
 ## [0.4.4] - 2026-09-06
 
 ### Fixed
@@ -123,7 +125,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 - Initial plugin implementation.
 - Added repository metadata, MIT license, and release build workflow.
 
-[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.5.0
 [0.4.4]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.4
 [26.09.06]: https://github.com/monet88/antigravity-cloak/releases/tag/v.26.09.06
 [0.4.3]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.3
