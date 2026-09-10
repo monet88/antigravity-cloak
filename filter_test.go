@@ -895,6 +895,13 @@ func TestSplitSSEEventsWithNewBytes(t *testing.T) {
 			wantIncomplete: "data: {\"b\":",
 		},
 		{
+			name:           "mixed boundaries choose latest",
+			input:          "data: {\"a\":1}\r\n\r\ndata: {\"b\":2}\n\ntrailing",
+			newLen:         len("data: {\"a\":1}\r\n\r\ndata: {\"b\":2}\n\ntrailing"),
+			wantComplete:   "data: {\"a\":1}\r\n\r\ndata: {\"b\":2}\n\n",
+			wantIncomplete: "trailing",
+		},
+		{
 			name:           "no boundary in new bytes",
 			input:          "data: incomplete chunk",
 			newLen:         5,

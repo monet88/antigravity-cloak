@@ -2744,27 +2744,16 @@ func splitSSEEventsWithNewBytes(data []byte, newLen int) (completeEvents []byte,
 		scanStart = 0
 	}
 	window := data[scanStart:]
-	lastBoundary := -1
-	boundaryLen := 0
-
-	if idx := bytes.LastIndex(window, []byte("\n\n")); idx >= 0 {
-		lastBoundary = scanStart + idx
-		boundaryLen = 2
-	}
-	if idx := bytes.LastIndex(window, []byte("\r\n\r\n")); idx >= 0 {
-		pos := scanStart + idx
-		if pos > lastBoundary {
-			lastBoundary = pos
-			boundaryLen = 4
+	for i := len(window) - 1; i >= 1; i-- {
+		if window[i] != '\n' {
+			continue
+		}
+		if window[i-1] == '\n' || (i >= 3 && window[i-3] == '\r' && window[i-2] == '\n' && window[i-1] == '\r') {
+			splitAt := scanStart + i + 1
+			return data[:splitAt], data[splitAt:]
 		}
 	}
-
-	if lastBoundary < 0 {
-		return nil, data
-	}
-
-	splitAt := lastBoundary + boundaryLen
-	return data[:splitAt], data[splitAt:]
+	return nil, data
 }
 
 func uncloakJSONNode(node any, uncloakTable map[string]string, sourceFormat string) bool {
