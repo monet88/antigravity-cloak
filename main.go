@@ -2519,25 +2519,39 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 
 	var combined []byte
 	if len(sess.tail) > 0 {
-		combined = make([]byte, len(sess.tail)+len(req.Body))
-		copy(combined, sess.tail)
-		copy(combined[len(sess.tail):], req.Body)
+		combined = append(sess.tail, req.Body...)
 	} else {
 		combined = req.Body
 	}
 
 	// Check if this is an SSE-formatted stream vs individual JSON chunk payload
-	trimmed := bytes.TrimSpace(combined)
-	if bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) || bytes.Contains(combined, []byte("\n\n")) || bytes.Contains(combined, []byte("\r\n\r\n")) {
-		completeEvents, incompleteTail := splitSSEEvents(combined)
-		sess.tail = incompleteTail
-		sess.updatedAt = time.Now()
-		m.mu.Unlock()
-
+	isSSE := len(sess.tail) > 0
+	if !isSSE {
+		trimmed := bytes.TrimLeft(combined, " \t\r\n")
+		isSSE = bytes.HasPrefix(trimmed, []byte("data:")) || bytes.HasPrefix(trimmed, []byte("event:")) || bytes.Contains(combined, []byte("\n\n")) || bytes.Contains(combined, []byte("\r\n\r\n"))
+	}
+	if isSSE {
+		completeEvents, incompleteTail := splitSSEEventsWithNewBytes(combined, len(req.Body))
 		if len(completeEvents) == 0 {
+			if len(sess.tail) == 0 {
+				sess.tail = append([]byte(nil), req.Body...)
+			} else {
+				sess.tail = combined
+			}
+			sess.updatedAt = time.Now()
+			m.mu.Unlock()
+
 			debugLog("StreamSessionManager: no complete events, dropping chunk len=%d", len(incompleteTail))
 			return pluginapi.StreamChunkInterceptResponse{DropChunk: true}
 		}
+
+		if len(incompleteTail) > 0 {
+			sess.tail = append([]byte(nil), incompleteTail...)
+		} else {
+			sess.tail = nil
+		}
+		sess.updatedAt = time.Now()
+		m.mu.Unlock()
 
 		var modified []byte
 		changed := false
@@ -2597,7 +2611,9 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 				}
 			}
 		}
-		if !overallChanged {
+		// Empty Body lets the host forward only the current input chunk. After
+		// reassembly or withholding a partial next event, emit the complete bytes.
+		if !overallChanged && bytes.Equal(modified, req.Body) {
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
 		return pluginapi.StreamChunkInterceptResponse{Body: modified}
@@ -2692,25 +2708,36 @@ func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkI
 // incomplete trailing tail. Complete events are those terminated by "\n\n".
 // The returned completeEvents includes the terminating "\n\n" sequences.
 func splitSSEEvents(data []byte) (completeEvents []byte, incompleteTail []byte) {
-	// Find the last event boundary (\n\n)
-	// Also check \r\n\r\n for Windows-style line endings
+	return splitSSEEventsWithNewBytes(data, len(data))
+}
+
+func splitSSEEventsWithNewBytes(data []byte, newLen int) (completeEvents []byte, incompleteTail []byte) {
+	n := len(data)
+	if n == 0 {
+		return nil, data
+	}
+	// Only the newly arrived bytes plus at most 3 preceding bytes can form or extend a delimiter.
+	scanStart := n - newLen - 3
+	if scanStart < 0 {
+		scanStart = 0
+	}
+	window := data[scanStart:]
 	lastBoundary := -1
 	boundaryLen := 0
 
-	if idx := bytes.LastIndex(data, []byte("\n\n")); idx >= 0 {
-		lastBoundary = idx
+	if idx := bytes.LastIndex(window, []byte("\n\n")); idx >= 0 {
+		lastBoundary = scanStart + idx
 		boundaryLen = 2
 	}
-	if idx := bytes.LastIndex(data, []byte("\r\n\r\n")); idx >= 0 {
-		// Use whichever boundary is LATER (further into the data)
-		if idx > lastBoundary {
-			lastBoundary = idx
+	if idx := bytes.LastIndex(window, []byte("\r\n\r\n")); idx >= 0 {
+		pos := scanStart + idx
+		if pos > lastBoundary {
+			lastBoundary = pos
 			boundaryLen = 4
 		}
 	}
 
 	if lastBoundary < 0 {
-		// No complete event boundary found — everything is incomplete
 		return nil, data
 	}
 

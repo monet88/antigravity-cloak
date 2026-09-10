@@ -858,6 +858,70 @@ func TestSplitSSEEvents(t *testing.T) {
 	}
 }
 
+func TestSplitSSEEventsWithNewBytes(t *testing.T) {
+	tests := []struct {
+		name           string
+		input          string
+		newLen         int
+		wantComplete   string
+		wantIncomplete string
+	}{
+		{
+			name:           "boundary formed across chunk split LF",
+			input:          "data: {\"a\":1}\n\n",
+			newLen:         1, // previous chunk had "data: {\"a\":1}\n", new chunk has "\n"
+			wantComplete:   "data: {\"a\":1}\n\n",
+			wantIncomplete: "",
+		},
+		{
+			name:           "boundary formed across chunk split CRLF",
+			input:          "data: {\"a\":1}\r\n\r\n",
+			newLen:         2, // previous chunk had "...\r\n", new chunk has "\r\n"
+			wantComplete:   "data: {\"a\":1}\r\n\r\n",
+			wantIncomplete: "",
+		},
+		{
+			name:           "boundary formed with only final LF of CRLF",
+			input:          "data: {\"a\":1}\r\n\r\n",
+			newLen:         1, // previous chunk had "...\r\n\r", new chunk has "\n"
+			wantComplete:   "data: {\"a\":1}\r\n\r\n",
+			wantIncomplete: "",
+		},
+		{
+			name:           "partial boundary with trailing fragment",
+			input:          "data: {\"a\":1}\n\ndata: {\"b\":",
+			newLen:         1 + len("data: {\"b\":"), // new chunk brought final "\n" + "data: {\"b\":" (14 bytes)
+			wantComplete:   "data: {\"a\":1}\n\n",
+			wantIncomplete: "data: {\"b\":",
+		},
+		{
+			name:           "no boundary in new bytes",
+			input:          "data: incomplete chunk",
+			newLen:         5,
+			wantComplete:   "",
+			wantIncomplete: "data: incomplete chunk",
+		},
+		{
+			name:           "empty input",
+			input:          "",
+			newLen:         0,
+			wantComplete:   "",
+			wantIncomplete: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			complete, incomplete := splitSSEEventsWithNewBytes([]byte(tt.input), tt.newLen)
+			if string(complete) != tt.wantComplete {
+				t.Fatalf("complete = %q, want %q", string(complete), tt.wantComplete)
+			}
+			if string(incomplete) != tt.wantIncomplete {
+				t.Fatalf("incomplete = %q, want %q", string(incomplete), tt.wantIncomplete)
+			}
+		})
+	}
+}
+
 func TestStreamChunkReassemblesSplitToolName(t *testing.T) {
 	// THE critical test: tool name "run_command" is split across two TCP chunks.
 	// Without event reassembly, regex misses the match on both chunks. With
