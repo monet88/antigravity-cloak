@@ -1799,6 +1799,10 @@ func anthropicTerminalKindFromMap(m map[string]any) (kind, laneKey string) {
 // sseAnthropicTerminalKind scans raw SSE bytes for an Anthropic terminal
 // control event. Returns kind and laneKey (only for content_block_stop).
 func sseAnthropicTerminalKind(ev []byte) (kind, laneKey string) {
+	// Without a literal terminal marker, only a JSON escape could decode to one.
+	if !bytes.Contains(ev, []byte("content_block_stop")) && !bytes.Contains(ev, []byte("message_stop")) && bytes.IndexByte(ev, '\\') < 0 {
+		return "", ""
+	}
 	s := string(ev)
 	// Split into lines handling both \n and \r\n.
 	lines := strings.Split(strings.ReplaceAll(s, "\r\n", "\n"), "\n")
@@ -1823,6 +1827,10 @@ func sseAnthropicTerminalKind(ev []byte) (kind, laneKey string) {
 }
 
 func sseContainsAnthropicMessageStop(sse []byte) bool {
+	// Keep escaped terminal types on the exact parser path above.
+	if !bytes.Contains(sse, []byte("message_stop")) && bytes.IndexByte(sse, '\\') < 0 {
+		return false
+	}
 	for _, ev := range splitSSEEventsForBrand(sse) {
 		if k, _ := sseAnthropicTerminalKind(ev); k == "message_stop" {
 			return true

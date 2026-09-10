@@ -1164,6 +1164,19 @@ func TestIssue21_AnthropicSSE_NativeTermination_HeldCarryFlush(t *testing.T) {
 	}
 }
 
+func TestAnthropicTerminalDetectionPreservesEscapedTypes(t *testing.T) {
+	messageStop := []byte("data: {\"type\":\"message\\u005fstop\"}\n\n")
+	if !sseContainsAnthropicMessageStop(messageStop) {
+		t.Fatal("escaped message_stop must remain detectable")
+	}
+
+	blockStop := []byte("data: {\"type\":\"content\\u005fblock_stop\",\"index\":2}\n\n")
+	kind, laneKey := sseAnthropicTerminalKind(blockStop)
+	if kind != "content_block_stop" || laneKey != "anthropic:2" {
+		t.Fatalf("escaped content_block_stop = (%q, %q), want (%q, %q)", kind, laneKey, "content_block_stop", "anthropic:2")
+	}
+}
+
 func TestIssue21_AnthropicStandalone_MessageStopFlush(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	mgr := newStreamSessionManager()
