@@ -669,10 +669,15 @@ func rewriteProtectedBrandText(text string, cfg *filterConfig) (string, bool) {
 		return text, false
 	}
 	current := text
+	lowerCurrent := strings.ToLower(current)
 	changed := false
 	for _, alias := range mandatoryProtectedOMPAliases {
+		if !strings.Contains(lowerCurrent, strings.ToLower(alias)) {
+			continue
+		}
 		if next, rep := replaceBrandKeyword(current, alias, protectedBrandSentinel); rep {
 			current = next
+			lowerCurrent = strings.ToLower(current)
 			changed = true
 		}
 	}
@@ -692,8 +697,12 @@ func rewriteProtectedBrandText(text string, cfg *filterConfig) (string, bool) {
 	}
 	normalized := normalizeMappings(nonOMPMappings)
 	for _, m := range normalized {
+		if !strings.Contains(lowerCurrent, m.Match) {
+			continue
+		}
 		if next, rep := replaceBrandKeyword(current, m.Match, m.Replacement); rep {
 			current = next
+			lowerCurrent = strings.ToLower(current)
 			changed = true
 		}
 	}
