@@ -2404,6 +2404,9 @@ func (m *streamSessionManager) deleteSession(key string) {
 func (m *streamSessionManager) cleanupStaleLocked() {
 	cutoff := time.Now().Add(-5 * time.Minute)
 	for k, s := range m.sessions {
+		if !s.updatedAt.Before(cutoff) {
+			continue
+		}
 		if strings.HasPrefix(k, "req:") {
 			reqID := strings.TrimPrefix(k, "req:")
 			if route := globalLifecycleManager.getRoute(reqID); route != nil && route.routeKind == routeKindProtectedAGY {
@@ -2412,9 +2415,7 @@ func (m *streamSessionManager) cleanupStaleLocked() {
 				}
 			}
 		}
-		if s.updatedAt.Before(cutoff) {
-			delete(m.sessions, k)
-		}
+		delete(m.sessions, k)
 	}
 }
 
