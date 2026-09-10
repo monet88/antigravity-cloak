@@ -806,6 +806,10 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		debugLog("handleProtectedAGY: strict JSON decode failed")
 		return protected503Response(resp)
 	}
+	expectedChoiceCount := 1
+	if n, valid := jsonIndexValue(rootMap["n"]); valid && n > 1 {
+		expectedChoiceCount = n
+	}
 
 	effective := activeFilterConfig().ToolMappings["oh_my_pi"]
 	if len(effective) != len(canonicalOMPSafeMappingSet) {
@@ -871,7 +875,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		activeReverse:           activeReverse,
 		cachedUncloak:           protectedCachedUncloak,
 		brandRestorationEnabled: true,
-		expected:                requestChoiceCount(canonicalBytes),
+		expected:                expectedChoiceCount,
 	})
 
 	return mustEnvelope(resp)

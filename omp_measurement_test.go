@@ -171,3 +171,40 @@ func TestOMPMeasurementCompleteEventWithPartialNext(t *testing.T) {
 		})
 	}
 }
+
+func TestOMPProtectedAdmissionChoiceCountSemantics(t *testing.T) {
+	cases := []struct {
+		name     string
+		nField   string
+		expected int
+	}{
+		{name: "missing", expected: 1},
+		{name: "null", nField: `,"n":null`, expected: 1},
+		{name: "string", nField: `,"n":"2"`, expected: 1},
+		{name: "fractional", nField: `,"n":2.5`, expected: 1},
+		{name: "exponent", nField: `,"n":2e0`, expected: 1},
+		{name: "zero", nField: `,"n":0`, expected: 1},
+		{name: "one", nField: `,"n":1`, expected: 1},
+		{name: "negative", nField: `,"n":-3`, expected: 1},
+		{name: "two", nField: `,"n":2`, expected: 2},
+		{name: "four", nField: `,"n":4`, expected: 4},
+		{name: "int64-overflow", nField: `,"n":9223372036854775808`, expected: 1},
+	}
+
+	for _, format := range []string{"openai", "anthropic"} {
+		for _, tc := range cases {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				isolateOMPMeasurement(t)
+				body := []byte(`{"messages":[],"tools":[{"type":"function","function":{"name":"bash"}}]` + tc.nField + `}`)
+				if format == "anthropic" {
+					body = []byte(`{"messages":[],"tools":[{"name":"bash","input_schema":{"type":"object"}}]` + tc.nField + `}`)
+				}
+				admitOMPMeasurement(t, "choice-count-"+format+"-"+tc.name, format, body)
+				route := globalLifecycleManager.getRoute("choice-count-" + format + "-" + tc.name)
+				if route == nil || route.expected != tc.expected {
+					t.Fatalf("route expected=%v, want %d", route, tc.expected)
+				}
+			})
+		}
+	}
+}
