@@ -2308,3 +2308,28 @@ func TestReplaceToolNamesInTextQuotedUnquotedConsistent(t *testing.T) {
 		})
 	}
 }
+
+func TestReplaceToolNamesInTextLongTierOneBounds(t *testing.T) {
+	cached := buildTestCloakPatterns(map[string]string{
+		"read":    "view_file",
+		"foo_bar": "mapped",
+	})
+	padding := strings.Repeat("x", 9<<10)
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"quoted namespace", "use `functions:read` " + padding, "use `functions:view_file` " + padding},
+		{"unambiguous boundary", "foo_bar " + padding, "mapped " + padding},
+		{"unambiguous partial word", "foo_barX " + padding, "foo_barX " + padding},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, _ := replaceToolNamesInText(tt.input, cached)
+			if got != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

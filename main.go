@@ -4191,7 +4191,25 @@ func replaceToolNamesInText(text string, cached *cachedCloakPatterns) (string, b
 	// Tier 1: single-pass identity replacement. A single regex covers quoted
 	// references, namespaced (qualified) identifiers, and unambiguous names.
 	if cached.identRe != nil {
-		matches := cached.identRe.FindAllStringIndex(text, -1)
+		identText := text
+		if len(text) >= 8<<10 {
+			// Every Tier 1 match contains an exact source tool name. On long prompt
+			// text, stop the regex just past the last possible source occurrence;
+			// one lookahead byte preserves \b. Short descriptions use the direct
+			// regex path to avoid paying for the pre-scan.
+			identEnd := 0
+			for orig := range cached.cloakTable {
+				if index := strings.LastIndex(text, orig); index >= 0 {
+					identEnd = max(identEnd, index+len(orig))
+				}
+			}
+			if identEnd == 0 {
+				identText = ""
+			} else {
+				identText = text[:min(len(text), identEnd+1)]
+			}
+		}
+		matches := cached.identRe.FindAllStringIndex(identText, -1)
 		for _, m := range matches {
 			sub := text[m[0]:m[1]]
 			repl := replaceToolIdentity(sub, cached)
