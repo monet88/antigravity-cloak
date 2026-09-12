@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-09-12
+
+### Added
+- Cloaked Codex traffic on the code-mode wire surface: `exec -> run_command`, `web_search -> search_web`, `request_user_input -> ask_question`, and the flattened `collaboration__spawn_agent` / `collaboration__followup_task` / `collaboration__list_agents` children to `invoke_subagent` / `manage_task` / `manage_subagents`. Only names that occupy a tool-name position are listed; helpers that exist solely as prose inside the `exec` description stay pass-through (PR #31).
+- Shell-mode declaration inventory (`exec_command`, `write_stdin`, `apply_patch`, `view_image`, ...) retained for detection only, so a shell-mode session still resolves as Codex without the table carrying two sources that want one target (PR #31).
+- Codex surface reference and ADR 0004 recording which names the wire carries in each mode, why MCP stays pass-through, and how the reverse table is scoped (PR #31).
+
+### Fixed
+- Codex sessions were detected but never cloaked: a request declaring `exec` plus namespaced children scored one hit against a floor of two, because namespaced declarations were not reduced to their base identities and keys configured through `tool_mappings` never counted (PR #31).
+- The reverse table was narrowed against the executed body, which carries no source name, so an already-cloaked Codex stream lost its reverse and payload tool names passed through unmutated (PR #31).
+- A natively declared AGY target is no longer handed back as a Codex source name the client never declared, including on the correlated response path, which now reuses the scope the request interceptor derived from the raw body (PR #31).
+
 ## [0.5.0] - 2026-09-07
 ### Added
 - Adopted the 9-tool AGY CLI-native Safe Mapping Set for Oh My Pi (`read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`) with static source and target identity inventories (Issue #26).
@@ -125,7 +137,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 - Initial plugin implementation.
 - Added repository metadata, MIT license, and release build workflow.
 
-[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.5.2...HEAD
+[0.5.2]: https://github.com/monet88/antigravity-cloak/compare/v0.5.1...v0.5.2
 [0.5.0]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.5.0
 [0.4.4]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.4
 [26.09.06]: https://github.com/monet88/antigravity-cloak/releases/tag/v.26.09.06
