@@ -110,9 +110,12 @@ Protected OMP aliases (`Oh My Pi`, `oh-my-pi`, `omp`) mask to `Antigravity` even
 ### 5. Configuration Lifecycle
 Managed via `atomic.Pointer[filterConfig]`, enabling lock-free, zero-copy configuration reads on hot request and streaming paths with thread-safe live reconfiguration.
 
+### 6. Upstream Safety Sanitization (Google Cloud Code / Antigravity)
+- **System Conventions Sanitization**: A compatibility transformation of OMP's exact `<system-conventions>` wrapper to `<conventions>`, retaining the enclosed instructions. Its scope is system/developer prompt text on ProtectedAGY requests; it does not alter tool data or explicit non-AGY bypass traffic. See [ADR 0003](docs/adr/0003-sanitize-system-prompt-conventions-tag-for-google-upstream.md).
+
 ## Key Files & Directories
 
 - `main.go`: Complete plugin implementation (lifecycle hooks, interceptors, brand rewriter, stream manager, configuration store).
 - `AGENTS.md`: Operational guide for building, testing, deploying, and debugging the plugin.
-- `docs/specs/`: Detailed technical specifications (e.g. `oh-my-pi-cloaking-spec.md`).
+- `docs/specs/`: Detailed technical specifications (e.g. `oh-my-pi-cloaking-spec.md`, `system-conventions-sanitization.md`).
 - `docs/adr/`: Architecture Decision Records.

@@ -185,6 +185,10 @@ The step-by-step procedure for deploying custom plugin binaries to remote VPS in
 - Build, deploy, and file ops are one-shell-each on Windows PowerShell; avoid
   piping host paths into docker exec for file deletion. Truncate inside the
   container or while it is stopped.
+- **Google Cloud Code Prompt-Injection 429 (`<system-conventions>`)**:
+  - Symptom: Requests from Oh My Pi fail upstream with `429 RESOURCE_EXHAUSTED` on `daily-cloudcode-pa.googleapis.com` even with healthy quotas and valid tokens.
+  - Confirmed trigger: Oh My Pi's default system prompt wraps its RFC 2119 block in `<system-conventions>`; local payload bisection isolated that tag pair. The upstream classifier's internal implementation is not established by this observation.
+  - Rule: On ProtectedAGY requests, sanitize the exact opening/closing tags to `<conventions>` in top-level `system` and system/developer message text. Preserve other roles, tool payloads, metadata, and bypass routes. See [the sanitization spec](docs/specs/system-conventions-sanitization.md) before extending this scope.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
