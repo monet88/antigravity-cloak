@@ -346,7 +346,9 @@ func TestResponseInterceptReversesClaudeCodeCloak(t *testing.T) {
 }
 
 func TestResponseInterceptReversesCodexCloak(t *testing.T) {
-	reqBody := `{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}}],"messages":[]}`
+	// Shell-mode Codex declared exec_command, so the upstream run_command target
+	// restores to that exact name.
+	reqBody := `{"tools":[{"type":"function","function":{"name":"exec_command"}},{"type":"function","function":{"name":"view_image"}}],"messages":[]}`
 	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
 
 	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
@@ -382,8 +384,20 @@ func TestResponseInterceptReversesCodexCloak(t *testing.T) {
 	fn := toolCall["function"].(map[string]any)
 	name := fn["name"].(string)
 
-	if name != "exec" {
-		t.Fatalf("expected tool call function name to be 'exec', got %q", name)
+	if name != "exec_command" {
+		t.Fatalf("expected tool call function name to be 'exec_command', got %q", name)
+	}
+
+	// A code-mode request declares exec instead, so run_command was never cloaked
+	// for it: the reverse must not invent the shell-mode name, which that client
+	// never declared.
+	codeModeReq := `{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}}],"messages":[]}`
+	codeModeRaw, codeModeCode := handlePluginCall("response.intercept_after", responseInterceptRequestJSON(t, codeModeReq, respBody, "openai"))
+	if codeModeCode != 0 {
+		t.Fatalf("code = %d; body=%s", codeModeCode, codeModeRaw)
+	}
+	if strings.Contains(string(codeModeRaw), "exec_command") {
+		t.Fatalf("code-mode response must not gain a shell-mode tool name: %s", codeModeRaw)
 	}
 }
 

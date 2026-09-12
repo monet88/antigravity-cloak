@@ -56,16 +56,26 @@ These tools remain in the static OMP source identity inventory for source-side c
 
 ##### 3. OpenAI Codex (`codex`)
 
-Current Codex CLI wire surface (Responses API, verified 2026-09-12 against codex-cli 0.154.0). Namespaced tools (`collaboration.*`, `clock.sleep`) are keyed by base name:
-- `exec` $\to$ `run_command`
+Responses API, verified 2026-09-12 against codex-cli 0.154.0. Namespaced tools are keyed by base name (`spawn_agent`, `sleep`): the wire carries a namespace container whose children are bare names, with the namespace in a sibling field on each call item. `splitToolNamespace` splits on `:` alone, so a flattened `collaboration.spawn_agent` or `collaboration__spawn_agent` form does not resolve to a base name.
+- `exec_command` $\to$ `run_command`
+- `view_image` $\to$ `view_file`
 - `request_user_input` $\to$ `ask_question`
 - `spawn_agent` $\to$ `invoke_subagent`
 - `followup_task` $\to$ `manage_task`
 - `list_agents` $\to$ `manage_subagents`
 
-Intentional pass-through (no Antigravity-native counterpart, so a substitution would collide or invent a tool): `wait`, `request_user_input_async`, `sleep`, `send_message`, `wait_agent`, `interrupt_agent`.
+`exec` is deliberately unmapped: it and `exec_command` both want `run_command`, and every target must stay 1:1 within a client because `defaultUncloakTables` is built by inverting this table.
 
-Legacy names removed from this table because current Codex no longer sends them as `tools[]` entries — they now live inside the `exec` description, where only text rewriting reaches them: `shell_command`, `apply_patch`, `update_plan`, `tool_search`, `get_goal`, `create_goal`, `update_goal`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`.
+Only `tools[]` entries are renameable, and which names a session declares depends on the model's tool mode:
+
+| `tool_mode` | wire surface | table coverage |
+| :--- | :--- | :--- |
+| `code_mode_only` (default: `gpt-6-astra`, the GPT-5.6 family, `codex-auto-review`, and the `deepseek` provider) | one freeform `exec`; every other tool described inside it | `exec` unmapped; the nested names are reachable by text rewriting only |
+| unset, i.e. shell mode (`gpt-5.5` / `5.4` / `5.4-mini`, and the `CPA` provider) | `exec_command`, `write_stdin`, `apply_patch`, `view_image`, `request_user_input`, … as their own `tools[]` entries | `exec_command` and `view_image` map; `exec`, `write_stdin`, `apply_patch` and `wait` pass through |
+
+Intentional pass-through (no Antigravity-native counterpart, so a substitution would collide or invent a tool): `wait`, `write_stdin`, `apply_patch`, `request_user_input_async`, `sleep`, `send_message`, `wait_agent`, `interrupt_agent`.
+
+`shell_command` is a `shell_type` catalog label, not a tool name, and `update_plan` has left the catalog entirely. The rest — `apply_patch`, `view_image`, `tool_search`, the goal tools and the MCP-resource tools — are mode-dependent: `tools[]` entries in shell mode, description text in code mode. The per-mode carriers are tabulated in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**, together with the rationale for every name this table maps and every one it passes through.
 
 
 ### 3. Activation Model & Explicit OMP Routing

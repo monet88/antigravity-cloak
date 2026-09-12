@@ -152,7 +152,7 @@ func TestRewriteRequestBodyCloaksCodexTools(t *testing.T) {
 	body := `{
 		"system":"You are Codex.",
 		"tools":[
-			{"type":"function","function":{"name":"exec","description":"Execute Codex shell"}},
+			{"type":"function","function":{"name":"exec_command","description":"Execute Codex shell"}},
 			{"type":"function","function":{"name":"request_user_input","description":"Ask the user"}}
 		],
 		"messages":[]
@@ -400,9 +400,13 @@ func TestUncloakTablesInitialization(t *testing.T) {
 	if defaultUncloakTables["claude_code"]["run_command"] != "Bash" {
 		t.Fatal("expected Bash")
 	}
-	// Codex
-	if defaultUncloakTables["codex"]["run_command"] != "exec" {
-		t.Fatal("expected exec")
+	// Codex keys on the shell-mode surface: exec_command owns run_command, and
+	// the code-mode "exec" is deliberately absent (see defaultCloakTables).
+	if defaultUncloakTables["codex"]["run_command"] != "exec_command" {
+		t.Fatal("expected exec_command")
+	}
+	if defaultUncloakTables["codex"]["view_file"] != "view_image" {
+		t.Fatal("expected view_image")
 	}
 	// Verify no key collision within a client's cloak table
 	for client, cloaks := range defaultCloakTables {
@@ -426,6 +430,11 @@ func TestDetectClient(t *testing.T) {
 		{"claude code by signature trio", []string{"Bash", "Edit", "Read", "Write"}, "claude_code"},
 		{"codex by exec and request_user_input", []string{"exec", "request_user_input"}, "codex"},
 		{"codex by subagent control tools", []string{"spawn_agent", "list_agents"}, "codex"},
+		// Shell-mode Codex declares exec_command/view_image instead of exec.
+		{"codex shell mode by exec_command and view_image", []string{"exec_command", "view_image"}, "codex"},
+		{"codex shell mode by exec_command and request_user_input", []string{"exec_command", "request_user_input"}, "codex"},
+		// minToolNameHits still floors every client at two source-name hits.
+		{"single codex signature below threshold", []string{"exec_command", "custom_tool"}, ""},
 		// detectClient only matches original (cloak table key) names; Antigravity
 		// native tools are NOT keys, so detectClient returns "" for them.
 		{"antigravity tools return empty", []string{"ask_permission", "run_command"}, ""},
@@ -454,7 +463,7 @@ func TestDetectCloakedClient(t *testing.T) {
 		// All Claude Code cloak TARGETS present → detected as claude_code
 		{"cloaked claude code", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "list_dir", "invoke_subagent", "ask_question", "search_web", "call_mcp_tool", "schedule"}, "claude_code"},
 		// All Codex cloak TARGETS present → detected as codex
-		{"cloaked codex", []string{"run_command", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"}, "codex"},
+		{"cloaked codex", []string{"run_command", "view_file", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"}, "codex"},
 		// A realistic cloaked Codex body mixes five cloak targets with pass-through
 		// names that no client table owns, so target-coverage detection cannot reach
 		// its 80% threshold. That is expected: response/stream uncloaking resolves
@@ -698,6 +707,65 @@ func TestBuildUncloakTableWithCloakedRequest(t *testing.T) {
 	}
 	if uncloakTable["invoke_subagent"] != "Agent" {
 		t.Fatalf("expected invoke_subagent → Agent, got %q", uncloakTable["invoke_subagent"])
+	}
+}
+
+func TestCodexShellModeCloakRoundTrip(t *testing.T) {
+	// Shell-mode Codex declares exec_command and view_image as their own
+	// tools[] entries. The request side renames them to AGY names, and the
+	// reverse side must restore those exact shell-mode source names rather
+	// than the code-mode "exec" this table deliberately omits.
+	body := []byte(`{
+			"tools":[
+				{"type":"function","function":{"name":"exec_command"}},
+				{"type":"function","function":{"name":"view_image"}},
+				{"type":"function","function":{"name":"request_user_input"}},
+				{"type":"function","function":{"name":"spawn_agent"}}
+			],
+			"messages":[]
+		}`)
+	rewritten, changed, client := rewriteRequestBodyWithClient(body, "openai", "codex")
+	if !changed || client != "codex" {
+		t.Fatalf("rewrite = changed:%v client:%q, want true/codex", changed, client)
+	}
+	got := string(rewritten)
+	for _, want := range []string{"run_command", "view_file", "ask_question", "invoke_subagent"} {
+		if !strings.Contains(got, `"`+want+`"`) {
+			t.Fatalf("expected cloaked target %q in %s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"exec_command", "view_image"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("source name %q survived cloaking: %s", unwanted, got)
+		}
+	}
+
+	uncloakTable, uncloakClient := buildUncloakTable(body, "openai")
+	if uncloakClient != "codex" {
+		t.Fatalf("buildUncloakTable client = %q, want codex", uncloakClient)
+	}
+	if uncloakTable["run_command"] != "exec_command" || uncloakTable["view_file"] != "view_image" {
+		t.Fatalf("uncloak table = %v, want run_command->exec_command and view_file->view_image", uncloakTable)
+	}
+}
+
+func TestCodexTableKeepsTargetsUnique(t *testing.T) {
+	// Only one source may own run_command: defaultUncloakTables is its exact
+	// inverse, so a duplicate target would restore whichever source name the
+	// inversion happened to keep and hand the client a tool it never declared.
+	table := copyToolMappings(defaultCloakTables)["codex"]
+	if _, ok := table["exec"]; ok {
+		t.Fatal("codex table must not map exec; exec_command owns run_command")
+	}
+	if _, ok := table["exec_command"]; !ok {
+		t.Fatal("codex table must map exec_command")
+	}
+	seen := map[string]string{}
+	for src, target := range table {
+		if prev, dup := seen[target]; dup {
+			t.Fatalf("duplicate target %q shared by %q and %q", target, prev, src)
+		}
+		seen[target] = src
 	}
 }
 
