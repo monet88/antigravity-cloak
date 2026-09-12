@@ -14,7 +14,7 @@ The summary a future session needs; everything below this section is the evidenc
 
 **The wire.** Codex speaks Responses to opencodex, but opencodex's `openai-chat` adapter lowers that to `POST {baseUrl}/chat/completions` (`.ref/opencodex/src/adapters/openai-chat.ts:93-99`) before the request reaches CLIProxyAPI, so this plugin sees **Chat Completions** — `SourceFormat=openai`, with tools at `tools[].function.name` and `tools[].function.description`. Namespaced children are flattened to `<namespace>__<child>` by opencodex's `namespacedToolName` (`.ref/opencodex/src/types/tools.ts:30`) so they survive that format.
 
-**What a code-mode session declares.** Read off this plugin's own debug log for a live `cpa/agy` session on 2026-09-12; twelve entries:
+**What a code-mode session declares.** Read off this plugin's own debug log for a live `cpa/agy` session on 2026-09-12 — a dated capture, not a fixed set:
 
 ```
 exec, wait, request_user_input, request_user_input_async, clock__sleep,
@@ -42,16 +42,18 @@ Deliberate pass-through: `wait`, `request_user_input_async`, `clock__sleep`, `co
 
 **Live evidence.** The probe prompt (`echo cloak-probe-ok`, plus "list your top-level tools") ran twice against a deployed build carrying this table. Both runs logged `rewritten=true client=codex` — the first resolved by detection, the second by the header (its marker read `matchedKeys:[X-Cloak-Client] present:true uniqueClients:[codex] client:codex valid:true`). Both produced:
 
-| AGY name sent upstream | occurrences | Codex source name | occurrences |
-| --- | --- | --- | --- |
-| `run_command` | 3 | `exec` | 0 |
-| `search_web` | 2 | `web_search` | 0 |
-| `ask_question` | 2 | `request_user_input` | 0 |
-| `invoke_subagent` | 2 | `collaboration__spawn_agent` | 0 |
-| `manage_task` | 2 | `collaboration__followup_task` | 0 |
-| `manage_subagents` | 2 | `collaboration__list_agents` | 0 |
+| AGY name sent upstream | Codex source name |
+| --- | --- |
+| `run_command` | `exec` |
+| `search_web` | `web_search` |
+| `ask_question` | `request_user_input` |
+| `invoke_subagent` | `collaboration__spawn_agent` |
+| `manage_task` | `collaboration__followup_task` |
+| `manage_subagents` | `collaboration__list_agents` |
 
-The model's own tool list reported six of twelve top-level names already renamed, and the probe command executed and returned its output — the practical proof that the reverse restored `run_command -> exec` for the client, since a failed restore would have handed Codex a name it never declared.
+In the captured bodies every left-hand name appeared and no right-hand name appeared at all; that contrast is the evidence, and the individual hit counts are not reproduced here.
+
+The model's own tool list already showed those entries under their AGY names, and the probe command executed and returned its output — the practical proof that the reverse restored `run_command -> exec` for the client, since a failed restore would have handed Codex a name it never declared.
 
 **Reproducing it.** (1) the table above; (2) `"headers": {"X-Cloak-Client": "codex"}` on the opencodex provider; (3) `ocx restart` — the running proxy holds the provider runtime from startup, so a config write alone does not apply the header; (4) install a clean Linux/amd64 build, because the artifact that was deployed before this pass had been built from an older commit and carried no `exec` entry at all.
 
@@ -72,7 +74,7 @@ The model's own tool list reported six of twelve top-level names already renamed
 | 2026-09-12 (ninth pass) | Captured a live `cpa/agy` debug log, re-keyed `defaultCloakTables["codex"]` on the code-mode wire surface it revealed, and added the flattened `collaboration__*` spellings to `codexSourceIdentityInventory` — a code-mode request declaring `exec` plus namespace children and nothing else had scored one hit against a floor of two, which is why every previous request mutated nothing. |
 | 2026-09-12 (tenth pass) | Recorded the live acceptance: the header and detection paths both resolving `client=codex`, all six renames on the wire, all six source names absent, and the probe command executing. Added the reverse constraint (a name is restored only in a tool-name position), the `ocx restart` requirement for provider headers, and the disclosure that the previously deployed artifact had been built from an older commit and carried no `exec` entry at all. |
 | 2026-09-12 (eleventh pass) | Split the decision record into [ADR 0004](../adr/0004-cloak-codex-tool-names-by-wire-position.md), corrected `AGENTS.md`'s claim that a `handleStreamChunkIntercept: changed=%t` line exists, and refreshed the provider table for the `cpa` / `opencode-free` rename. |
-| 2026-09-12 (twelfth pass) | Recorded why the `mcp__*` family stays pass-through, after verifying AGY's side of it: `call_mcp_tool`'s three-field envelope against our own surface reference, and the real per-tool schema cache under `~/.gemini/antigravity-cli/mcp/` (17 servers, 411 tools). The model's "eager native `mcp_<server>_<tool>`" half was not corroborated and is marked as such. |
+| 2026-09-12 (twelfth pass) | Recorded why the `mcp__*` family stays pass-through, after verifying AGY's side of it: `call_mcp_tool`'s three-field envelope against our own surface reference, and the real per-tool schema cache under `~/.gemini/antigravity-cli/mcp/`. The model's "eager native `mcp_<server>_<tool>`" half was not corroborated and is marked as such. |
 
 ---
 
@@ -180,16 +182,16 @@ In the mirror, `shell_type: shell_command` labels the shell **variant**; no curr
 
 Four catalogs describe this surface, and they disagree in places, so any finding has to name its source.
 
-| source | what it is | models | `tool_mode` | `shell_type` |
-| --- | --- | --- | --- | --- |
-| `codex debug models --bundled` on the installed `codex-cli` 0.154.0 | the **client's own** embedded catalog | 11 | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`, `gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, `codex-auto-review`; unset on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2` | `unified_exec` |
-| `src/codex/data/upstream-models.json` in opencodex v2.51.0 | opencodex's copy of the OpenAI upstream snapshot | 9 | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`; `null` on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2`, **`codex-auto-review`** | `unified_exec` |
-| `.ref/CLIProxyAPI/internal/registry/models/codex_client_models.json` | gateway-side mirror of a client catalog | 8 | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`, `gpt-reserve`, `codex-auto-review`; unset on `gpt-5.5` | `shell_command` |
-| `C:\Users\monet\.codex\opencodex-catalog.json` | the **live** catalog the local Codex loads, generated by opencodex | 18 | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna` and on every routed row (`cpa/*`, `deepseek/*`, `opencode-free/*`); absent on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` | `unified_exec` |
+| source | what it is | `tool_mode` | `shell_type` |
+| --- | --- | --- | --- |
+| `codex debug models --bundled` on the installed `codex-cli` 0.154.0 | the **client's own** embedded catalog | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`, `gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, `codex-auto-review`; unset on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2` | `unified_exec` |
+| `src/codex/data/upstream-models.json` in opencodex v2.51.0 | opencodex's copy of the OpenAI upstream snapshot | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`; `null` on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2`, **`codex-auto-review`** | `unified_exec` |
+| `.ref/CLIProxyAPI/internal/registry/models/codex_client_models.json` | gateway-side mirror of a client catalog | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`, `gpt-reserve`, `codex-auto-review`; unset on `gpt-5.5` | `shell_command` |
+| `C:\Users\monet\.codex\opencodex-catalog.json` | the **live** catalog the local Codex loads, generated by opencodex | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna` and on every routed row (`cpa/*`, `deepseek/*`, `opencode-free/*`); absent on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` | `unified_exec` |
 
 Only the last row governs runtime behaviour here: both Codex homes set `model_catalog_json` to it (`C:\Users\monet\.codex\config.toml` and `C:\Users\monet\AppData\Roaming\orca\codex-runtime-home\home\config.toml`), and `codex debug models` agrees with it.
 
-The `models` column is each source's own total; slugs that do not bear on the mode split are omitted from this page. Three differences between the rows are worth naming, and two of them are real.
+The slugs named in this table illustrate the mode split; they are a dated observation rather than an enumeration of what a catalog currently holds. The provider, model and MCP configuration on this workstation is edited often, so every list in this document should be read as "what was there when this was written" — and no count of models, providers or MCP servers is stated as a stable property anywhere here.
 
 `shell_type` is a genuine disagreement: the gateway mirror says `shell_command`, the client and opencodex say `unified_exec`. The first pass of this document recorded the mirror's value. The client's own value is the one in force, and `shell_type` does not distinguish code mode from shell mode in any case — every model in every catalog carries one.
 
@@ -231,7 +233,7 @@ A combo inherits `shell` only when **every** member is shell (`src/codex/catalog
 
 ### Cost of dropping `code_mode_only`
 
-The "roughly 2.7x turn-1 prompt tokens" figure that circulates with this topic belongs to a **different** change: stamping `supports_search_tool = false` forces every MCP declaration into `exec.description`, measured at 96,699 → 258,929 characters (`src/codex/catalog/parsing.ts:767-775`). All 14 live rows here advertise `supports_search_tool: true`, so that regression is not in play, and the actual cost of switching a routed provider to shell mode was **not** measured in this pass — the `logs` table in `logs_2.sqlite` stores no token counts and `ocx observe` exposes none.
+The "roughly 2.7x turn-1 prompt tokens" figure that circulates with this topic belongs to a **different** change: stamping `supports_search_tool = false` forces every MCP declaration into `exec.description`, measured at 96,699 → 258,929 characters (`src/codex/catalog/parsing.ts:767-775`). Every live row advertises `supports_search_tool: true`, so that regression is not in play, and the actual cost of switching a routed provider to shell mode was **not** measured in this pass — the `logs` table in `logs_2.sqlite` stores no token counts and `ocx observe` exposes none.
 
 What is directly observable is the MCP consequence. The same comment `src/codex/catalog/parsing.ts:768-771` records that under code mode deferred MCP tools stay callable through the `exec` `tools` global with no `tool_search` round-trip. With no `exec`, that path is gone: MCP tools arrive through `tool_search` instead, which is what happened in the shell-mode session used for this pass — context7, gitnexus, exa and node_repl all arrived that way.
 
@@ -265,8 +267,8 @@ Live values from `C:\Users\monet\.codex\opencodex-catalog.json` and `C:\Users\mo
 | --- | --- | --- | --- | --- | --- | --- |
 | `cpa` | `openai-chat` | `http://localhost:8317/v1` | *unset* | `cpa/agy-claude-opus-4-6-thinking`, `cpa/agy-claude-sonnet-4-6`, `cpa/agy-gemini-3.8-flash` | `code_mode_only` | `v2` |
 | `deepseek` | `openai-chat` | `https://api.deepseek.com` | *unset* | `deepseek/deepseek-flash`, `deepseek/deepseek-v4-pro` | `code_mode_only` | `v2` |
-| `opencode-free` | `openai-chat` | `https://opencode.ai/zen/v1` | *unset* | five `opencode-free/*` free-tier slugs | `code_mode_only` | `v2` |
-| `openai` | `openai-responses` | `https://chatgpt.com/backend-api/codex` | *unset* | 8 native slugs | mixed, model-declared | native policy |
+| `opencode-free` | `openai-chat` | `https://opencode.ai/zen/v1` | *unset* | `opencode-free/*` free-tier slugs | `code_mode_only` | `v2` |
+| `openai` | `openai-responses` | `https://chatgpt.com/backend-api/codex` | *unset* | native slugs | mixed, model-declared | native policy |
 
 Routed rows also drop `use_responses_lite` (`normalizeRoutedCatalogEntry` deletes it), which is why the live catalog shows no such field on any routed entry.
 
@@ -274,7 +276,7 @@ The consequence for this plugin is direct. `cpa` is the AGY-facing provider: it 
 
 `cpa` also carries `"headers": {"X-Cloak-Client": "codex"}`, which makes client identity explicit instead of inferred. It takes effect only after `ocx restart` — the running proxy holds the provider runtime from startup — and the header is consumed and cleared before forwarding, so it never reaches AGY.
 
-The provider set has been rewritten twice. `CPA` (uppercase, remote `https://cliproxy.monet.uno/v1`, four `claude-*` / `gemini-*` / `ling-*` rows) was replaced by the local `cpa`; its config briefly carried `codexToolMode: shell`, which is the provenance of the shell-mode table an earlier pass of this document shipped and this pass superseded. `deepseek` was renamed from `DS` and moved from `openai-responses` to `openai-chat`, returning its rows to the `code_mode_only` default.
+The provider set has been rewritten twice. `CPA` (uppercase, remote `https://cliproxy.monet.uno/v1`, carrying `claude-*` / `gemini-*` / `ling-*` rows) was replaced by the local `cpa`; its config briefly carried `codexToolMode: shell`, which is the provenance of the shell-mode table an earlier pass of this document shipped and this pass superseded. `deepseek` was renamed from `DS` and moved from `openai-responses` to `openai-chat`, returning its rows to the `code_mode_only` default.
 
 ---
 
@@ -433,7 +435,7 @@ PROBE responses-history  toolNames=[]                        detectClient=""
 | any `"name":"<target>"` in a stream chunk | stream uncloak regex (`main.go:3403`) | Yes, and shape-agnostic. |
 | request text bodies | `replaceToolNamesInText` (`main.go:4369`), unambiguous-name rule (`main.go:4620`) | Yes, once a client is resolved. |
 
-**The Responses rows are not this workstation's constraint.** Codex reaches the plugin through opencodex's `openai-chat` adapter, which lowers the request to Chat Completions before CLIProxyAPI sees it, so the first row applies. Verified live: `SourceFormat=openai`, twelve names extracted out of `tools[]`, and the table applied. The Responses rows stay relevant only for a deployment where a Codex client speaks Responses to CLIProxyAPI directly.
+**The Responses rows are not this workstation's constraint.** Codex reaches the plugin through opencodex's `openai-chat` adapter, which lowers the request to Chat Completions before CLIProxyAPI sees it, so the first row applies. Verified live: `SourceFormat=openai`, the declared names extracted out of `tools[]`, and the table applied. The Responses rows stay relevant only for a deployment where a Codex client speaks Responses to CLIProxyAPI directly.
 
 ## Why the shipped table looks like that
 
@@ -462,9 +464,9 @@ Three criteria, in order. They are the same three the earlier shell-mode pass us
 
 `fastctx.inspect_local_file`, `context7.resolve_library_id` and the rest of the `mcp__*` family are not cloaked, and that is structural rather than a policy preference. Three independent reasons, in the order they bite.
 
-**A code-mode session does not declare them.** Every live catalog row carries `supports_search_tool: true`, so MCP declarations are deferred rather than inlined, and the captured wire listed twelve declared names with no `mcp__*` among them. The MCP tools are reachable only as nested helpers inside the `exec` isolate — confirmed by calling `context7.resolve_library_id` down that path and getting a real answer in 1.9s — which is the prose position the reverse cannot restore.
+**A code-mode session does not declare them.** Every live catalog row carries `supports_search_tool: true`, so MCP declarations are deferred rather than inlined, and the captured wire listed no `mcp__*` among the declared names. The MCP tools are reachable only as nested helpers inside the `exec` isolate — confirmed by calling `context7.resolve_library_id` down that path and getting a real answer in 1.9s — which is the prose position the reverse cannot restore.
 
-**`call_mcp_tool` is one target for the whole family.** The AGY CLI's own MCP registry under `~/.gemini/antigravity-cli/mcp/` holds 17 servers and 411 tool schemas, so mapping any of them onto the single bridge tool would put N sources on one target, which the inverted reverse cannot express.
+**`call_mcp_tool` is one target for the whole family.** The AGY CLI's own MCP registry under `~/.gemini/antigravity-cli/mcp/` keeps one schema file per server and per tool, so the family is open-ended; mapping any of it onto the single bridge tool would put N sources on one target, which the inverted reverse cannot express.
 
 **AGY's MCP identity is not a flat name.** It is the pair `(ServerName, ToolName)` carried inside `Arguments`, and `ToolName` is whatever the server itself publishes — `resolve-library-id` in the AGY cache against `mcp__context7__resolve_library_id` on this wire. Making a call look AGY-native is therefore an identity transformation (split the server out, recover the published tool name, rebuild the envelope), not a rename. Forcing a rename onto `call_mcp_tool` would also invite the model to answer with its native three-field envelope, which the reverse would hand back to Codex as the right name carrying the wrong arguments.
 
@@ -481,7 +483,7 @@ The request-scoped reverse stays Codex-only. It is what allows the table to key 
 
 ## Next session: ask the model itself
 
-This probe has now been run twice — once against the deployed code-mode build, once again after the provider header was added. It asks the model to enumerate its top-level tools rather than summarise them, and both runs returned the same twelve names with exactly six already renamed to AGY targets, which is the corroboration the wire evidence predicts. The variants below remain unrun and are kept for when a client-side question needs answering.
+This probe has now been run twice — once against the deployed code-mode build, once again after the provider header was added. It asks the model to enumerate its top-level tools rather than summarise them, and both runs listed the same names, with the mapped entries already renamed to their AGY targets — the corroboration the wire evidence predicts. The variants below remain unrun and are kept for when a client-side question needs answering.
 
 **Invalidation risk.** Both Codex homes set `model_catalog_json` to opencodex's generated file. With opencodex stopped but that key still present, the client keeps reading opencodex's catalog — including the `tool_mode` values opencodex wrote — so the run would not test the untouched client. Clear or repoint `model_catalog_json` in both `C:\Users\monet\.codex\config.toml` and `C:\Users\monet\AppData\Roaming\orca\codex-runtime-home\home\config.toml` before drawing conclusions, and confirm with `codex debug models` that the bundled values are now what the session sees.
 
