@@ -3014,15 +3014,30 @@ var defaultCloakTables = map[string]map[string]string{
 		"ToolSearch": "search_web", "Skill": "call_mcp_tool", "Workflow": "schedule",
 	},
 	"codex": {
-		"shell_command": "run_command", "apply_patch": "multi_replace_file_content",
-		"request_user_input": "ask_question", "view_image": "generate_image",
-		"update_plan": "manage_task", "tool_search": "search_web",
-		"get_goal":                    "schedule",
-		"create_goal":                 "send_message",
-		"update_goal":                 "define_subagent",
-		"list_mcp_resources":          "list_resources",
-		"list_mcp_resource_templates": "list_permissions",
-		"read_mcp_resource":           "read_resource",
+		// Current Codex CLI wire surface (Responses API, verified 2026-09-12 on
+		// codex-cli 0.154.0): the freeform "exec" tool, the background "wait"
+		// poller, the user-input pair, and the namespaced "clock.sleep" /
+		// "collaboration.*" control tools. The historical names --
+		// "shell_command", "apply_patch", "update_plan", "tool_search", the goal
+		// tools and the MCP-resource tools -- are no longer tools[] entries:
+		// they now live inside the "exec" description, so only text rewriting
+		// reaches them and they are deliberately absent here.
+		//
+		// Namespaced wire names are keyed by base name, matching
+		// splitToolNamespace and detectClient. Targets stay 1:1 within a client
+		// because defaultUncloakTables is built by inverting this map.
+		//
+		// Deliberate pass-through, because Antigravity has no native
+		// counterpart and a substitution would either collide with a target
+		// above or invent a tool that does not exist: "wait",
+		// "request_user_input_async", "sleep", "wait_agent", "interrupt_agent",
+		// and "send_message" (whose Antigravity name is already identical, so
+		// cloaking it would be a no-op).
+		"exec":               "run_command",
+		"request_user_input": "ask_question",
+		"spawn_agent":        "invoke_subagent",
+		"followup_task":      "manage_task",
+		"list_agents":        "manage_subagents",
 	},
 	"oh_my_pi": {
 		"read":       "view_file",

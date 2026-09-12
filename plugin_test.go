@@ -59,7 +59,7 @@ tool_mappings:
     bash: run_command
     my_custom_tool: ask_permission
   codex:
-    shell_command: run_command
+    exec: run_command
   Claude_Code:
     grep: grep_search
 `)))
@@ -178,7 +178,7 @@ custom_mappings:
 }
 
 func TestHandlePluginCallRequestInterceptBeforeRewritesCodingSignals(t *testing.T) {
-	request := requestInterceptRequestJSON(t, `{"system":"You are Codex.","messages":[],"tools":[{"type":"function","function":{"name":"shell_command"}},{"type":"function","function":{"name":"apply_patch"}}]}`)
+	request := requestInterceptRequestJSON(t, `{"system":"You are Codex.","messages":[],"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}}]}`)
 
 	raw, code := handlePluginCall("request.intercept_before", request)
 	if code != 0 {
@@ -346,7 +346,7 @@ func TestResponseInterceptReversesClaudeCodeCloak(t *testing.T) {
 }
 
 func TestResponseInterceptReversesCodexCloak(t *testing.T) {
-	reqBody := `{"tools":[{"type":"function","function":{"name":"shell_command"}},{"type":"function","function":{"name":"apply_patch"}}],"messages":[]}`
+	reqBody := `{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}}],"messages":[]}`
 	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
 
 	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
@@ -382,8 +382,8 @@ func TestResponseInterceptReversesCodexCloak(t *testing.T) {
 	fn := toolCall["function"].(map[string]any)
 	name := fn["name"].(string)
 
-	if name != "shell_command" {
-		t.Fatalf("expected tool call function name to be 'shell_command', got %q", name)
+	if name != "exec" {
+		t.Fatalf("expected tool call function name to be 'exec', got %q", name)
 	}
 }
 

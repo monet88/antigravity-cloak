@@ -1,240 +1,383 @@
-# Oh My Pi <-> Antigravity Live Verification Runbook
+# Oh My Pi <-> Antigravity Local Build and Live Verification Runbook
 
-Use this runbook for real local acceptance of `antigravity-cloak` with Oh My Pi (OMP), CLIProxyAPI, and an Antigravity-backed model. Deterministic Go tests remain the oracle for edge cases; this runbook proves the actual local round trip.
+This is the authoritative workflow for future local Docker deployments and real
+OMP acceptance. Run the steps in order in **PowerShell**, from the repository
+root. Go tests prove the offline contract; only the correlated live run proves
+the installed binary's upstream behavior. Historical results at the end are
+reference evidence, not a substitute for checking today's runtime.
 
-## Ready-to-use local baseline
+For full real-client coverage of all nine OMP mappings, transport variants, and
+intentional pass-through tools, use the separate
+[OMP full tool-cloak checklist](verification-checklist-omp.md) after preparation
+here. The single-tool probe below is not full nine-tool acceptance.
 
-The default OMP profile is the primary real-use configuration. `cloak-live` is an isolated acceptance profile only.
+## 1. Pin source and discover the running gateway
 
-Primary/default OMP contract:
-
-- Default OMP config root: `C:\Users\monet\.omp\agent`
-- Default provider config: `C:\Users\monet\.omp\agent\models.yml`
-- Provider: `cpa`
-- Required deterministic client marker: `X-Cloak-Client: oh_my_pi`
-- The default profile may use a different CLIProxyAPI endpoint from the local acceptance runtime; the marker, not the model or gateway URL, identifies OMP traffic that must cloak.
-
-The workstation is also provisioned for isolated live acceptance. Reuse the existing local runtime first; do not create a new Docker stack, gateway config, or OMP profile unless the verification steps below prove the existing one is missing or broken.
-
-- Docker container: `cli-proxy-api` (`eceasy/cli-proxy-api:latest`)
-- Local gateway: `http://127.0.0.1:8317/v1`
-- Acceptance-only OMP profile: `cloak-live`
-- OMP profile path: `C:\Users\monet\.omp\profiles\cloak-live\agent`
-- Local CLIProxyAPI API key / management password: `Tonight123`
-- Installed OMP baseline: `omp/18.1.13`
-- Installed AGY baseline: `1.1.27`
-- Current primary Antigravity route for live cloak testing: `cpa/agy/gemini-3.8-flash`
-- Plugin-visible model for that route: `agy/gemini-3.8-flash`
-For production/default-profile checks, verify `omp models`. For isolated local acceptance, verify `docker ps` and `omp --profile cloak-live models`. If the acceptance environment is healthy, use it as-is.
-
-## PASS criteria
-
-A live run is `PASS` only when all of the following are true:
-
-1. CLIProxyAPI loads and registers the intended `antigravity-cloak` version.
-2. OMP reaches the local CLIProxyAPI instance through an isolated profile.
-3. The request is classified as `oh_my_pi` and native OMP tool names are cloaked upstream.
-4. A real streamed model tool call is restored to an OMP-native tool name before OMP executes it.
-5. No Antigravity-only tool name leaks across the OMP boundary.
-6. No unknown-tool, schema, retry-loop, plugin panic, or model-gate error occurs.
-7. Controlled debug logging is disabled and truncated again after verification.
-
-## Tool direction (Canonical Safe Mapping Set)
-
-The plugin enforces the 9-tool AGY CLI-native Safe Mapping Set for Oh My Pi (`oh_my_pi` / `omp`):
-
-| OMP (Source) | Antigravity (Target) | Classification |
-| :--- | :--- | :--- |
-| `read` | `view_file` | Transport exception (files, dirs, URLs, `xd://` devices) |
-| `write` | `write_to_file` | Transport exception (files, `xd://` device execution) |
-| `edit` | `replace_file_content` | Semantic alias (preserves OMP hashline wire format) |
-| `bash` | `run_command` | Direct semantic alias |
-| `grep` | `grep_search` | Direct semantic alias |
-| `glob` | `find_by_name` | Direct semantic alias (pattern search) |
-| `task` | `invoke_subagent` | Direct semantic alias (batch subagent spawning) |
-| `ask` | `ask_question` | Direct semantic alias (interactive UI) |
-| `web_search` | `search_web` | Direct semantic alias (when tool is exposed) |
-
-Intentional pass-through tools: `todo`, `hub`, `eval`, `vibe_*` (vibe_spawn, vibe_send, vibe_wait, vibe_kill, vibe_list), and Autoresearch tools (`init_experiment`, `run_experiment`, `log_experiment`, `update_notes`). These remain completely unmutated.
-
-The full mapping table lives in [CONTEXT.md](../CONTEXT.md).
-
-OMP auxiliary devices and MCP servers are typically mounted under `xd://...` and invoked through `read`/`write`; top-level `mcp__*` tools, when present, remain pass-through traffic. No parameter schema translation or `xd://` parameter rewriting is performed.
-## 1. Discover the real Docker runtime
-
-Do not assume a historical container name or `F:\cliproxy` path. Resolve the active Compose project and bind mounts first:
+Reuse the existing Docker stack and `cloak-live` profile. The default profile
+(`C:\Users\monet\.omp\agent`, provider `cpa`, marker
+`X-Cloak-Client: oh_my_pi`) is the primary real-use configuration and may point
+to a different endpoint; do not change it for local acceptance.
 
 ```powershell
-$Container = 'cli-proxy-api'
-$i = (docker inspect $Container | ConvertFrom-Json)[0]
+$ErrorActionPreference = 'Stop'
+$RepoRoot = (git rev-parse --show-toplevel).Trim()
+$TargetCommit = (git rev-parse HEAD).Trim()
+git status --short
+go test ./...
+if ($LASTEXITCODE) { throw 'Go tests failed' }
+go test ./.github/scripts
+if ($LASTEXITCODE) { throw 'Packaging tests failed' }
+go vet ./...
+if ($LASTEXITCODE) { throw 'Go vet failed' }
 
+docker ps --format '{{.Names}} {{.Image}} {{.Status}}'
+$Container = 'cli-proxy-api' # Select from the inventory above.
+$i = (docker inspect $Container | ConvertFrom-Json)[0]
+if ($LASTEXITCODE) { throw 'Gateway inspection failed' }
 $ComposeService = $i.Config.Labels.'com.docker.compose.service'
 $ComposeDir = $i.Config.Labels.'com.docker.compose.project.working_dir'
+$ComposeFiles = $i.Config.Labels.'com.docker.compose.project.config_files' -split ','
 $PluginMount = $i.Mounts | Where-Object Destination -eq '/CLIProxyAPI/plugins'
 $ConfigMount = $i.Mounts | Where-Object Destination -eq '/CLIProxyAPI/config.yaml'
 $LogsMount = $i.Mounts | Where-Object Destination -eq '/CLIProxyAPI/logs'
-
-[pscustomobject]@{
-  Container = $Container
-  ComposeService = $ComposeService
-  ComposeDir = $ComposeDir
-  PluginDir = $PluginMount.Source
-  ConfigPath = $ConfigMount.Source
-  LogsDir = $LogsMount.Source
+$AuthMount = $i.Mounts | Where-Object Destination -eq '/root/.cli-proxy-api'
+if (!$ComposeService -or !$ComposeDir -or !$PluginMount -or !$ConfigMount -or !$LogsMount -or !$AuthMount) {
+    throw 'Incomplete runtime discovery'
 }
+if (!(Test-Path -LiteralPath $ConfigMount.Source -PathType Leaf)) {
+    throw 'Config mount source must be a file'
+}
+$ComposeArgs = @('compose', '--project-directory', $ComposeDir)
+foreach ($file in $ComposeFiles) { $ComposeArgs += @('-f', $file) }
+$ComposeArgs += @('--project-name', $i.Config.Labels.'com.docker.compose.project')
+
+# Preserve discovered mounts and the currently running gateway image.
+$env:CLI_PROXY_CONFIG_PATH = $ConfigMount.Source
+$env:CLI_PROXY_PLUGIN_PATH = $PluginMount.Source
+$env:CLI_PROXY_LOG_PATH = $LogsMount.Source
+$env:CLI_PROXY_AUTH_PATH = $AuthMount.Source
+$env:CLI_PROXY_IMAGE = $i.Image
+$ResolvedCompose = docker @ComposeArgs config --format json | ConvertFrom-Json
+if ($LASTEXITCODE) { throw 'Compose resolution failed' }
+$ResolvedCompose.services.$ComposeService.volumes |
+    Select-Object source, target, type
 ```
 
-All three mounts must resolve before changing or testing the runtime.
+**Gate:** resolved config, plugin, log, and auth mounts must match the inspected
+container. Preserve every other service setting. Inspect only the relevant
+fields; full Compose/config output can contain secrets.
 
-## 2. Verify the plugin that is actually loaded
+The confirmed 2026-09-12 config source was
+`F:/CodeBase/antigravity-cloak/.ref/CLIProxyAPI/config.local.yaml`.
+The Compose fallback `./config.yaml` resolved to a directory and caused
+`failed to read config file: ... is a directory`. Always pass the discovered
+source on **every** recreate, including cleanup and rollback. For future shells,
+persist the correct `CLI_PROXY_CONFIG_PATH` entry in the existing Compose
+`.env` without replacing its other entries, then recheck resolved mounts.
+A `--project-directory` flag alone does not recover an environment override
+used when the old container was created.
 
-The active CLIProxyAPI config should enable the plugin. A pinned store version is recommended for release acceptance:
+## 2. Build a clean Linux/amd64 shared library
 
-```yaml
-plugins:
-  enabled: true
-  configs:
-    antigravity-cloak:
-      enabled: true
-      store:
-        version: "<VERSION>"
-      model_prefixes:
-        - "agy/"
-```
+For a published-release acceptance, install the published Linux/amd64 asset and
+verify its published checksum instead of rebuilding. For a source deployment,
+commit the intended implementation first and build the pinned commit. A dirty
+host checkout must not silently supply uncommitted code to the binary.
 
-Confirm startup evidence from the container:
+Check gateway libc using `docker exec $Container ldd --version`. The verified
+gateway uses Debian glibc 2.36. `golang:1.26.0-bookworm` matches that baseline;
+the floating `golang:1.26` image tested on 2026-09-12 used glibc 2.41.
+Choose a Go version matching `go.mod` and a compatible libc baseline, and record
+the image digest. Do not assume a future floating image remains compatible.
 
 ```powershell
-docker logs $Container 2>&1 |
-  Select-String 'pluginhost: plugin (loaded|registered).*antigravity-cloak' |
-  Select-Object -Last 4
+$BuildImage = 'golang:1.26.0-bookworm'
+$Version = '0.5.1' # Must match pluginVersion at TargetCommit.
+$SourceMain = git show "${TargetCommit}:main.go"
+if ($LASTEXITCODE -or !($SourceMain -match ('pluginVersion\s*=\s*"' + [regex]::Escape($Version) + '"'))) {
+    throw 'Version does not match pinned source'
+}
+docker pull $BuildImage
+if ($LASTEXITCODE) { throw 'Build image pull failed' }
+docker image inspect $BuildImage --format '{{index .RepoDigests 0}}'
+New-Item -ItemType Directory -Force -Path (Join-Path $RepoRoot 'dist') | Out-Null
+$BuildCommand = @'
+set -eu
+git config --global --add safe.directory /src
+git clone --quiet --no-local /src /build
+cd /build
+git checkout --quiet --detach "$CLOAK_BUILD_COMMIT"
+test -z "$(git status --porcelain)"
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -buildmode=c-shared -ldflags '-s -w' -o /src/dist/antigravity-cloak.so .
+rm -f /src/dist/antigravity-cloak.h
+go version -m /src/dist/antigravity-cloak.so
+sha256sum /src/dist/antigravity-cloak.so
+readelf -h /src/dist/antigravity-cloak.so
+readelf --version-info /src/dist/antigravity-cloak.so
+'@
+docker run --rm -v "${RepoRoot}:/src" -e "CLOAK_BUILD_COMMIT=$TargetCommit" $BuildImage sh -c $BuildCommand
+if ($LASTEXITCODE) { throw 'Shared-library build failed' }
+$BuiltArtifact = Join-Path $RepoRoot 'dist/antigravity-cloak.so'
+$BuiltHash = (Get-FileHash -LiteralPath $BuiltArtifact -Algorithm SHA256).Hash
 ```
 
-When testing a published release, install its published Linux/amd64 asset into the discovered plugin mount rather than rebuilding different source. A loaded Go shared object cannot be safely hot-swapped; recreate the service before replacing an active binary.
+**Gate:** ELF64 shared object, x86-64, CGO enabled, `GOOS=linux`,
+`GOARCH=amd64`, `vcs.revision=$TargetCommit`, `vcs.modified=false`, and required
+GLIBC versions supported by the gateway. Direct builds from a Windows bind
+mount can report `vcs.modified=true` despite clean host Git status; the fresh
+container checkout avoids that ambiguity.
 
-## 3. Use the existing `cloak-live` OMP profile
+## 3. Back up, enable controlled logging, and install while stopped
 
-The local acceptance profile already exists. Reuse it; do not create a replacement profile unless this one is missing or broken:
+The local-only acceptance API key / management password is `Tonight123`.
+This is the documented workstation exception; do not publish other credentials,
+auth files, full config snapshots, or raw request logs.
+
+```powershell
+$Gateway = 'http://127.0.0.1:8317'
+$LocalHeaders = @{ Authorization = 'Bearer Tonight123' }
+$Inventory = Invoke-RestMethod "$Gateway/v0/management/plugins" -Headers $LocalHeaders
+$Loaded = @($Inventory.plugins | Where-Object id -eq 'antigravity-cloak')
+if ($Loaded.Count -ne 1 -or !$Loaded[0].registered -or !$Loaded[0].effective_enabled) {
+    throw 'Resolve the existing plugin state before replacing it'
+}
+$OldRelative = $Loaded[0].path -replace '^/?(?:CLIProxyAPI/)?plugins/', ''
+$PluginRoot = [IO.Path]::GetFullPath($PluginMount.Source)
+$OldArtifact = [IO.Path]::GetFullPath((Join-Path $PluginRoot $OldRelative))
+$NewArtifact = [IO.Path]::GetFullPath((Join-Path $PluginRoot "linux/amd64/antigravity-cloak-v$Version.so"))
+foreach ($path in @($OldArtifact, $NewArtifact)) {
+    if (!$path.StartsWith($PluginRoot.TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'Plugin path escapes discovered mount'
+    }
+}
+if ($OldArtifact -ne $NewArtifact -and (Test-Path -LiteralPath $NewArtifact)) {
+    throw 'Target artifact already exists; inspect its provenance first'
+}
+$GitDir = (git rev-parse --absolute-git-dir).Trim()
+$EvidenceDir = Join-Path $GitDir ('local-acceptance-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+New-Item -ItemType Directory -Path $EvidenceDir | Out-Null
+Copy-Item -LiteralPath $OldArtifact -Destination (Join-Path $EvidenceDir 'previous-plugin.so')
+Copy-Item -LiteralPath $ConfigMount.Source -Destination (Join-Path $EvidenceDir 'config-before.yaml')
+for ($n = 0; $n -lt $ComposeFiles.Count; $n++) {
+    Copy-Item -LiteralPath $ComposeFiles[$n] -Destination (Join-Path $EvidenceDir "compose-before-$n.yaml")
+}
+$LogsBefore = @(Get-ChildItem -LiteralPath $LogsMount.Source -File | ForEach-Object FullName)
+```
+
+For the short acceptance window, edit only these settings in the discovered
+local files (record their previous values):
+
+- Compose service environment: `CPA_FILTER_DEBUG: "1"`.
+- CLIProxyAPI config root: `request-log: true`.
+
+These are different logs. Plugin debug shows route/stream handling; gateway
+request logging captures original client requests and the actual upstream
+requests/responses, including successful requests. ProtectedAGY does not emit
+the generic `rewritten=true Body=...` debug line, so that line is not an
+acceptance requirement for this route.
+
+If the plugin config pins `store.version` or a path, align that pin with the
+intended installed version while retaining the original config for rollback.
+Keep the old binary **outside** the plugin discovery directory; do not leave
+multiple discoverable copies with the same plugin ID.
+
+```powershell
+docker @ComposeArgs stop $ComposeService
+if ($LASTEXITCODE) { throw 'Gateway stop failed; do not replace binary' }
+Copy-Item -LiteralPath $BuiltArtifact -Destination $NewArtifact
+if ($OldArtifact -ne $NewArtifact) { Remove-Item -LiteralPath $OldArtifact }
+if ((Get-FileHash -LiteralPath $NewArtifact -Algorithm SHA256).Hash -ne $BuiltHash) {
+    throw 'Installed checksum differs from build; rollback before starting'
+}
+docker @ComposeArgs up -d --force-recreate --pull never $ComposeService
+if ($LASTEXITCODE) { throw 'Gateway recreation failed; follow rollback' }
+```
+
+**Gate:** wait for the management API to respond, not just `docker compose`
+to return. A restart loop/config error is a failure, not readiness. Verify the
+config mount again with `docker inspect`.
+
+```powershell
+$Inventory = $null
+$ReadyDeadline = (Get-Date).AddSeconds(30)
+do {
+    try {
+        $Inventory = Invoke-RestMethod "$Gateway/v0/management/plugins" -Headers $LocalHeaders -TimeoutSec 3
+    } catch {
+        Start-Sleep -Seconds 1
+    }
+} while (!$Inventory -and (Get-Date) -lt $ReadyDeadline)
+if (!$Inventory) { throw 'Gateway readiness deadline exceeded; inspect startup logs and rollback' }
+$Loaded = @($Inventory.plugins | Where-Object id -eq 'antigravity-cloak')
+if ($Loaded.Count -ne 1 -or !$Loaded[0].registered -or !$Loaded[0].effective_enabled -or $Loaded[0].metadata.version -ne $Version) {
+    throw 'Intended plugin did not load'
+}
+$Loaded | Select-Object id, path, registered, effective_enabled
+docker logs --since 2m $Container 2>&1 |
+    Select-String 'pluginhost: plugin (loaded|registered)|failed to load|panic'
+docker exec $Container sh -c ': > /CLIProxyAPI/logs/cpa-filter-debug.log'
+if ($LASTEXITCODE) { throw 'Could not reset controlled debug log' }
+```
+
+Confirm the management path resolves to `$NewArtifact`. Any installation,
+startup, or verification failure must still go through cleanup; use rollback
+if the gateway cannot serve with the new artifact.
+
+## 4. Refresh the isolated OMP profile and run a bounded probe
 
 ```powershell
 $OmpProfile = 'cloak-live'
 $OmpRoot = (omp --profile $OmpProfile config path).Trim()
-$OmpRoot
+omp --version
+omp --profile $OmpProfile models
 ```
 
-`$OmpRoot\models.yml` is expected to contain this local-only provider configuration:
+Verify `$OmpRoot/models.yml` has provider `cpa`, local base URL
+`http://127.0.0.1:8317/v1`, `api: openai-completions`, the local acceptance key,
+`headers: {X-Cloak-Client: oh_my_pi}`, and
+`discovery: {type: openai-models-list}`. Inspect selected fields without
+printing the whole credential-bearing file.
 
-```yaml
-providers:
-  cpa:
-    baseUrl: http://127.0.0.1:8317/v1
-    apiKey: "Tonight123"
-    api: openai-completions
-    headers:
-      X-Cloak-Client: oh_my_pi
-    discovery:
-      type: openai-models-list
-```
-
-Verify discovery:
+If the model is missing (including when only Ollama appears), first check
+`GET /v1/models` on this gateway, then run:
 
 ```powershell
-omp --profile cloak-live models
+omp --profile $OmpProfile models refresh
+if ($LASTEXITCODE) { throw 'OMP model refresh failed' }
+omp --profile $OmpProfile models
 ```
 
-OMP model selectors include the provider namespace. For the validated route, select:
-
-```text
-cpa/agy/gemini-3.8-flash
-```
-
-The provider prefix `cpa/` is OMP-local routing metadata; the plugin sees the request model as `agy/gemini-3.8-flash`, which is what `model_prefixes: ["agy/"]` matches.
-
-## 4. Interactive TUI validation
-
-Launch OMP in the target repository:
+**Gate:** `cpa/agy/gemini-3.8-flash` must resolve before running the smoke.
+`Model not found` is a local catalog failure, not an upstream 429 and not
+evidence of plugin behavior. Do not delete OMP databases or create a new profile
+to work around a stale catalog.
 
 ```powershell
-omp --profile cloak-live `
-  --model cpa/agy/gemini-3.8-flash `
-  --cwd F:\CodeBase\antigravity-cloak `
-  --auto-approve
+$ProbeMarker = 'CLOAK_SANITIZATION_' + [guid]::NewGuid().ToString('N')
+$OmpOutput = Join-Path $EvidenceDir 'omp-smoke.jsonl'
+$ExpectedOutput = (git -C $RepoRoot rev-parse --short HEAD).Trim()
+omp --profile $OmpProfile --model cpa/agy/gemini-3.8-flash --cwd $RepoRoot `
+    --tools bash --no-session --auto-approve --max-time 2m --mode json `
+    --append-system-prompt "<system-conventions>$ProbeMarker probe. Keep tool usage read-only.</system-conventions>" `
+    -p 'Use bash exactly once to run: git rev-parse --short HEAD. Report the exact command output.' *> $OmpOutput
+$OmpExit = $LASTEXITCODE
+if ($OmpExit) { Write-Warning "OMP exited $OmpExit; inspect local evidence and run cleanup" }
 ```
 
-Give it a task that requires real file reads, edits/writes, and shell commands. The client should execute normal OMP tools; it must never surface `run_command`, `view_file`, `replace_file_content`, or `write_to_file` as unknown client tools.
+Appending the original wrapper ensures a client whose bundle was previously
+patched to `<agent-conventions>` still tests the plugin fix. Keep the unique
+marker in system text. The provider prefix `cpa/` is OMP-local; the plugin sees
+`agy/gemini-3.8-flash`.
 
-For a minimal one-shot smoke instead of the TUI:
+## 5. Correlate the actual request, stream, and native execution
+
+Read OMP JSONL as UTF-8 (allow an optional BOM), parse JSON records, and inspect:
+
+- Exactly one `tool_execution_end`: `toolName: bash`, `isError: false`, and
+  the command result contains `$ExpectedOutput`.
+- The matching `tool_execution_start` used `git rev-parse --short HEAD`.
+- Assistant continuation reports the same output with a successful stop.
+- No unknown-tool, schema, retry-loop, plugin panic, or unexpected rejection.
+
+Find the new gateway request-log files containing `$ProbeMarker`; save their
+**exact paths** for cleanup. Correlate by request ID and tool-call ID, not by
+co-occurrence somewhere in the log:
+
+| Evidence section | Required result |
+| --- | --- |
+| `REQUEST BODY` | Original system wrapper contains the unique marker; tool declaration is native `bash`. |
+| `API REQUEST n` | System wrapper is `<conventions>`; the original exact wrapper is absent from selected prompt text; declaration is `run_command`. |
+| `API RESPONSE n` | HTTP 200 with a streamed `run_command` tool call. |
+| `RESPONSE` | HTTP 200; the same tool-call ID carries native name `bash`. |
+| OMP JSONL and next request | Native `bash` executes successfully and its result participates in continuation. |
+
+Parse each section's JSON/SSE before checking string values. Upstream JSON can
+encode `<` and `>` as `\u003c` and `\u003e`; raw substring counting would
+falsely report missing replacement tags. Compare tool **name fields**, not IDs:
+IDs may legitimately retain a `run_command-` prefix after the tool name is
+restored. Review every upstream attempt if the log contains multiple numbered
+API sections; success after hidden retries is not a clean no-retry acceptance.
+
+Save a redacted summary: source commit, build-image digest, artifact SHA256,
+plugin version/path, model, request IDs, status codes, observed transformations,
+native command/result, failures, and cleanup outcome. Keep raw bodies and
+credentials only in the local evidence area until cleanup; do not commit them.
+
+This smoke validates one tool round trip and the wrapper fix. For changes to
+other mappings, transport modes, lifecycle, or reverse-brand handling, exercise
+those affected behaviors as well. The nine-tool mapping and wider historical
+matrix below describe additional coverage, not coverage implied by one bash
+call. `Antigravity -> omp` checks belong in assistant-visible text; tool
+arguments/metadata retain literal brands.
+
+## 6. Cleanup on success AND failure
+
+Before finishing, restore the previous `request-log` setting (normally absent
+or false) and remove `CPA_FILTER_DEBUG` from the service environment, including
+overrides/env files. Any non-empty value enables plugin debug, even `"0"`.
+Restore only the settings changed for the probe; do not overwrite unrelated
+concurrent config edits with a whole-file backup.
+
+Recreate with the same discovered mounts and image, then truncate logs:
 
 ```powershell
-omp --profile cloak-live `
-  --model cpa/agy/gemini-3.8-flash `
-  --cwd F:\CodeBase\antigravity-cloak `
-  --tools bash,read,edit,write,grep,glob `
-  --no-session `
-  --auto-approve `
-  --max-time 2m `
-  -p "Use bash exactly once to run: git rev-parse --short HEAD. Report the exact output."
-```
-## 5. Controlled debug proof
-
-`CPA_FILTER_DEBUG` writes full request/response/stream bodies. Enable it only for a small controlled run and never publish the raw log.
-
-Add `CPA_FILTER_DEBUG: "1"` to the CLIProxyAPI service environment, then recreate the service. Merely restarting an existing container is insufficient because the plugin caches debug enablement for the process lifetime.
-
-```powershell
-Push-Location $ComposeDir
-docker compose up -d --force-recreate --pull never $ComposeService
-Pop-Location
-
-docker exec $Container sh -lc ': > /CLIProxyAPI/logs/cpa-filter-debug.log'
+docker @ComposeArgs up -d --force-recreate --pull never $ComposeService
+if ($LASTEXITCODE) { throw 'Cleanup recreate failed; gateway is not verified' }
+# Wait for readiness as in step 3 before continuing.
+docker exec $Container sh -c ': > /CLIProxyAPI/logs/cpa-filter-debug.log'
+if ($LASTEXITCODE) { throw 'Debug-log truncation failed' }
+$FinalInfo = (docker inspect $Container | ConvertFrom-Json)[0]
+if (@($FinalInfo.Config.Env | Where-Object { $_ -match '^CPA_FILTER_DEBUG=.+$' }).Count) {
+    throw 'Plugin debug remains enabled'
+}
+if ((Get-Item -LiteralPath (Join-Path $LogsMount.Source 'cpa-filter-debug.log')).Length -ne 0) {
+    throw 'Debug log is not empty'
+}
 ```
 
-For the request under test, prove these transitions from debug records:
+Truncate only the exact gateway request logs owned by this probe, after saving
+the redacted summary; verify each resolved path stays inside the discovered log
+directory. Remove/truncate raw OMP captures if no longer needed. Preserve
+unrelated logs and the local rollback files. Do not use broad recursive deletes.
 
-```text
-OMP request:          bash / read / edit / write
-rewritten upstream:  run_command / view_file / replace_file_content / write_to_file
-model stream:        Antigravity-native tool name
-next OMP history:    native OMP tool name again
-```
+Recheck management registration/version/path, installed SHA256, config mount,
+container stability, and authenticated `GET /v1/models` = 200 **after** cleanup.
+A prior successful smoke does not prove the final recreated container is healthy.
 
-Useful markers include:
+## 7. Rollback if installation/startup fails
 
-```text
-handleRequestInterceptBefore: ... Model="agy/..." RequestedModel="agy/..."
-handleRequestInterceptBefore: rewritten=true client=oh_my_pi
-StreamSessionManager: header-init using pre-registered session ... client=oh_my_pi
-handleStreamChunkIntercept: ...
-```
+Use the paths captured in step 3. Stop the gateway and verify it has stopped
+before changing either binary. Restore `previous-plugin.so` to `$OldArtifact`;
+remove `$NewArtifact` only if it is a distinct, verified path for this deployment.
+Restore the prior plugin pin/config settings, remove temporary logging settings,
+and recreate with the same explicit Compose mounts and image. Verify the old
+version/path is registered and the gateway is healthy. Report the failed new
+deployment separately; never label a rollback as new-version acceptance.
 
-Do not prove uncloaking by searching the whole log for both names. Compare the model stream event with the following OMP request/history: the native name must reappear there and the cloaked name must not remain at that client boundary.
+## Validated sanitization deployment - 2026-09-12
 
-## 6. Reverse-brand check
-
-For resolved `oh_my_pi` traffic, assistant-visible standalone `Antigravity` is restored to `omp`. Tool arguments, metadata, reasoning/control lanes, IDs, and non-assistant data keep literal `Antigravity`.
-
-When this code changes, add one focused live response containing standalone `Antigravity` and confirm the TUI displays `omp`. The deterministic `reverse_brand_test.go` suite remains the primary edge-case oracle for fragmentation, per-lane buffering, boundaries, and excluded fields.
-
-## 7. Cleanup after every debug run
-
-Remove `CPA_FILTER_DEBUG` from the Compose environment and recreate the service:
-
-```powershell
-Push-Location $ComposeDir
-docker compose up -d --force-recreate --pull never $ComposeService
-Pop-Location
-
-docker exec $Container sh -lc ': > /CLIProxyAPI/logs/cpa-filter-debug.log'
-```
-
-Verify the final state:
-
-```powershell
-docker inspect $Container --format '{{range .Config.Env}}{{println .}}{{end}}' |
-  Select-String '^CPA_FILTER_DEBUG='
-```
-
-Expected: no `CPA_FILTER_DEBUG=1` entry, and the debug log is empty.
+- Merged source: `5d35663659530c3fbd841615c467343269ad616d`
+  ([PR #30](https://github.com/monet88/antigravity-cloak/pull/30)); PR and main CI passed.
+- Build: Go 1.26.0, Linux/amd64, CGO `c-shared`, clean container checkout,
+  `vcs.modified=false`.
+- Build image: `golang:1.26.0-bookworm`,
+  digest `sha256:2a0ba12e116687098780d3ce700f9ce3cb340783779646aafbabed748fa6677c`.
+- Artifact SHA256: `b00a53ab22ea1ddf009cb9a2108da697b8ee69d13329104441e39e594b18fa73`.
+- CLIProxyAPI v7.2.146 (`d31b159`), plugin v0.5.1 loaded from
+  `plugins/linux/amd64/antigravity-cloak-v0.5.1.so`; OMP 18.1.18,
+  `cloak-live`, model `cpa/agy/gemini-3.8-flash`.
+- Correlated requests: `53c9ffca`, `5d739ed9`. Both had the original probe
+  wrapper at ingress, the sanitized wrapper upstream, and HTTP 200.
+  For this fixture, original opening tags changed from 3 to 0 and replacement
+  opening tags from 1 to 4; these counts are fixture-specific.
+- Streamed `run_command` became native `bash`; OMP executed
+  `git rev-parse --short HEAD` and returned `5d35663`, followed by successful
+  continuation.
+- Repaired Compose's config mount and refreshed the stale OMP model catalog.
+  Final registration/health/checksum passed after cleanup; plugin debug was
+  disabled, debug log empty, and both controlled request logs truncated.
+- Coverage: sanitization plus one native bash round trip. This run did not
+  repeat the full nine-tool matrix below.
 
 ## Validated baseline - 2026-09-01
 

@@ -544,7 +544,7 @@ func TestIntegration_UserAgent_NoCodexUAInference(t *testing.T) {
 		"model":    model,
 		"messages": []any{map[string]any{"role": "user", "content": "read"}},
 		"tools": []any{
-			map[string]any{"type": "function", "function": map[string]any{"name": "shell_command"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "exec"}},
 		},
 	}
 	b, _ := json.Marshal(thin)
@@ -562,9 +562,9 @@ func TestIntegration_UserAgent_NoCodexUAInference(t *testing.T) {
 		"model":    model,
 		"messages": []any{map[string]any{"role": "user", "content": "run"}},
 		"tools": []any{
-			map[string]any{"type": "function", "function": map[string]any{"name": "shell_command"}},
-			map[string]any{"type": "function", "function": map[string]any{"name": "apply_patch"}},
-			map[string]any{"type": "function", "function": map[string]any{"name": "view_image"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "exec"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "request_user_input"}},
+			map[string]any{"type": "function", "function": map[string]any{"name": "spawn_agent"}},
 		},
 	}
 	cb, _ := json.Marshal(codexBody)
@@ -572,7 +572,7 @@ func TestIntegration_UserAgent_NoCodexUAInference(t *testing.T) {
 	h.Set("User-Agent", "Mozilla/5.0")
 	rawResp, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayloadWithHeaders(t, "ua-nocodex-bodygate", "openai", model, cb, h))
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
-	if !strings.Contains(string(body), "run_command") && !strings.Contains(string(body), "multi_replace_file_content") {
+	if !strings.Contains(string(body), "run_command") && !strings.Contains(string(body), "ask_question") {
 		t.Fatalf("codex body gate should still cloak via body detection, got: %s", body)
 	}
 }

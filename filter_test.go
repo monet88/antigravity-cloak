@@ -152,8 +152,8 @@ func TestRewriteRequestBodyCloaksCodexTools(t *testing.T) {
 	body := `{
 		"system":"You are Codex.",
 		"tools":[
-			{"type":"function","function":{"name":"shell_command","description":"Execute Codex shell"}},
-			{"type":"function","function":{"name":"apply_patch","description":"Apply patches"}}
+			{"type":"function","function":{"name":"exec","description":"Execute Codex shell"}},
+			{"type":"function","function":{"name":"request_user_input","description":"Ask the user"}}
 		],
 		"messages":[]
 	}`
@@ -174,8 +174,8 @@ func TestRewriteRequestBodyCloaksCodexTools(t *testing.T) {
 	}
 
 	t1 := toolsRaw[1].(map[string]any)["function"].(map[string]any)
-	if name := t1["name"].(string); name != "multi_replace_file_content" {
-		t.Errorf("tools[1] name = %q, want multi_replace_file_content", name)
+	if name := t1["name"].(string); name != "ask_question" {
+		t.Errorf("tools[1] name = %q, want ask_question", name)
 	}
 }
 
@@ -401,8 +401,8 @@ func TestUncloakTablesInitialization(t *testing.T) {
 		t.Fatal("expected Bash")
 	}
 	// Codex
-	if defaultUncloakTables["codex"]["run_command"] != "shell_command" {
-		t.Fatal("expected shell_command")
+	if defaultUncloakTables["codex"]["run_command"] != "exec" {
+		t.Fatal("expected exec")
 	}
 	// Verify no key collision within a client's cloak table
 	for client, cloaks := range defaultCloakTables {
@@ -424,8 +424,8 @@ func TestDetectClient(t *testing.T) {
 	}{
 		{"claude code by askUserQuestion", []string{"Bash", "AskUserQuestion", "Read"}, "claude_code"},
 		{"claude code by signature trio", []string{"Bash", "Edit", "Read", "Write"}, "claude_code"},
-		{"codex by shell_command", []string{"shell_command", "apply_patch"}, "codex"},
-		{"codex by apply_patch only", []string{"apply_patch", "request_user_input"}, "codex"},
+		{"codex by exec and request_user_input", []string{"exec", "request_user_input"}, "codex"},
+		{"codex by subagent control tools", []string{"spawn_agent", "list_agents"}, "codex"},
 		// detectClient only matches original (cloak table key) names; Antigravity
 		// native tools are NOT keys, so detectClient returns "" for them.
 		{"antigravity tools return empty", []string{"ask_permission", "run_command"}, ""},
@@ -454,7 +454,13 @@ func TestDetectCloakedClient(t *testing.T) {
 		// All Claude Code cloak TARGETS present → detected as claude_code
 		{"cloaked claude code", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "list_dir", "invoke_subagent", "ask_question", "search_web", "call_mcp_tool", "schedule"}, "claude_code"},
 		// All Codex cloak TARGETS present → detected as codex
-		{"cloaked codex", []string{"run_command", "multi_replace_file_content", "ask_question", "generate_image", "manage_task", "search_web", "schedule", "send_message", "define_subagent", "list_resources", "list_permissions", "read_resource"}, "codex"},
+		{"cloaked codex", []string{"run_command", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"}, "codex"},
+		// A realistic cloaked Codex body mixes five cloak targets with pass-through
+		// names that no client table owns, so target-coverage detection cannot reach
+		// its 80% threshold. That is expected: response/stream uncloaking resolves
+		// the client from OriginalRequest tool names via buildUncloakTable, not from
+		// the target-coverage fallback.
+		{"cloaked codex with pass-throughs stays undetected", []string{"run_command", "wait", "request_user_input_async", "sleep", "send_message", "wait_agent", "interrupt_agent", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"}, ""},
 		// Both clients' targets present (native Antigravity) → returns ""
 		{"native antigravity superset", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "list_dir", "invoke_subagent", "ask_question", "search_web", "call_mcp_tool", "schedule", "multi_replace_file_content", "generate_image", "manage_task", "send_message", "define_subagent", "list_resources", "list_permissions", "read_resource", "ask_permission"}, ""},
 		// Too few targets → no match

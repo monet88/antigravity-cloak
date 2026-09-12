@@ -89,4 +89,4 @@
 ### 4. Verification
 - Historical client-side workaround: direct replay of the payload renamed to `<agent-conventions>` against `daily-cloudcode-pa.googleapis.com` returned 200 OK with streaming SSE response candidates.
 - Tested `omp/18.1.18` end-to-end with bash tool calling (`git status` and `echo 18.1.18`), executed and streamed successfully without 429.
-- Plugin-side `<conventions>` acceptance must be verified separately against the installed binary; unit and handler tests live in `system_conventions_test.go`.
+- Plugin-side `<conventions>` acceptance passed on 2026-09-12 with v0.5.1 at commit `5d35663`: two correlated requests returned HTTP 200, the original wrapper was absent upstream, and streamed `run_command` was restored to native OMP `bash`, which returned `5d35663`. See the [validated deployment evidence and repeatable runbook](docs/verification-checklist.md#validated-sanitization-deployment---2026-09-12). Unit and handler tests remain in `system_conventions_test.go`.

@@ -90,7 +90,7 @@ exact key string back to the client and tool names are case-sensitive.
 
 Supported clients:
 - `claude_code` (PascalCase: `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `ToolSearch`, `Skill`, `Workflow`)
-- `codex` (snake_case: `shell_command`, `apply_patch`, `request_user_input`, `view_image`, `update_plan`, `tool_search`, `get_goal`, `create_goal`, `update_goal`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`)
+- `codex` (snake_case: `exec`, `request_user_input`, `spawn_agent`, `followup_task`, `list_agents`. Intentional pass-through: `wait`, `request_user_input_async`, `sleep`, `send_message`, `wait_agent`, `interrupt_agent`. Legacy `shell_command`, `apply_patch`, `update_plan`, `tool_search`, goal and MCP-resource names are no longer `tools[]` entries; current Codex ships them inside the `exec` description.)
 - `oh_my_pi` (9-tool Safe Mapping Set: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Intentional pass-through: `todo`, `hub`, `eval`, `vibe_*`, and Autoresearch tools.)
 > Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 > Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
@@ -143,12 +143,12 @@ Key debug lines to grep:
 
 ## Build (.so for the running container = linux/amd64)
 
-CGO is required (buildmode=c-shared). Cross-compiling cgo from Windows to linux
-has no toolchain, so build inside a golang container:
-
-```powershell
-docker run --rm -v F:\CodeBase\antigravity-cloak:/src -w /src golang:1.26 sh -c "mkdir -p dist && CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -trimpath -buildmode=c-shared -ldflags '-s -w' -o dist/antigravity-cloak.so . && rm -f dist/antigravity-cloak.h"
-```
+CGO is required (buildmode=c-shared). For local Docker builds, follow
+[the clean build procedure](docs/verification-checklist.md#2-build-a-clean-linuxamd64-shared-library):
+pin the source commit, use a Go image compatible with the gateway's libc, build
+from a clean checkout inside the container, and verify embedded provenance and
+the artifact checksum. Do not substitute a floating-image host-bind build for
+that acceptance procedure.
 
 Local validation on Windows (gcc/mingw present, CGO works):
 
@@ -163,14 +163,19 @@ release zips + checksums.txt; version comes from the v* git tag.
 
 ## Local Docker deploy and OMP live acceptance
 
-Use **[docs/verification-checklist.md](docs/verification-checklist.md)** as the authoritative local deploy and real acceptance runbook.
+For per-tool acceptance of all nine OMP canonical mappings and optional
+pass-through tools, use [the OMP checklist](docs/verification-checklist-omp.md).
+Record real OMP execution and continuation; raw HTTP simulations alone do not
+establish client compatibility.
+
+Use **[docs/verification-checklist.md](docs/verification-checklist.md)** as the authoritative local deploy and real acceptance runbook. Read its ordered steps before building/installing a `.so`, recreating Compose, enabling debug, running the OMP profile, or cleaning up/rolling back a probe.
 
 Important invariants:
 - The **default OMP profile** (`C:\Users\monet\.omp\agent`) is the primary real-use path and must remain the first-class compatibility target. Its `cpa` provider carries `X-Cloak-Client: oh_my_pi`, which is the deterministic OMP identity signal. The current plugin is not yet fail-closed for every marked request failure mode; do not document or assume that guarantee until the corresponding implementation and live rejection tests ship.
 - The `cloak-live` OMP profile exists only for isolated local acceptance against the pre-provisioned `cli-proxy-api` Docker container and local gateway. Do not treat `cloak-live` as the production/default OMP configuration.
 - Discover the active Compose project, container, config mount, plugin mount, and log mount with `docker inspect`; never rely on an old hardcoded `F:\cliproxy` path or container name.
 - The Docker plugin artifact is Linux/amd64 `-buildmode=c-shared`; when testing a published release, use the release asset rather than silently rebuilding different source.
-- A loaded Go `.so` cannot be hot-swapped safely. Stop/recreate CLIProxyAPI before replacing an already-loaded binary.
+- A loaded Go `.so` cannot be hot-swapped safely. Stop CLIProxyAPI, replace the binary while stopped, then recreate and verify registration. Preserve the discovered config mount on every recreate, including cleanup and rollback.
 - `CPA_FILTER_DEBUG` is process environment state cached on first debug use; enabling or disabling it requires a container recreate.
 - Debug writes full request/response/stream bodies. Enable it only for a controlled acceptance run, then disable it and truncate the log.
 - The primary live acceptance gate is Oh My Pi (`omp`) against local CLIProxyAPI. Prove request cloak and streamed response uncloak at the OMP boundary; source/tests remain the oracle for protocol edge cases not exercised by that run.

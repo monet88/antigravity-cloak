@@ -55,18 +55,17 @@ These tools remain in the static OMP source identity inventory for source-side c
 - `Workflow` $\to$ `schedule`
 
 ##### 3. OpenAI Codex (`codex`)
-- `shell_command` $\to$ `run_command`
-- `apply_patch` $\to$ `multi_replace_file_content`
+
+Current Codex CLI wire surface (Responses API, verified 2026-09-12 against codex-cli 0.154.0). Namespaced tools (`collaboration.*`, `clock.sleep`) are keyed by base name:
+- `exec` $\to$ `run_command`
 - `request_user_input` $\to$ `ask_question`
-- `view_image` $\to$ `generate_image`
-- `update_plan` $\to$ `manage_task`
-- `tool_search` $\to$ `search_web`
-- `get_goal` $\to$ `schedule`
-- `create_goal` $\to$ `send_message`
-- `update_goal` $\to$ `define_subagent`
-- `list_mcp_resources` $\to$ `list_resources`
-- `list_mcp_resource_templates` $\to$ `list_permissions`
-- `read_mcp_resource` $\to$ `read_resource`
+- `spawn_agent` $\to$ `invoke_subagent`
+- `followup_task` $\to$ `manage_task`
+- `list_agents` $\to$ `manage_subagents`
+
+Intentional pass-through (no Antigravity-native counterpart, so a substitution would collide or invent a tool): `wait`, `request_user_input_async`, `sleep`, `send_message`, `wait_agent`, `interrupt_agent`.
+
+Legacy names removed from this table because current Codex no longer sends them as `tools[]` entries — they now live inside the `exec` description, where only text rewriting reaches them: `shell_command`, `apply_patch`, `update_plan`, `tool_search`, `get_goal`, `create_goal`, `update_goal`, `list_mcp_resources`, `list_mcp_resource_templates`, `read_mcp_resource`.
 
 
 ### 3. Activation Model & Explicit OMP Routing
