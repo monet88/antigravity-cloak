@@ -90,15 +90,16 @@ exact key string back to the client and tool names are case-sensitive.
 
 Supported clients:
 - `claude_code` (PascalCase: `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `ToolSearch`, `Skill`, `Workflow`)
-- `codex` (snake_case: `exec`, `request_user_input`, `spawn_agent`, `followup_task`, `list_agents`. Intentional pass-through: `wait`, `request_user_input_async`, `sleep`, `send_message`, `wait_agent`, `interrupt_agent`. Legacy `shell_command`, `apply_patch`, `update_plan`, `tool_search`, goal and MCP-resource names are no longer `tools[]` entries; current Codex ships them inside the `exec` description.)
+- `codex` (snake_case: `exec`, `web_search`, `request_user_input`, `collaboration__spawn_agent`, `collaboration__followup_task`, `collaboration__list_agents`.) Code mode is the default for every routed provider, and over opencodex's `openai-chat` adapter such a session declares exactly those names, with namespaced children flattened to `<namespace>__<child>`. Only names in a tool-name position are listed: helpers that exist solely as prose inside the `exec` description (`apply_patch`, `exec_command`, `write_stdin`, `view_image`, `tool_search`, the goal and MCP-resource tools) stay pass-through, because the reverse path restores a name only where it appears as a tool name. `exec` is the sole entry point and therefore owns `run_command`; a shell-mode session declares `exec_command` instead, which is absent because one target cannot carry two sources. Intentional pass-through: `wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message`. `shell_command` is a `shell_type` catalog label, not a tool name.
 - `oh_my_pi` (9-tool Safe Mapping Set: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Intentional pass-through: `todo`, `hub`, `eval`, `vibe_*`, and Autoresearch tools.)
 > Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 > Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
+> Which tool names a given Codex model actually sends, and the recommended mapping for the shell-mode surface, are recorded in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**.
 
 ### MCP tools behavior
 - **Oh My Pi (`oh_my_pi`)** mounts MCP servers under the virtual-device protocol (`xd://mcp__<server>_<tool>`) and invokes them through its standard `read`/`write` tools. Those core tools are already cloaked to `view_file`/`write_to_file`, so OMP MCP traffic is protected without a separate top-level mapping.
 - **Do not convert OMP virtual-device MCP calls into `call_mcp_tool`.** That would require additional payload/schema transformation and risks breaking streaming semantics.
-- **Top-level `mcp__*` tools** from clients that expose them directly remain pass-through traffic.
+- **Top-level `mcp__*` tools** from clients that expose them directly remain pass-through traffic. For Codex this is structural, not policy: a code-mode session does not declare them (`supports_search_tool: true` defers them, and the captured wire had no `mcp__*` among the declared names), AGY's bridge `call_mcp_tool` is one target for an open-ended family, and AGY identifies an MCP tool as a `(ServerName, ToolName)` pair carrying the server's own published name — `resolve-library-id` under `~/.gemini/antigravity-cli/mcp/` against `mcp__context7__resolve_library_id` on this wire. Masking one would need identity transformation plus argument rewriting; a rename cannot express it and the reverse could not undo it. See [the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md#why-mcp-stays-pass-through).
 ### Oh My Pi Routing & Lifecycle (Issue #25, #26, #27, #28)
 1. **ProtectedAGY Precedence**: Explicit OMP marker (`X-Cloak-Client: oh_my_pi` / `omp` / `oh-my-pi`) on `agy/*` routes bypasses generic `model_prefixes` and enforces fail-closed protection. The request must pass strict single-document JSON admission, declaration collision validation (comparing final base identities), and canonical validation. Any admission failure terminates with an exact HTTP 503 JSON error (`omp_cloak_required`) before upstream execution.
 2. **Request-Scoped Active Reverse**: Only canonical pairs whose source tool was actually declared and transformed in that request become active in the reverse map. Inactive canonical targets and native AGY target-only traffic are never reverse-cloaked.
@@ -139,7 +140,14 @@ Key debug lines to grep:
 - buildUncloakTable: toolNames=%v client=%s and cloakedClient=%s - detection.
   client= / cloakedClient=claude_code means detection worked; empty means it did
   not (e.g. sourceFormat or casing bug).
-- handleStreamChunkIntercept: changed=%t - uncloak applied to a stream chunk.
+- handleResponseIntercept: changed=%t Body=%s - non-streaming uncloak applied.
+  This is the only change-flag line. The STREAM path has none: it logs one entry
+  line per chunk (handleStreamChunkIntercept: ... Body=%s) plus session lifecycle
+  lines (StreamSessionManager: ...). Verify a streamed restore by reading the
+  chunk bodies, not by grepping for a change flag.
+- handleRequestInterceptBefore: ... marker={present:true ... client:codex ...} -
+  an explicit X-Cloak-Client marker arrived and resolved, which bypasses body
+  detection for that request.
 
 ## Build (.so for the running container = linux/amd64)
 

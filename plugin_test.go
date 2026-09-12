@@ -346,7 +346,9 @@ func TestResponseInterceptReversesClaudeCodeCloak(t *testing.T) {
 }
 
 func TestResponseInterceptReversesCodexCloak(t *testing.T) {
-	reqBody := `{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}}],"messages":[]}`
+	// A code-mode Codex request declared exec, so the upstream run_command target
+	// restores to that exact name.
+	reqBody := `{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"collaboration__list_agents"}}],"messages":[]}`
 	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
 
 	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
@@ -384,6 +386,228 @@ func TestResponseInterceptReversesCodexCloak(t *testing.T) {
 
 	if name != "exec" {
 		t.Fatalf("expected tool call function name to be 'exec', got %q", name)
+	}
+
+	// A shell-mode request declares exec_command instead, so run_command was never
+	// cloaked for it: the reverse must not hand that client a source name it never
+	// declared. The plugin envelope carries base64, so the guard has to run on the
+	// decoded body; an unchanged response means the envelope body is empty.
+	shellModeReq := `{"tools":[{"type":"function","function":{"name":"exec_command"}},{"type":"function","function":{"name":"request_user_input"}}],"messages":[]}`
+	shellModeRaw, shellModeCode := handlePluginCall("response.intercept_after", responseInterceptRequestJSON(t, shellModeReq, respBody, "openai"))
+	if shellModeCode != 0 {
+		t.Fatalf("code = %d; body=%s", shellModeCode, shellModeRaw)
+	}
+	var shellEnvelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, shellModeRaw, &shellEnvelope)
+	if !shellEnvelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+	shellBody := respBody
+	if shellEnvelope.Result.Body != "" {
+		decoded, err := base64.StdEncoding.DecodeString(shellEnvelope.Result.Body)
+		if err != nil {
+			t.Fatalf("decode base64: %v", err)
+		}
+		shellBody = string(decoded)
+	}
+	if strings.Contains(shellBody, "exec") {
+		t.Fatalf("shell-mode response must not gain the code-mode source name: %s", shellBody)
+	}
+}
+
+func TestResponseInterceptReversesCodexCloakForCorrelatedRequest(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	// A correlated response is the ordinary path: request.intercept_before caches
+	// the reverse resolution under RequestID, and the response interceptor reads
+	// it back. What the host republishes downstream is the EXECUTED request body,
+	// so both request snapshots carry cloak targets rather than source names.
+	const reqID = "codex-correlated-non-stream"
+	interceptRaw, err := json.Marshal(map[string]any{
+		"RequestID":      reqID,
+		"SourceFormat":   "openai",
+		"Model":          "antigravity/test",
+		"RequestedModel": "antigravity/test",
+		"Body":           []byte(`{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"collaboration__list_agents"}}],"messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal request intercept request: %v", err)
+	}
+	if raw, code := handlePluginCall("request.intercept_before", interceptRaw); code != 0 {
+		t.Fatalf("request intercept code = %d; body=%s", code, raw)
+	}
+
+	cloakedReq := `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"manage_subagents"}}],"messages":[]}`
+	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"manage_subagents","arguments":"{}"}}]}}]}`
+	request, err := json.Marshal(map[string]any{
+		"RequestID":       reqID,
+		"SourceFormat":    "openai",
+		"OriginalRequest": []byte(cloakedReq),
+		"RequestBody":     []byte(cloakedReq),
+		"Body":            []byte(respBody),
+	})
+	if err != nil {
+		t.Fatalf("marshal response intercept request: %v", err)
+	}
+
+	raw, code := handlePluginCall("response.intercept_after", request)
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+	if envelope.Result.Body == "" {
+		t.Fatalf("correlated codex response was not reversed: %s", raw)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+	if err != nil {
+		t.Fatalf("decode base64: %v", err)
+	}
+	body := string(decoded)
+	if !strings.Contains(body, `"name":"exec"`) || !strings.Contains(body, `"name":"collaboration__list_agents"`) {
+		t.Fatalf("declared codex sources were not restored: %s", body)
+	}
+	if strings.Contains(body, "run_command") || strings.Contains(body, "manage_subagents") {
+		t.Fatalf("cloaked target leaked downstream: %s", body)
+	}
+}
+
+func TestResponseInterceptLeavesNativeTargetAlone(t *testing.T) {
+	// A request that mixes Codex tools with a native AGY target it declares
+	// itself. The cloak renamed exec -> run_command and
+	// request_user_input -> ask_question, but search_web was never a table key,
+	// so the reverse must restore only the two renamed sources and hand
+	// search_web back untouched. Reading the target side of the table whenever it
+	// matches would rewrite the native name to web_search, which the client never
+	// declared.
+	reqBody := `{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}},{"type":"function","function":{"name":"search_web"}}],"messages":[]}`
+	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"search_web","arguments":"{}"}}]}}]}`
+
+	raw, code := handlePluginCall("response.intercept_after", responseInterceptRequestJSON(t, reqBody, respBody, "openai"))
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+	body := respBody
+	if envelope.Result.Body != "" {
+		decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+		if err != nil {
+			t.Fatalf("decode base64: %v", err)
+		}
+		body = string(decoded)
+	}
+
+	var resp map[string]any
+	mustUnmarshalJSON(t, []byte(body), &resp)
+	choices := resp["choices"].([]any)
+	message := choices[0].(map[string]any)["message"].(map[string]any)
+	names := map[string]bool{}
+	for _, tcRaw := range message["tool_calls"].([]any) {
+		fn := tcRaw.(map[string]any)["function"].(map[string]any)
+		names[fn["name"].(string)] = true
+	}
+	if !names["exec"] {
+		t.Fatalf("declared codex source was not restored: %s", body)
+	}
+	if !names["search_web"] || len(names) != 2 {
+		t.Fatalf("native AGY target was rewritten to a name the client never declared: %s", body)
+	}
+}
+
+func TestResponseInterceptLeavesNativeTargetAloneForCorrelatedRequest(t *testing.T) {
+	// The same mix on the correlated path, where what the response interceptor
+	// receives is the executed body: {run_command, ask_question, search_web}. That
+	// body carries no source name, so re-deriving the scope from it would read the
+	// targets and reverse the native search_web. The reverse the request
+	// interceptor derived from the raw body has to be reused instead.
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "codex-native-target-correlated"
+	interceptRaw, err := json.Marshal(map[string]any{
+		"RequestID":      reqID,
+		"SourceFormat":   "openai",
+		"Model":          "antigravity/test",
+		"RequestedModel": "antigravity/test",
+		"Body":           []byte(`{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}},{"type":"function","function":{"name":"search_web"}}],"messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal request intercept request: %v", err)
+	}
+	if raw, code := handlePluginCall("request.intercept_before", interceptRaw); code != 0 {
+		t.Fatalf("request intercept code = %d; body=%s", code, raw)
+	}
+
+	cloakedReq := `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"ask_question"}},{"type":"function","function":{"name":"search_web"}}],"messages":[]}`
+	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"search_web","arguments":"{}"}}]}}]}`
+	request, err := json.Marshal(map[string]any{
+		"RequestID":       reqID,
+		"SourceFormat":    "openai",
+		"OriginalRequest": []byte(cloakedReq),
+		"RequestBody":     []byte(cloakedReq),
+		"Body":            []byte(respBody),
+	})
+	if err != nil {
+		t.Fatalf("marshal response intercept request: %v", err)
+	}
+
+	raw, code := handlePluginCall("response.intercept_after", request)
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+	body := respBody
+	if envelope.Result.Body != "" {
+		decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+		if err != nil {
+			t.Fatalf("decode base64: %v", err)
+		}
+		body = string(decoded)
+	}
+
+	var resp map[string]any
+	mustUnmarshalJSON(t, []byte(body), &resp)
+	choices := resp["choices"].([]any)
+	message := choices[0].(map[string]any)["message"].(map[string]any)
+	names := map[string]bool{}
+	for _, tcRaw := range message["tool_calls"].([]any) {
+		fn := tcRaw.(map[string]any)["function"].(map[string]any)
+		names[fn["name"].(string)] = true
+	}
+	if !names["exec"] {
+		t.Fatalf("declared codex source was not restored: %s", body)
+	}
+	if !names["search_web"] || len(names) != 2 {
+		t.Fatalf("native AGY target was rewritten to a name the client never declared: %s", body)
 	}
 }
 

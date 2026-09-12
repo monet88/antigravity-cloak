@@ -1006,7 +1006,7 @@ func handleRequestInterceptBefore(request []byte) []byte {
 	debugLog("handleRequestInterceptBefore: rewritten=%t client=%s Body=%s", rewritten, client, string(body))
 	if req.RequestID != "" {
 		if client != "" {
-			cached := activeFilterConfig().uncloakRegexCache[client]
+			cached := requestScopedUncloakPattern(client, req.Body, format)
 			if cached != nil && cached.re != nil {
 				globalStreamManager.resetSession("req:"+req.RequestID, client, cached, requestChoiceCount(req.Body))
 			}
@@ -1073,17 +1073,25 @@ func handleResponseIntercept(request []byte) []byte {
 	var uncloakTable map[string]string
 	correlated := false
 	if req.RequestID != "" {
-		if c := globalStreamManager.getClient("req:" + req.RequestID); c != "" {
+		if sess := globalStreamManager.getSession("req:" + req.RequestID); sess != nil && sess.client != "" {
 			correlated = true
-			if c != negativeClientResolution {
-				client = c
-				uncloakTable = effectiveUncloakTable(c)
+			if sess.client != negativeClientResolution {
+				client = sess.client
+				// Reuse the reverse the request interceptor derived from the RAW
+				// client body. The executed body below no longer carries source
+				// names, so re-deriving the table from it cannot tell an AGY
+				// target the client declared natively from one the cloak created.
+				if sess.cached != nil && len(sess.cached.lookup) > 0 {
+					uncloakTable = sess.cached.lookup
+				} else {
+					uncloakTable = requestScopedUncloakTable(sess.client, detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+				}
 			}
 		}
 	}
 	if !correlated && uncloakTable == nil {
 		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
-			uncloakTable = effectiveUncloakTable(uaClient)
+			uncloakTable = requestScopedUncloakTable(uaClient, detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
 			if client == "" {
 				client = uaClient
 			}
@@ -1170,7 +1178,7 @@ func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]stri
 	client := detectClient(toolNames)
 	debugLog("buildUncloakTable: toolNames=%v client=%s", toolNames, client)
 	if client != "" {
-		return effectiveUncloakTable(client), client
+		return scopeUncloakTableToDeclaredNames(effectiveUncloakTable(client), client, toolNames), client
 	}
 
 	// Request body may already be cloaked — detect from cloak targets
@@ -1183,11 +1191,123 @@ func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]stri
 	return nil, ""
 }
 
-// detectionRequestBody returns the body used for client detection. The host
-// runs this plugin's request.intercept_before first, so RequestBody is already
-// cloaked by the time response/stream interceptors fire. OriginalRequest holds
-// the raw client body with original tool names, which the reliable detectClient
-// path keys on; fall back to RequestBody when OriginalRequest is unavailable.
+// requestsRequestScopedReverse reports whether a client's reverse table must be
+// narrowed to the names the current request actually declared. Codex is the
+// only such client: its tool surface is mode-dependent, so a shell-mode request
+// that declared "exec_command" would otherwise receive the code-mode "exec" back
+// in place of an upstream run_command target -- a tool name that client never
+// declared.
+func requestsRequestScopedReverse(client string) bool {
+	return client == "codex"
+}
+
+// scopeUncloakTableToDeclaredNames drops every reverse pair whose names the
+// request never declared, keeping the table when narrowing is not required or no
+// names could be read.
+//
+// Which side of a pair the declared names land on depends on when the body was
+// read. Request interception sees the raw client body, so its names are the
+// sources the cloak would rename; the response and stream interceptors are handed
+// the executed body, which the host only republishes after the rewrite, so its
+// names are the targets the rewrite produced.
+//
+// The source side decides whenever it matches anything: a source name in the
+// declared set proves the body is pre-cloak. Only a body carrying no source name
+// at all is read as executed, where the targets are the only evidence left of
+// which pairs the rewrite applied.
+//
+// An executed body cannot separate a target the client declared natively from one
+// the cloak produced, so a caller holding the raw body must scope from that
+// instead of re-deriving from the executed one: request interception scopes from
+// the raw body and stores the result on the stream session, which the response
+// path and the payload chunks reuse. The uncorrelated stream fallback has only
+// the executed body and accepts that ambiguity.
+func scopeUncloakTableToDeclaredNames(table map[string]string, client string, declared []string) map[string]string {
+	if !requestsRequestScopedReverse(client) || len(table) == 0 || len(declared) == 0 {
+		return table
+	}
+	declaredSet := make(map[string]bool, len(declared)*2)
+	for _, name := range declared {
+		declaredSet[name] = true
+		if _, base := splitToolNamespace(name); base != name {
+			declaredSet[base] = true
+		}
+	}
+	declaredIsSource := false
+	for _, src := range table {
+		if declaredSet[src] {
+			declaredIsSource = true
+			break
+		}
+	}
+	scoped := make(map[string]string, len(table))
+	for target, src := range table {
+		if declaredSet[src] || (!declaredIsSource && declaredSet[target]) {
+			scoped[target] = src
+		}
+	}
+	if len(scoped) == 0 {
+		return nil
+	}
+	return scoped
+}
+
+// declaredToolNames reads the tool names a request declared. An unreadable
+// body yields no names, which scopeUncloakTableToDeclaredNames treats as "do not
+// narrow" rather than "declared nothing".
+func declaredToolNames(requestBody []byte, sourceFormat string) []string {
+	var reqRoot map[string]any
+	if err := safeUnmarshal(requestBody, &reqRoot); err != nil {
+		return nil
+	}
+	return extractToolNames(reqRoot, sourceFormat)
+}
+
+// requestScopedUncloakPattern returns the client's precompiled stream pattern,
+// narrowed to the names the request declared when narrowing applies. The regex
+// is shared; only the lookup map is restricted, and a lookup miss leaves the
+// matched text untouched, so an undeclared target passes through unchanged.
+func requestScopedUncloakPattern(client string, requestBody []byte, sourceFormat string) *cachedUncloakPattern {
+	cached := activeFilterConfig().uncloakRegexCache[client]
+	if cached == nil || cached.re == nil {
+		return nil
+	}
+	scoped := scopeUncloakTableToDeclaredNames(cached.lookup, client, declaredToolNames(requestBody, sourceFormat))
+	if len(scoped) == 0 {
+		return nil
+	}
+	if sameLookup(scoped, cached.lookup) {
+		return cached
+	}
+	return &cachedUncloakPattern{re: cached.re, lookup: scoped, exactOnly: cached.exactOnly}
+}
+
+// requestScopedUncloakTable resolves a client's reverse table for one request,
+// narrowing it to the declared names when the client requires it.
+func requestScopedUncloakTable(client string, requestBody []byte, sourceFormat string) map[string]string {
+	return scopeUncloakTableToDeclaredNames(effectiveUncloakTable(client), client, declaredToolNames(requestBody, sourceFormat))
+}
+
+// sameLookup reports whether two reverse lookups hold the same pairs, letting the
+// scoped path reuse the shared precompiled pattern instead of allocating.
+func sameLookup(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if other, ok := b[k]; !ok || other != v {
+			return false
+		}
+	}
+	return true
+}
+
+// detectionRequestBody returns the body used for client detection. The host runs
+// this plugin's request.intercept_before first, and then republishes whatever
+// that returned: when the request was rewritten, both OriginalRequest and
+// RequestBody hold the executed (cloaked) body, so detection here reads cloak
+// TARGETS; when it was not, both hold the raw client body. Fall back to
+// RequestBody when OriginalRequest is unavailable.
 func detectionRequestBody(originalRequest, requestBody []byte) []byte {
 	if len(originalRequest) > 0 {
 		return originalRequest
@@ -2448,10 +2568,18 @@ func (m *streamSessionManager) ensureSession(key, client string, cached *cachedU
 	return sess
 }
 
-func (m *streamSessionManager) getClient(key string) string {
+// getSession returns the live session under key, or nil. Callers must treat the
+// returned session as read-only: client and cached are set before publication and
+// never rewritten, but the buffered tail and brand carries are mutated in place
+// by the stream path.
+func (m *streamSessionManager) getSession(key string) *streamSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if sess := m.sessions[key]; sess != nil {
+	return m.sessions[key]
+}
+
+func (m *streamSessionManager) getClient(key string) string {
+	if sess := m.getSession(key); sess != nil {
 		return sess.client
 	}
 	return ""
@@ -2526,7 +2654,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		n := requestChoiceCount(detectSrc)
 		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
 			debugLog("StreamSessionManager: header-init UA evidence key=%s client=%s", key, uaClient)
-			if cached := activeFilterConfig().uncloakRegexCache[uaClient]; cached != nil && cached.re != nil {
+			if cached := requestScopedUncloakPattern(uaClient, detectSrc, format); cached != nil && cached.re != nil {
 				m.resetSession(key, uaClient, cached, n)
 			}
 			return pluginapi.StreamChunkInterceptResponse{}
@@ -2534,7 +2662,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		_, client := buildUncloakTable(detectSrc, format)
 		debugLog("StreamSessionManager: header-init key=%s client=%s", key, client)
 		if client != "" {
-			cached := activeFilterConfig().uncloakRegexCache[client]
+			cached := requestScopedUncloakPattern(client, detectSrc, format)
 			if cached != nil && cached.re != nil {
 				m.resetSession(key, client, cached, n)
 			}
@@ -2754,7 +2882,7 @@ func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkI
 	src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
 	n := requestChoiceCount(src)
 	if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
-		if cached := activeFilterConfig().uncloakRegexCache[uaClient]; cached != nil && cached.re != nil {
+		if cached := requestScopedUncloakPattern(uaClient, src, format); cached != nil && cached.re != nil {
 			debugLog("StreamSessionManager: fallback UA evidence key=%s client=%s", key, uaClient)
 			return m.ensureSession(key, uaClient, cached, n)
 		}
@@ -2767,7 +2895,7 @@ func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkI
 	if client == "" {
 		return nil
 	}
-	cached := activeFilterConfig().uncloakRegexCache[client]
+	cached := requestScopedUncloakPattern(client, src, format)
 	if cached == nil || cached.re == nil {
 		return nil
 	}
@@ -3014,30 +3142,42 @@ var defaultCloakTables = map[string]map[string]string{
 		"ToolSearch": "search_web", "Skill": "call_mcp_tool", "Workflow": "schedule",
 	},
 	"codex": {
-		// Current Codex CLI wire surface (Responses API, verified 2026-09-12 on
-		// codex-cli 0.154.0): the freeform "exec" tool, the background "wait"
-		// poller, the user-input pair, and the namespaced "clock.sleep" /
-		// "collaboration.*" control tools. The historical names --
-		// "shell_command", "apply_patch", "update_plan", "tool_search", the goal
-		// tools and the MCP-resource tools -- are no longer tools[] entries:
-		// they now live inside the "exec" description, so only text rewriting
-		// reaches them and they are deliberately absent here.
+		// Code mode is the default for every routed provider here, so this table
+		// keys on what a code-mode session actually declares. The list below was
+		// read off this plugin's own debug log for a live cpa/agy session over
+		// opencodex's openai-chat adapter (2026-09-12), which delivers Chat
+		// Completions:
 		//
-		// Namespaced wire names are keyed by base name, matching
-		// splitToolNamespace and detectClient. Targets stay 1:1 within a client
-		// because defaultUncloakTables is built by inverting this map.
+		//   exec, wait, request_user_input, request_user_input_async,
+		//   clock__sleep, collaboration__followup_task,
+		//   collaboration__interrupt_agent, collaboration__list_agents,
+		//   collaboration__send_message, collaboration__spawn_agent,
+		//   collaboration__wait_agent, web_search
 		//
-		// Deliberate pass-through, because Antigravity has no native
-		// counterpart and a substitution would either collide with a target
-		// above or invent a tool that does not exist: "wait",
-		// "request_user_input_async", "sleep", "wait_agent", "interrupt_agent",
-		// and "send_message" (whose Antigravity name is already identical, so
-		// cloaking it would be a no-op).
-		"exec":               "run_command",
-		"request_user_input": "ask_question",
-		"spawn_agent":        "invoke_subagent",
-		"followup_task":      "manage_task",
-		"list_agents":        "manage_subagents",
+		// Namespaced children are keyed flattened, the way opencodex's
+		// namespacedToolName lowers them ("<namespace>__<child>") so they survive
+		// the chat-completions function-tool format. That exact spelling is what
+		// the request-scoped reverse matches a declared name against, so these
+		// pairs survive narrowing; a bare "spawn_agent" key would not.
+		//
+		// Only names that occupy a tool-name position are listed. The helpers that
+		// exist solely as prose inside the "exec" description -- apply_patch,
+		// exec_command, write_stdin, view_image, tool_search, the goal and
+		// MCP-resource tools -- stay pass-through deliberately: the reverse path
+		// restores a name only where it appears as a tool name, so cloaking prose
+		// would hand the client a helper it never declared.
+		//
+		// "exec" is the sole entry point and therefore owns run_command. A
+		// shell-mode session declares exec_command instead; it is absent because
+		// one target cannot carry two sources in the inverted reverse map, and
+		// this table serves the mode every routed provider on this workstation
+		// runs.
+		"exec":                         "run_command",
+		"web_search":                   "search_web",
+		"request_user_input":           "ask_question",
+		"collaboration__spawn_agent":   "invoke_subagent",
+		"collaboration__followup_task": "manage_task",
+		"collaboration__list_agents":   "manage_subagents",
 	},
 	"oh_my_pi": {
 		"read":       "view_file",
@@ -3092,6 +3232,49 @@ var ompSourceIdentityInventory = map[string]bool{
 	"run_experiment":  true,
 	"log_experiment":  true,
 	"update_notes":    true,
+}
+
+// codexSourceIdentityInventory contains the static Codex source tool names used
+// for request body detection in detectClient. It spans BOTH tool modes so that
+// detection survives the mode switch described on defaultCloakTables["codex"]:
+// shell mode contributes exec_command, write_stdin, apply_patch and view_image,
+// code mode contributes the freeform exec, web_search and the collaboration
+// children.
+//
+// The collaboration entries are listed BOTH bare and in opencodex's flattened
+// "<namespace>__<child>" spelling, because that flattened form is what actually
+// reaches this plugin over the openai-chat adapter; a bare-only inventory would
+// score a real code-mode request one hit short of minToolNameHits whenever it
+// declares exec plus namespace children and nothing else.
+//
+// Names generic enough to belong to any harness ("wait", "sleep",
+// "send_message") are deliberately absent, and this inventory may exceed the
+// rename table because detection and renaming are separate concerns -- the same
+// way ompSourceIdentityInventory exceeds the OMP Safe Mapping Set. Every source
+// the rename table carries is listed here as well, so this set describes the
+// whole Codex declaration surface rather than only the names detection needs:
+// detectClient counts the runtime rename table alongside it, so a source listed
+// in only one of the two still contributes one hit.
+var codexSourceIdentityInventory = map[string]bool{
+	"exec":                           true,
+	"exec_command":                   true,
+	"write_stdin":                    true,
+	"apply_patch":                    true,
+	"view_image":                     true,
+	"web_search":                     true,
+	"request_user_input":             true,
+	"request_user_input_async":       true,
+	"spawn_agent":                    true,
+	"followup_task":                  true,
+	"list_agents":                    true,
+	"wait_agent":                     true,
+	"interrupt_agent":                true,
+	"collaboration__spawn_agent":     true,
+	"collaboration__followup_task":   true,
+	"collaboration__list_agents":     true,
+	"collaboration__wait_agent":      true,
+	"collaboration__interrupt_agent": true,
+	"collaboration__send_message":    true,
 }
 
 // ompCloakedTargetIdentityInventory contains the nine canonical AGY-facing
@@ -4652,6 +4835,19 @@ func extractToolNames(body map[string]any, sourceFormat string) []string {
 	return names
 }
 
+// sourceIdentityInventoryFor returns the static source identity inventory for a
+// client, or nil when the client is detected from its runtime rename table.
+func sourceIdentityInventoryFor(client string) map[string]bool {
+	switch client {
+	case "oh_my_pi":
+		return ompSourceIdentityInventory
+	case "codex":
+		return codexSourceIdentityInventory
+	default:
+		return nil
+	}
+}
+
 // detectClient identifies the client from ORIGINAL (uncloaked) tool names.
 // It checks candidate source tool names against the provided tool name list.
 // For oh_my_pi, detection keys off the static ompSourceIdentityInventory and
@@ -4681,10 +4877,27 @@ func detectClient(toolNames []string) string {
 
 	for _, client := range clients {
 		count := 0
-		if client == "oh_my_pi" {
-			for orig := range ompSourceIdentityInventory {
+		// Clients with a static source identity inventory count against it
+		// rather than against their runtime rename table: the two differ, and
+		// Codex declares one surface or the other depending on the model's
+		// tool mode, so a table-only count would drop whichever mode the
+		// table does not key on.
+		if inventory := sourceIdentityInventoryFor(client); inventory != nil {
+			for orig := range inventory {
 				if nameSet[orig] {
 					count++
+				}
+			}
+			// An operator can add source names to a client's rename table
+			// through tool_mappings, and a static inventory cannot know them,
+			// so those keys are counted here as well. OMP is exempt: its
+			// attribution must stay on the canonical inventory and never take
+			// arbitrary configured names.
+			if client != "oh_my_pi" {
+				for orig := range cfg.ToolMappings[client] {
+					if !inventory[orig] && nameSet[orig] {
+						count++
+					}
 				}
 			}
 		} else {

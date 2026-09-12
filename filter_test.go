@@ -400,9 +400,17 @@ func TestUncloakTablesInitialization(t *testing.T) {
 	if defaultUncloakTables["claude_code"]["run_command"] != "Bash" {
 		t.Fatal("expected Bash")
 	}
-	// Codex
+	// Codex keys on the code-mode surface: "exec" owns run_command, and the
+	// collaboration children are keyed in opencodex's flattened "__" spelling
+	// (see defaultCloakTables).
 	if defaultUncloakTables["codex"]["run_command"] != "exec" {
 		t.Fatal("expected exec")
+	}
+	if defaultUncloakTables["codex"]["manage_subagents"] != "collaboration__list_agents" {
+		t.Fatal("expected collaboration__list_agents")
+	}
+	if defaultUncloakTables["codex"]["search_web"] != "web_search" {
+		t.Fatal("expected web_search")
 	}
 	// Verify no key collision within a client's cloak table
 	for client, cloaks := range defaultCloakTables {
@@ -425,7 +433,13 @@ func TestDetectClient(t *testing.T) {
 		{"claude code by askUserQuestion", []string{"Bash", "AskUserQuestion", "Read"}, "claude_code"},
 		{"claude code by signature trio", []string{"Bash", "Edit", "Read", "Write"}, "claude_code"},
 		{"codex by exec and request_user_input", []string{"exec", "request_user_input"}, "codex"},
+		{"codex by exec and web_search", []string{"exec", "web_search"}, "codex"},
 		{"codex by subagent control tools", []string{"spawn_agent", "list_agents"}, "codex"},
+		// Shell-mode Codex declares exec_command/view_image instead of exec.
+		{"codex shell mode by exec_command and view_image", []string{"exec_command", "view_image"}, "codex"},
+		{"codex shell mode by exec_command and request_user_input", []string{"exec_command", "request_user_input"}, "codex"},
+		// minToolNameHits still floors every client at two source-name hits.
+		{"single codex signature below threshold", []string{"exec_command", "custom_tool"}, ""},
 		// detectClient only matches original (cloak table key) names; Antigravity
 		// native tools are NOT keys, so detectClient returns "" for them.
 		{"antigravity tools return empty", []string{"ask_permission", "run_command"}, ""},
@@ -445,6 +459,25 @@ func TestDetectClient(t *testing.T) {
 	}
 }
 
+func TestDetectClientCountsConfiguredCodexSourceKeys(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
+tool_mappings:
+  codex:
+    custom_wire_a: run_command
+    custom_wire_b: manage_task
+`)))
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; body=%s", code, raw)
+	}
+	// Codex counts against its static inventory, which cannot know an
+	// operator-added source name, so the configured rename table has to be
+	// counted as well or the custom mapping is undetectable.
+	if got := detectClient([]string{"custom_wire_a", "custom_wire_b"}); got != "codex" {
+		t.Fatalf("detectClient() = %q, want codex for configured codex sources", got)
+	}
+}
+
 func TestDetectCloakedClient(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -454,7 +487,7 @@ func TestDetectCloakedClient(t *testing.T) {
 		// All Claude Code cloak TARGETS present → detected as claude_code
 		{"cloaked claude code", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "list_dir", "invoke_subagent", "ask_question", "search_web", "call_mcp_tool", "schedule"}, "claude_code"},
 		// All Codex cloak TARGETS present → detected as codex
-		{"cloaked codex", []string{"run_command", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"}, "codex"},
+		{"cloaked codex", []string{"run_command", "search_web", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"}, "codex"},
 		// A realistic cloaked Codex body mixes five cloak targets with pass-through
 		// names that no client table owns, so target-coverage detection cannot reach
 		// its 80% threshold. That is expected: response/stream uncloaking resolves
@@ -698,6 +731,67 @@ func TestBuildUncloakTableWithCloakedRequest(t *testing.T) {
 	}
 	if uncloakTable["invoke_subagent"] != "Agent" {
 		t.Fatalf("expected invoke_subagent → Agent, got %q", uncloakTable["invoke_subagent"])
+	}
+}
+
+func TestCodexCodeModeCloakRoundTrip(t *testing.T) {
+	// A code-mode Codex session declares one freeform "exec" entry point plus
+	// the collaboration children, which opencodex flattens to "<ns>__<child>"
+	// for the chat-completions function-tool format. The request side renames
+	// them to AGY names and the reverse must restore those exact spellings.
+	body := []byte(`{
+			"tools":[
+				{"type":"function","function":{"name":"exec"}},
+				{"type":"function","function":{"name":"web_search"}},
+				{"type":"function","function":{"name":"request_user_input"}},
+				{"type":"function","function":{"name":"collaboration__spawn_agent"}},
+				{"type":"function","function":{"name":"collaboration__followup_task"}},
+				{"type":"function","function":{"name":"collaboration__list_agents"}}
+			],
+			"messages":[]
+		}`)
+	rewritten, changed, client := rewriteRequestBodyWithClient(body, "openai", "codex")
+	if !changed || client != "codex" {
+		t.Fatalf("rewrite = changed:%v client:%q, want true/codex", changed, client)
+	}
+	got := string(rewritten)
+	for _, want := range []string{"run_command", "search_web", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"} {
+		if !strings.Contains(got, `"`+want+`"`) {
+			t.Fatalf("expected cloaked target %q in %s", want, got)
+		}
+	}
+	for _, unwanted := range []string{"web_search", "request_user_input", "collaboration__spawn_agent", "collaboration__followup_task", "collaboration__list_agents"} {
+		if strings.Contains(got, unwanted) {
+			t.Fatalf("source name %q survived cloaking: %s", unwanted, got)
+		}
+	}
+
+	uncloakTable, uncloakClient := buildUncloakTable(body, "openai")
+	if uncloakClient != "codex" {
+		t.Fatalf("buildUncloakTable client = %q, want codex", uncloakClient)
+	}
+	if uncloakTable["run_command"] != "exec" || uncloakTable["manage_subagents"] != "collaboration__list_agents" {
+		t.Fatalf("uncloak table = %v, want run_command->exec and manage_subagents->collaboration__list_agents", uncloakTable)
+	}
+}
+
+func TestCodexTableKeepsTargetsUnique(t *testing.T) {
+	// Only one source may own run_command: defaultUncloakTables is its exact
+	// inverse, so a duplicate target would restore whichever source name the
+	// inversion happened to keep and hand the client a tool it never declared.
+	table := copyToolMappings(defaultCloakTables)["codex"]
+	if _, ok := table["exec"]; !ok {
+		t.Fatal("codex table must map exec; it is the sole code-mode entry point")
+	}
+	if _, ok := table["exec_command"]; ok {
+		t.Fatal("codex table must not map exec_command; run_command already has an owner")
+	}
+	seen := map[string]string{}
+	for src, target := range table {
+		if prev, dup := seen[target]; dup {
+			t.Fatalf("duplicate target %q shared by %q and %q", target, prev, src)
+		}
+		seen[target] = src
 	}
 }
 
@@ -995,6 +1089,37 @@ func TestSessionKeyFallsBackToBodyHash(t *testing.T) {
 	bodyless := &pluginapi.StreamChunkInterceptRequest{ChunkIndex: 0}
 	if key := m.sessionKey(bodyless); key != "" {
 		t.Fatalf("expected no key for a schema >= 3 payload chunk without identifiers, got %q", key)
+	}
+}
+
+// cloakedCodexRequest is the executed (post-cloak) form of a code-mode Codex
+// request: every declared Codex source name already replaced by its AGY target.
+// That is the body the host republishes downstream, because it only records the
+// executed payload after request.intercept_before rewrote it.
+const cloakedCodexRequest = `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"search_web"}},{"type":"function","function":{"name":"ask_question"}},{"type":"function","function":{"name":"invoke_subagent"}},{"type":"function","function":{"name":"manage_task"}},{"type":"function","function":{"name":"manage_subagents"}}],"messages":[]}`
+
+func TestStreamFallbackUncloaksAlreadyCloakedCodexStream(t *testing.T) {
+	// Schema < 3 repeats the request body on every payload chunk, and that body
+	// is already cloaked by the time the stream interceptor sees it. Detection
+	// therefore reads cloak TARGETS, and the reverse must still resolve from
+	// them instead of narrowing the table down to nothing.
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	chunkBody := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
+
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(cloakedCodexRequest),
+		RequestBody:     []byte(cloakedCodexRequest),
+		ChunkIndex:      0,
+		Body:            []byte(chunkBody),
+	}, "openai")
+
+	if !strings.Contains(string(resp.Body), `"name":"exec"`) {
+		t.Fatalf("already-cloaked codex stream was not reversed: %q", string(resp.Body))
+	}
+	if strings.Contains(string(resp.Body), "run_command") {
+		t.Fatalf("cloaked name leaked downstream: %q", string(resp.Body))
 	}
 }
 
