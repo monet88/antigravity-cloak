@@ -485,6 +485,57 @@ func TestResponseInterceptReversesCodexCloakForCorrelatedRequest(t *testing.T) {
 	}
 }
 
+func TestResponseInterceptLeavesNativeTargetAlone(t *testing.T) {
+	// A request that mixes Codex tools with a native AGY target it declares
+	// itself. The cloak renamed exec -> run_command and
+	// request_user_input -> ask_question, but search_web was never a table key,
+	// so the reverse must restore only the two renamed sources and hand
+	// search_web back untouched. Reading the target side of the table whenever it
+	// matches would rewrite the native name to web_search, which the client never
+	// declared.
+	reqBody := `{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}},{"type":"function","function":{"name":"search_web"}}],"messages":[]}`
+	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"search_web","arguments":"{}"}}]}}]}`
+
+	raw, code := handlePluginCall("response.intercept_after", responseInterceptRequestJSON(t, reqBody, respBody, "openai"))
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+	body := respBody
+	if envelope.Result.Body != "" {
+		decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+		if err != nil {
+			t.Fatalf("decode base64: %v", err)
+		}
+		body = string(decoded)
+	}
+
+	var resp map[string]any
+	mustUnmarshalJSON(t, []byte(body), &resp)
+	choices := resp["choices"].([]any)
+	message := choices[0].(map[string]any)["message"].(map[string]any)
+	names := map[string]bool{}
+	for _, tcRaw := range message["tool_calls"].([]any) {
+		fn := tcRaw.(map[string]any)["function"].(map[string]any)
+		names[fn["name"].(string)] = true
+	}
+	if !names["exec"] {
+		t.Fatalf("declared codex source was not restored: %s", body)
+	}
+	if !names["search_web"] || len(names) != 2 {
+		t.Fatalf("native AGY target was rewritten to a name the client never declared: %s", body)
+	}
+}
+
 func TestResponseInterceptDoesNotCorruptProse(t *testing.T) {
 	// Verify that "run_command" appearing in assistant text is NOT replaced
 	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`

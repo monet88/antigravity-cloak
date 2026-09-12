@@ -1193,16 +1193,22 @@ func requestsRequestScopedReverse(client string) bool {
 	return client == "codex"
 }
 
-// scopeUncloakTableToDeclaredNames drops every reverse pair whose source AND
-// target the request never declared, keeping the table when narrowing is not
-// required or no names could be read.
+// scopeUncloakTableToDeclaredNames drops every reverse pair whose names the
+// request never declared, keeping the table when narrowing is not required or no
+// names could be read.
 //
 // Which side of a pair the declared names land on depends on when the body was
-// read. Request interception sees the raw client body, so its names are sources;
-// the response and stream interceptors are handed the executed body, which the
-// host only republishes after the cloak rewrite, so its names are targets.
-// Matching either side keeps both paths resolving, and a pair whose two names
-// the request never mentioned is still dropped.
+// read. Request interception sees the raw client body, so its names are the
+// sources the cloak would rename; the response and stream interceptors are handed
+// the executed body, which the host only republishes after the rewrite, so its
+// names are the targets the rewrite produced.
+//
+// The source side decides whenever it matches anything, because a source name in
+// the declared set proves the body is pre-cloak. Only a body carrying no source
+// name at all is read as executed, where the targets are the only evidence left
+// of which pairs were applied. That ordering is what keeps a target name the
+// client declared natively -- a request mixing Codex tools with an AGY tool --
+// from being handed back as a Codex source it never declared.
 func scopeUncloakTableToDeclaredNames(table map[string]string, client string, declared []string) map[string]string {
 	if !requestsRequestScopedReverse(client) || len(table) == 0 || len(declared) == 0 {
 		return table
@@ -1214,9 +1220,16 @@ func scopeUncloakTableToDeclaredNames(table map[string]string, client string, de
 			declaredSet[base] = true
 		}
 	}
+	declaredIsSource := false
+	for _, src := range table {
+		if declaredSet[src] {
+			declaredIsSource = true
+			break
+		}
+	}
 	scoped := make(map[string]string, len(table))
 	for target, src := range table {
-		if declaredSet[src] || declaredSet[target] {
+		if declaredSet[src] || (!declaredIsSource && declaredSet[target]) {
 			scoped[target] = src
 		}
 	}
@@ -3216,9 +3229,11 @@ var ompSourceIdentityInventory = map[string]bool{
 // Names generic enough to belong to any harness ("wait", "sleep",
 // "send_message") are deliberately absent, and this inventory may exceed the
 // rename table because detection and renaming are separate concerns -- the same
-// way ompSourceIdentityInventory exceeds the OMP Safe Mapping Set. It may not
-// FALL SHORT of the rename table, though: every source name the table renames
-// has to contribute a hit here.
+// way ompSourceIdentityInventory exceeds the OMP Safe Mapping Set. Every source
+// the rename table carries is listed here as well, so this set describes the
+// whole Codex declaration surface rather than only the names detection needs:
+// detectClient counts the runtime rename table alongside it, so a source listed
+// in only one of the two still contributes one hit.
 var codexSourceIdentityInventory = map[string]bool{
 	"exec":                           true,
 	"exec_command":                   true,

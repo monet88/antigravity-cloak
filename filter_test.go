@@ -424,19 +424,6 @@ func TestUncloakTablesInitialization(t *testing.T) {
 	}
 }
 
-func TestCodexSourceInventoryCoversRenameTable(t *testing.T) {
-	// detectClient counts Codex against the static inventory, so a source name
-	// the rename table cloaks but the inventory does not carry contributes no
-	// hit. A request declaring only such names then falls below
-	// minToolNameHits and is never cloaked, silently leaking the client's own
-	// tool names upstream.
-	for src := range defaultCloakTables["codex"] {
-		if !codexSourceIdentityInventory[src] {
-			t.Fatalf("codex rename-table source %q is missing from codexSourceIdentityInventory", src)
-		}
-	}
-}
-
 func TestDetectClient(t *testing.T) {
 	tests := []struct {
 		name       string
