@@ -418,7 +418,7 @@ Names that historical cloak tables still carry, with their status on the current
 
 ## Cloak implications
 
-The readers understand Chat Completions only: `extractToolNames` (`main.go:4758`) and `cloakToolNames` (`main.go:3943`) read `tools[].function.name`. A synthetic probe on 2026-09-12 (throwaway test file, removed after the run) fed them four shapes:
+The readers understand Chat Completions only: `extractToolNames` (`main.go:4779`) and `cloakToolNames` (`main.go:3964`) read `tools[].function.name`. A synthetic probe on 2026-09-12 (throwaway test file, removed after the run) fed them four shapes:
 
 ```
 PROBE chat-completions   toolNames=[exec request_user_input] detectClient="codex"
@@ -431,9 +431,9 @@ PROBE responses-history  toolNames=[]                        detectClient=""
 | --- | --- | --- |
 | `tools[].function.name` | `extractToolNames`, `cloakToolNames` | Yes. This is what this workstation's path delivers. |
 | `messages[].tool_calls[].function.name` | `extractToolNames`, `cloakToolNames` | Yes, for history. Responses history is `input[]`. |
-| response JSON `message.tool_calls[].function.name`, `delta.tool_calls[].function.name` | `uncloakJSONNodeOpt` (`main.go:2922`) | Yes. Responses output items carry a flat `name` instead. |
-| any `"name":"<target>"` in a stream chunk | stream uncloak regex (`main.go:3440`) | Yes, and shape-agnostic. |
-| request text bodies | `replaceToolNamesInText` (`main.go:4406`), unambiguous-name rule (`main.go:4657`) | Yes, once a client is resolved. |
+| response JSON `message.tool_calls[].function.name`, `delta.tool_calls[].function.name` | `uncloakJSONNodeOpt` (`main.go:2943`) | Yes. Responses output items carry a flat `name` instead. |
+| any `"name":"<target>"` in a stream chunk | stream uncloak regex (`main.go:3461`) | Yes, and shape-agnostic. |
+| request text bodies | `replaceToolNamesInText` (`main.go:4427`), unambiguous-name rule (`main.go:4678`) | Yes, once a client is resolved. |
 
 **The Responses rows are not this workstation's constraint.** Codex reaches the plugin through opencodex's `openai-chat` adapter, which lowers the request to Chat Completions before CLIProxyAPI sees it, so the first row applies. Verified live: `SourceFormat=openai`, the declared names extracted out of `tools[]`, and the table applied. The Responses rows stay relevant only for a deployment where a Codex client speaks Responses to CLIProxyAPI directly.
 
@@ -478,7 +478,7 @@ Counting the table alone would drop detection for whichever mode the table does 
 
 Identity has two independent paths, both observed live against the same table: a validated `X-Cloak-Client: codex` header (deterministic, skips detection, consumed and cleared before forwarding) and body detection. The header must not be turned into a mode switch — the reasoning and the rejected per-mode header design are in [ADR 0004](../adr/0004-cloak-codex-tool-names-by-wire-position.md).
 
-The request-scoped reverse stays Codex-only. It is what allows the table to key on one mode at a time: a shell-mode request declaring `exec_command` never sees a `run_command` restored to `exec`. Narrowing reads the source side of a pair first, and only a body declaring no source name at all is read as executed, where the targets are the evidence of what was applied. It has to accept both because the two sides arrive in different bodies: request interception reads the raw client body (source names), while the response and stream interceptors are handed the executed body, which the host only republishes after the cloak rewrite (target names). Source-only dropped the entire reverse on executed bodies; target-whenever-it-matches handed a natively declared AGY name back as a Codex source the client never declared.
+The request-scoped reverse stays Codex-only. It is what allows the table to key on one mode at a time: a shell-mode request declaring `exec_command` never sees a `run_command` restored to `exec`. Narrowing reads the source side of a pair first, and reads the target side only for a body declaring no source name at all, which is all the evidence an executed body carries. Anyone still holding the raw body scopes from it and caches the result — request interception stores the scope on the stream session, reused by the response path and the payload chunks — because an executed body cannot separate a target the client declared natively from one the rewrite produced. Source-only dropped the entire reverse on executed bodies; target-whenever-it-matched handed a natively declared AGY name back as a Codex source the client never declared. The uncorrelated stream fallback has only the executed body, so it reads the target side and accepts that ambiguity.
 
 
 ## Next session: ask the model itself

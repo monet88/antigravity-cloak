@@ -536,6 +536,81 @@ func TestResponseInterceptLeavesNativeTargetAlone(t *testing.T) {
 	}
 }
 
+func TestResponseInterceptLeavesNativeTargetAloneForCorrelatedRequest(t *testing.T) {
+	// The same mix on the correlated path, where what the response interceptor
+	// receives is the executed body: {run_command, ask_question, search_web}. That
+	// body carries no source name, so re-deriving the scope from it would read the
+	// targets and reverse the native search_web. The reverse the request
+	// interceptor derived from the raw body has to be reused instead.
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "codex-native-target-correlated"
+	interceptRaw, err := json.Marshal(map[string]any{
+		"RequestID":      reqID,
+		"SourceFormat":   "openai",
+		"Model":          "antigravity/test",
+		"RequestedModel": "antigravity/test",
+		"Body":           []byte(`{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}},{"type":"function","function":{"name":"search_web"}}],"messages":[]}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal request intercept request: %v", err)
+	}
+	if raw, code := handlePluginCall("request.intercept_before", interceptRaw); code != 0 {
+		t.Fatalf("request intercept code = %d; body=%s", code, raw)
+	}
+
+	cloakedReq := `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"ask_question"}},{"type":"function","function":{"name":"search_web"}}],"messages":[]}`
+	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"search_web","arguments":"{}"}}]}}]}`
+	request, err := json.Marshal(map[string]any{
+		"RequestID":       reqID,
+		"SourceFormat":    "openai",
+		"OriginalRequest": []byte(cloakedReq),
+		"RequestBody":     []byte(cloakedReq),
+		"Body":            []byte(respBody),
+	})
+	if err != nil {
+		t.Fatalf("marshal response intercept request: %v", err)
+	}
+
+	raw, code := handlePluginCall("response.intercept_after", request)
+	if code != 0 {
+		t.Fatalf("code = %d; body=%s", code, raw)
+	}
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Body string `json:"Body"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("envelope not OK")
+	}
+	body := respBody
+	if envelope.Result.Body != "" {
+		decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+		if err != nil {
+			t.Fatalf("decode base64: %v", err)
+		}
+		body = string(decoded)
+	}
+
+	var resp map[string]any
+	mustUnmarshalJSON(t, []byte(body), &resp)
+	choices := resp["choices"].([]any)
+	message := choices[0].(map[string]any)["message"].(map[string]any)
+	names := map[string]bool{}
+	for _, tcRaw := range message["tool_calls"].([]any) {
+		fn := tcRaw.(map[string]any)["function"].(map[string]any)
+		names[fn["name"].(string)] = true
+	}
+	if !names["exec"] {
+		t.Fatalf("declared codex source was not restored: %s", body)
+	}
+	if !names["search_web"] || len(names) != 2 {
+		t.Fatalf("native AGY target was rewritten to a name the client never declared: %s", body)
+	}
+}
+
 func TestResponseInterceptDoesNotCorruptProse(t *testing.T) {
 	// Verify that "run_command" appearing in assistant text is NOT replaced
 	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`

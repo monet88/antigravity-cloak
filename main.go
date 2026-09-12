@@ -1073,11 +1073,19 @@ func handleResponseIntercept(request []byte) []byte {
 	var uncloakTable map[string]string
 	correlated := false
 	if req.RequestID != "" {
-		if c := globalStreamManager.getClient("req:" + req.RequestID); c != "" {
+		if sess := globalStreamManager.getSession("req:" + req.RequestID); sess != nil && sess.client != "" {
 			correlated = true
-			if c != negativeClientResolution {
-				client = c
-				uncloakTable = requestScopedUncloakTable(c, detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+			if sess.client != negativeClientResolution {
+				client = sess.client
+				// Reuse the reverse the request interceptor derived from the RAW
+				// client body. The executed body below no longer carries source
+				// names, so re-deriving the table from it cannot tell an AGY
+				// target the client declared natively from one the cloak created.
+				if sess.cached != nil && len(sess.cached.lookup) > 0 {
+					uncloakTable = sess.cached.lookup
+				} else {
+					uncloakTable = requestScopedUncloakTable(sess.client, detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
+				}
 			}
 		}
 	}
@@ -1203,12 +1211,17 @@ func requestsRequestScopedReverse(client string) bool {
 // the executed body, which the host only republishes after the rewrite, so its
 // names are the targets the rewrite produced.
 //
-// The source side decides whenever it matches anything, because a source name in
-// the declared set proves the body is pre-cloak. Only a body carrying no source
-// name at all is read as executed, where the targets are the only evidence left
-// of which pairs were applied. That ordering is what keeps a target name the
-// client declared natively -- a request mixing Codex tools with an AGY tool --
-// from being handed back as a Codex source it never declared.
+// The source side decides whenever it matches anything: a source name in the
+// declared set proves the body is pre-cloak. Only a body carrying no source name
+// at all is read as executed, where the targets are the only evidence left of
+// which pairs the rewrite applied.
+//
+// An executed body cannot separate a target the client declared natively from one
+// the cloak produced, so a caller holding the raw body must scope from that
+// instead of re-deriving from the executed one: request interception scopes from
+// the raw body and stores the result on the stream session, which the response
+// path and the payload chunks reuse. The uncorrelated stream fallback has only
+// the executed body and accepts that ambiguity.
 func scopeUncloakTableToDeclaredNames(table map[string]string, client string, declared []string) map[string]string {
 	if !requestsRequestScopedReverse(client) || len(table) == 0 || len(declared) == 0 {
 		return table
@@ -2555,10 +2568,18 @@ func (m *streamSessionManager) ensureSession(key, client string, cached *cachedU
 	return sess
 }
 
-func (m *streamSessionManager) getClient(key string) string {
+// getSession returns the live session under key, or nil. Callers must treat the
+// returned session as read-only: client and cached are set before publication and
+// never rewritten, but the buffered tail and brand carries are mutated in place
+// by the stream path.
+func (m *streamSessionManager) getSession(key string) *streamSession {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if sess := m.sessions[key]; sess != nil {
+	return m.sessions[key]
+}
+
+func (m *streamSessionManager) getClient(key string) string {
+	if sess := m.getSession(key); sess != nil {
 		return sess.client
 	}
 	return ""
