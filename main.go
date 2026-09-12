@@ -1170,7 +1170,7 @@ func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]stri
 	client := detectClient(toolNames)
 	debugLog("buildUncloakTable: toolNames=%v client=%s", toolNames, client)
 	if client != "" {
-		return scopeUncloakTableToDeclaredSources(effectiveUncloakTable(client), client, toolNames), client
+		return scopeUncloakTableToDeclaredNames(effectiveUncloakTable(client), client, toolNames), client
 	}
 
 	// Request body may already be cloaked — detect from cloak targets
@@ -1184,20 +1184,26 @@ func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]stri
 }
 
 // requestsRequestScopedReverse reports whether a client's reverse table must be
-// narrowed to the source names the current request actually declared. Codex is
-// the only such client: its tool surface is mode-dependent, and the table keys
-// on the shell-mode names, so a code-mode session that declared "exec" would
-// otherwise receive the shell-mode exec_command back in place of an upstream
-// run_command target -- a tool name that client never declared.
+// narrowed to the names the current request actually declared. Codex is the
+// only such client: its tool surface is mode-dependent, so a shell-mode request
+// that declared "exec_command" would otherwise receive the code-mode "exec" back
+// in place of an upstream run_command target -- a tool name that client never
+// declared.
 func requestsRequestScopedReverse(client string) bool {
 	return client == "codex"
 }
 
-// scopeUncloakTableToDeclaredSources drops every reverse pair whose source name
-// the request never declared, keeping the table when narrowing is not required or
-// no names could be read. Detection reads the same name list, so a table built
-// this way can only restore names the client is expecting.
-func scopeUncloakTableToDeclaredSources(table map[string]string, client string, declared []string) map[string]string {
+// scopeUncloakTableToDeclaredNames drops every reverse pair whose source AND
+// target the request never declared, keeping the table when narrowing is not
+// required or no names could be read.
+//
+// Which side of a pair the declared names land on depends on when the body was
+// read. Request interception sees the raw client body, so its names are sources;
+// the response and stream interceptors are handed the executed body, which the
+// host only republishes after the cloak rewrite, so its names are targets.
+// Matching either side keeps both paths resolving, and a pair whose two names
+// the request never mentioned is still dropped.
+func scopeUncloakTableToDeclaredNames(table map[string]string, client string, declared []string) map[string]string {
 	if !requestsRequestScopedReverse(client) || len(table) == 0 || len(declared) == 0 {
 		return table
 	}
@@ -1210,7 +1216,7 @@ func scopeUncloakTableToDeclaredSources(table map[string]string, client string, 
 	}
 	scoped := make(map[string]string, len(table))
 	for target, src := range table {
-		if declaredSet[src] {
+		if declaredSet[src] || declaredSet[target] {
 			scoped[target] = src
 		}
 	}
@@ -1220,10 +1226,10 @@ func scopeUncloakTableToDeclaredSources(table map[string]string, client string, 
 	return scoped
 }
 
-// declaredSourceToolNames reads the source tool names a request declared. An
-// unreadable body yields no names, which scopeUncloakTableToDeclaredSources
-// treats as "do not narrow" rather than "declared nothing".
-func declaredSourceToolNames(requestBody []byte, sourceFormat string) []string {
+// declaredToolNames reads the tool names a request declared. An unreadable
+// body yields no names, which scopeUncloakTableToDeclaredNames treats as "do not
+// narrow" rather than "declared nothing".
+func declaredToolNames(requestBody []byte, sourceFormat string) []string {
 	var reqRoot map[string]any
 	if err := safeUnmarshal(requestBody, &reqRoot); err != nil {
 		return nil
@@ -1232,7 +1238,7 @@ func declaredSourceToolNames(requestBody []byte, sourceFormat string) []string {
 }
 
 // requestScopedUncloakPattern returns the client's precompiled stream pattern,
-// narrowed to the sources the request declared when narrowing applies. The regex
+// narrowed to the names the request declared when narrowing applies. The regex
 // is shared; only the lookup map is restricted, and a lookup miss leaves the
 // matched text untouched, so an undeclared target passes through unchanged.
 func requestScopedUncloakPattern(client string, requestBody []byte, sourceFormat string) *cachedUncloakPattern {
@@ -1240,7 +1246,7 @@ func requestScopedUncloakPattern(client string, requestBody []byte, sourceFormat
 	if cached == nil || cached.re == nil {
 		return nil
 	}
-	scoped := scopeUncloakTableToDeclaredSources(cached.lookup, client, declaredSourceToolNames(requestBody, sourceFormat))
+	scoped := scopeUncloakTableToDeclaredNames(cached.lookup, client, declaredToolNames(requestBody, sourceFormat))
 	if len(scoped) == 0 {
 		return nil
 	}
@@ -1251,9 +1257,9 @@ func requestScopedUncloakPattern(client string, requestBody []byte, sourceFormat
 }
 
 // requestScopedUncloakTable resolves a client's reverse table for one request,
-// narrowing it to the declared sources when the client requires it.
+// narrowing it to the declared names when the client requires it.
 func requestScopedUncloakTable(client string, requestBody []byte, sourceFormat string) map[string]string {
-	return scopeUncloakTableToDeclaredSources(effectiveUncloakTable(client), client, declaredSourceToolNames(requestBody, sourceFormat))
+	return scopeUncloakTableToDeclaredNames(effectiveUncloakTable(client), client, declaredToolNames(requestBody, sourceFormat))
 }
 
 // sameLookup reports whether two reverse lookups hold the same pairs, letting the
@@ -1270,11 +1276,12 @@ func sameLookup(a, b map[string]string) bool {
 	return true
 }
 
-// detectionRequestBody returns the body used for client detection. The host
-// runs this plugin's request.intercept_before first, so RequestBody is already
-// cloaked by the time response/stream interceptors fire. OriginalRequest holds
-// the raw client body with original tool names, which the reliable detectClient
-// path keys on; fall back to RequestBody when OriginalRequest is unavailable.
+// detectionRequestBody returns the body used for client detection. The host runs
+// this plugin's request.intercept_before first, and then republishes whatever
+// that returned: when the request was rewritten, both OriginalRequest and
+// RequestBody hold the executed (cloaked) body, so detection here reads cloak
+// TARGETS; when it was not, both hold the raw client body. Fall back to
+// RequestBody when OriginalRequest is unavailable.
 func detectionRequestBody(originalRequest, requestBody []byte) []byte {
 	if len(originalRequest) > 0 {
 		return originalRequest
@@ -3197,7 +3204,8 @@ var ompSourceIdentityInventory = map[string]bool{
 // for request body detection in detectClient. It spans BOTH tool modes so that
 // detection survives the mode switch described on defaultCloakTables["codex"]:
 // shell mode contributes exec_command, write_stdin, apply_patch and view_image,
-// code mode contributes the freeform exec and the collaboration children.
+// code mode contributes the freeform exec, web_search and the collaboration
+// children.
 //
 // The collaboration entries are listed BOTH bare and in opencodex's flattened
 // "<namespace>__<child>" spelling, because that flattened form is what actually
@@ -3208,13 +3216,16 @@ var ompSourceIdentityInventory = map[string]bool{
 // Names generic enough to belong to any harness ("wait", "sleep",
 // "send_message") are deliberately absent, and this inventory may exceed the
 // rename table because detection and renaming are separate concerns -- the same
-// way ompSourceIdentityInventory exceeds the OMP Safe Mapping Set.
+// way ompSourceIdentityInventory exceeds the OMP Safe Mapping Set. It may not
+// FALL SHORT of the rename table, though: every source name the table renames
+// has to contribute a hit here.
 var codexSourceIdentityInventory = map[string]bool{
 	"exec":                           true,
 	"exec_command":                   true,
 	"write_stdin":                    true,
 	"apply_patch":                    true,
 	"view_image":                     true,
+	"web_search":                     true,
 	"request_user_input":             true,
 	"request_user_input_async":       true,
 	"spawn_agent":                    true,
@@ -4839,6 +4850,18 @@ func detectClient(toolNames []string) string {
 			for orig := range inventory {
 				if nameSet[orig] {
 					count++
+				}
+			}
+			// An operator can add source names to a client's rename table
+			// through tool_mappings, and a static inventory cannot know them,
+			// so those keys are counted here as well. OMP is exempt: its
+			// attribution must stay on the canonical inventory and never take
+			// arbitrary configured names.
+			if client != "oh_my_pi" {
+				for orig := range cfg.ToolMappings[client] {
+					if !inventory[orig] && nameSet[orig] {
+						count++
+					}
 				}
 			}
 		} else {

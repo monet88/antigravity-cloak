@@ -424,6 +424,19 @@ func TestUncloakTablesInitialization(t *testing.T) {
 	}
 }
 
+func TestCodexSourceInventoryCoversRenameTable(t *testing.T) {
+	// detectClient counts Codex against the static inventory, so a source name
+	// the rename table cloaks but the inventory does not carry contributes no
+	// hit. A request declaring only such names then falls below
+	// minToolNameHits and is never cloaked, silently leaking the client's own
+	// tool names upstream.
+	for src := range defaultCloakTables["codex"] {
+		if !codexSourceIdentityInventory[src] {
+			t.Fatalf("codex rename-table source %q is missing from codexSourceIdentityInventory", src)
+		}
+	}
+}
+
 func TestDetectClient(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -433,6 +446,7 @@ func TestDetectClient(t *testing.T) {
 		{"claude code by askUserQuestion", []string{"Bash", "AskUserQuestion", "Read"}, "claude_code"},
 		{"claude code by signature trio", []string{"Bash", "Edit", "Read", "Write"}, "claude_code"},
 		{"codex by exec and request_user_input", []string{"exec", "request_user_input"}, "codex"},
+		{"codex by exec and web_search", []string{"exec", "web_search"}, "codex"},
 		{"codex by subagent control tools", []string{"spawn_agent", "list_agents"}, "codex"},
 		// Shell-mode Codex declares exec_command/view_image instead of exec.
 		{"codex shell mode by exec_command and view_image", []string{"exec_command", "view_image"}, "codex"},
@@ -458,6 +472,25 @@ func TestDetectClient(t *testing.T) {
 	}
 }
 
+func TestDetectClientCountsConfiguredCodexSourceKeys(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
+tool_mappings:
+  codex:
+    custom_wire_a: run_command
+    custom_wire_b: manage_task
+`)))
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; body=%s", code, raw)
+	}
+	// Codex counts against its static inventory, which cannot know an
+	// operator-added source name, so the configured rename table has to be
+	// counted as well or the custom mapping is undetectable.
+	if got := detectClient([]string{"custom_wire_a", "custom_wire_b"}); got != "codex" {
+		t.Fatalf("detectClient() = %q, want codex for configured codex sources", got)
+	}
+}
+
 func TestDetectCloakedClient(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -467,7 +500,7 @@ func TestDetectCloakedClient(t *testing.T) {
 		// All Claude Code cloak TARGETS present → detected as claude_code
 		{"cloaked claude code", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "list_dir", "invoke_subagent", "ask_question", "search_web", "call_mcp_tool", "schedule"}, "claude_code"},
 		// All Codex cloak TARGETS present → detected as codex
-		{"cloaked codex", []string{"run_command", "view_file", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"}, "codex"},
+		{"cloaked codex", []string{"run_command", "search_web", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"}, "codex"},
 		// A realistic cloaked Codex body mixes five cloak targets with pass-through
 		// names that no client table owns, so target-coverage detection cannot reach
 		// its 80% threshold. That is expected: response/stream uncloaking resolves
@@ -1069,6 +1102,37 @@ func TestSessionKeyFallsBackToBodyHash(t *testing.T) {
 	bodyless := &pluginapi.StreamChunkInterceptRequest{ChunkIndex: 0}
 	if key := m.sessionKey(bodyless); key != "" {
 		t.Fatalf("expected no key for a schema >= 3 payload chunk without identifiers, got %q", key)
+	}
+}
+
+// cloakedCodexRequest is the executed (post-cloak) form of a code-mode Codex
+// request: every declared Codex source name already replaced by its AGY target.
+// That is the body the host republishes downstream, because it only records the
+// executed payload after request.intercept_before rewrote it.
+const cloakedCodexRequest = `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"search_web"}},{"type":"function","function":{"name":"ask_question"}},{"type":"function","function":{"name":"invoke_subagent"}},{"type":"function","function":{"name":"manage_task"}},{"type":"function","function":{"name":"manage_subagents"}}],"messages":[]}`
+
+func TestStreamFallbackUncloaksAlreadyCloakedCodexStream(t *testing.T) {
+	// Schema < 3 repeats the request body on every payload chunk, and that body
+	// is already cloaked by the time the stream interceptor sees it. Detection
+	// therefore reads cloak TARGETS, and the reverse must still resolve from
+	// them instead of narrowing the table down to nothing.
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	chunkBody := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
+
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		SourceFormat:    "openai",
+		OriginalRequest: []byte(cloakedCodexRequest),
+		RequestBody:     []byte(cloakedCodexRequest),
+		ChunkIndex:      0,
+		Body:            []byte(chunkBody),
+	}, "openai")
+
+	if !strings.Contains(string(resp.Body), `"name":"exec"`) {
+		t.Fatalf("already-cloaked codex stream was not reversed: %q", string(resp.Body))
+	}
+	if strings.Contains(string(resp.Body), "run_command") {
+		t.Fatalf("cloaked name leaked downstream: %q", string(resp.Body))
 	}
 }
 

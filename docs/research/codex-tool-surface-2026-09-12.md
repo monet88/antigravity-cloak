@@ -34,7 +34,7 @@ collaboration__spawn_agent, collaboration__wait_agent, web_search
 | `collaboration__followup_task` | `manage_task` |
 | `collaboration__list_agents` | `manage_subagents` |
 
-Deliberate pass-through: `wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message` (its AGY name is already identical), and every helper that exists only as prose inside the `exec` description — `apply_patch`, `exec_command`, `write_stdin`, `view_image`, `tool_search`, the goal and MCP-resource tools.
+Deliberate pass-through: `wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message` (AGY's bare `send_message` is a generic name the reverse should not own), and every helper that exists only as prose inside the `exec` description — `apply_patch`, `exec_command`, `write_stdin`, `view_image`, `tool_search`, the goal and MCP-resource tools.
 
 **Why the prose-only helpers stay pass-through.** The reverse restores a name only where it appears as a tool name: `uncloakStreamChunk` matches the shape `"name":"<target>"` and `uncloakJSONNodeOpt` walks name fields, and neither reaches inside `arguments`. A name living in the `exec` description is copied by the model into the code it writes, so cloaking it would rename the helper on the way up and never rename it back, handing the client a helper it never declared. Renaming `exec` itself is safe precisely because `exec` occupies a real tool-name position, so its round trip closes.
 
@@ -418,7 +418,7 @@ Names that historical cloak tables still carry, with their status on the current
 
 ## Cloak implications
 
-The readers understand Chat Completions only: `extractToolNames` (`main.go:4721`) and `cloakToolNames` (`main.go:3906`) read `tools[].function.name`. A synthetic probe on 2026-09-12 (throwaway test file, removed after the run) fed them four shapes:
+The readers understand Chat Completions only: `extractToolNames` (`main.go:4743`) and `cloakToolNames` (`main.go:3928`) read `tools[].function.name`. A synthetic probe on 2026-09-12 (throwaway test file, removed after the run) fed them four shapes:
 
 ```
 PROBE chat-completions   toolNames=[exec request_user_input] detectClient="codex"
@@ -431,9 +431,9 @@ PROBE responses-history  toolNames=[]                        detectClient=""
 | --- | --- | --- |
 | `tools[].function.name` | `extractToolNames`, `cloakToolNames` | Yes. This is what this workstation's path delivers. |
 | `messages[].tool_calls[].function.name` | `extractToolNames`, `cloakToolNames` | Yes, for history. Responses history is `input[]`. |
-| response JSON `message.tool_calls[].function.name`, `delta.tool_calls[].function.name` | `uncloakJSONNodeOpt` (`main.go:2902`) | Yes. Responses output items carry a flat `name` instead. |
-| any `"name":"<target>"` in a stream chunk | stream uncloak regex (`main.go:3403`) | Yes, and shape-agnostic. |
-| request text bodies | `replaceToolNamesInText` (`main.go:4369`), unambiguous-name rule (`main.go:4620`) | Yes, once a client is resolved. |
+| response JSON `message.tool_calls[].function.name`, `delta.tool_calls[].function.name` | `uncloakJSONNodeOpt` (`main.go:2909`) | Yes. Responses output items carry a flat `name` instead. |
+| any `"name":"<target>"` in a stream chunk | stream uncloak regex (`main.go:3425`) | Yes, and shape-agnostic. |
+| request text bodies | `replaceToolNamesInText` (`main.go:4391`), unambiguous-name rule (`main.go:4642`) | Yes, once a client is resolved. |
 
 **The Responses rows are not this workstation's constraint.** Codex reaches the plugin through opencodex's `openai-chat` adapter, which lowers the request to Chat Completions before CLIProxyAPI sees it, so the first row applies. Verified live: `SourceFormat=openai`, the declared names extracted out of `tools[]`, and the table applied. The Responses rows stay relevant only for a deployment where a Codex client speaks Responses to CLIProxyAPI directly.
 
@@ -457,7 +457,7 @@ Three criteria, in order. They are the same three the earlier shell-mode pass us
 | `collaboration__list_agents` | `manage_subagents` | Shipped. Matches `Action: list`. |
 | `apply_patch`, `exec_command`, `write_stdin`, `view_image`, `tool_search` | — | Pass through. Prose-only in code mode; see the first criterion. |
 | `wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent` | — | Pass through. No AGY counterpart; the nearest primitive for `wait` / `write_stdin` is `manage_task`, already owned. |
-| `collaboration__send_message` | `send_message` | Pass through. Already identical, so mapping it would invert onto itself. |
+| `collaboration__send_message` | `send_message` | Pass through. AGY's own tool is the bare, generic `send_message`, so renaming the flattened child onto it would put the reverse in charge of a name that AGY-native traffic also carries; no rename applied. |
 | `mcp__<server>__<tool>` | — | Pass through. See [Why MCP stays pass-through](#why-mcp-stays-pass-through). |
 
 ### Why MCP stays pass-through
@@ -478,7 +478,7 @@ Counting the table alone would drop detection for whichever mode the table does 
 
 Identity has two independent paths, both observed live against the same table: a validated `X-Cloak-Client: codex` header (deterministic, skips detection, consumed and cleared before forwarding) and body detection. The header must not be turned into a mode switch — the reasoning and the rejected per-mode header design are in [ADR 0004](../adr/0004-cloak-codex-tool-names-by-wire-position.md).
 
-The request-scoped reverse stays Codex-only. It is what allows the table to key on one mode at a time: a shell-mode request declaring `exec_command` never sees a `run_command` restored to `exec`.
+The request-scoped reverse stays Codex-only. It is what allows the table to key on one mode at a time: a shell-mode request declaring `exec_command` never sees a `run_command` restored to `exec`. Narrowing matches a declared name on either side of a pair, because the two sides read different bodies: request interception reads the raw client body (source names), while the response and stream interceptors are handed the executed body, which the host only republishes after the cloak rewrite (target names). Matching only the source side dropped the whole reverse in the executed-body case.
 
 
 ## Next session: ask the model itself

@@ -73,7 +73,7 @@ Only `tools[]` entries are renameable, and which names a session declares depend
 | `code_mode_only` — the default for every routed provider here | one freeform `exec`, plus `wait`, `request_user_input*`, `clock__sleep`, the `collaboration__*` children and `web_search` as their own `tools[]` entries | the table above; the prose-only helpers stay pass-through |
 | unset, i.e. shell mode (`gpt-5.5` / `5.4` / `5.4-mini`) | `exec_command`, `write_stdin`, `apply_patch`, `view_image` as their own `tools[]` entries | `exec` owns `run_command`, so `exec_command` has no mapping here; `write_stdin` and `apply_patch` pass through |
 
-Intentional pass-through: `wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message` (whose Antigravity name is already identical), plus the prose-only helpers listed above.
+Intentional pass-through: `wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message` (AGY's bare `send_message` is generic, so the reverse is left out of it), plus the prose-only helpers listed above.
 
 `shell_command` is a `shell_type` catalog label, not a tool name, and `update_plan` has left the catalog entirely. The rest — `apply_patch`, `view_image`, `tool_search`, the goal tools and the MCP-resource tools — are mode-dependent: `tools[]` entries in shell mode, description text in code mode. The per-mode carriers are tabulated in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**, together with the rationale for every name this table maps and every one it passes through.
 
