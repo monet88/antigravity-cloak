@@ -140,7 +140,14 @@ Key debug lines to grep:
 - buildUncloakTable: toolNames=%v client=%s and cloakedClient=%s - detection.
   client= / cloakedClient=claude_code means detection worked; empty means it did
   not (e.g. sourceFormat or casing bug).
-- handleStreamChunkIntercept: changed=%t - uncloak applied to a stream chunk.
+- handleResponseIntercept: changed=%t Body=%s - non-streaming uncloak applied.
+  This is the only change-flag line. The STREAM path has none: it logs one entry
+  line per chunk (handleStreamChunkIntercept: ... Body=%s) plus session lifecycle
+  lines (StreamSessionManager: ...). Verify a streamed restore by reading the
+  chunk bodies, not by grepping for a change flag.
+- handleRequestInterceptBefore: ... marker={present:true ... client:codex ...} -
+  an explicit X-Cloak-Client marker arrived and resolved, which bypasses body
+  detection for that request.
 
 ## Build (.so for the running container = linux/amd64)
 
