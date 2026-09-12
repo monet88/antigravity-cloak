@@ -799,6 +799,53 @@ func rewriteProtectedBrand(rootMap map[string]any, sourceFormat string) {
 	}
 }
 
+// sanitizeSystemConventions replaces only the fixed OMP wrapper tags.
+func sanitizeSystemConventions(text string) (string, bool) {
+	next := strings.ReplaceAll(text, "<system-conventions>", "<conventions>")
+	next = strings.ReplaceAll(next, "</system-conventions>", "</conventions>")
+	return next, next != text
+}
+
+// sanitizeSystemConventionsContent visits prompt text, not block metadata or
+// arbitrary nested JSON such as tool arguments and image sources.
+func sanitizeSystemConventionsContent(value any) any {
+	switch content := value.(type) {
+	case string:
+		next, _ := sanitizeSystemConventions(content)
+		return next
+	case []any:
+		for _, raw := range content {
+			block, ok := raw.(map[string]any)
+			if !ok || (block["type"] != "text" && block["type"] != "input_text") {
+				continue
+			}
+			if text, ok := block["text"].(string); ok {
+				if next, changed := sanitizeSystemConventions(text); changed {
+					block["text"] = next
+				}
+			}
+		}
+	}
+	return value
+}
+
+func sanitizeProtectedSystemConventions(rootMap map[string]any) {
+	if system, ok := rootMap["system"]; ok {
+		rootMap["system"] = sanitizeSystemConventionsContent(system)
+	}
+	if messages, ok := rootMap["messages"].([]any); ok {
+		for _, raw := range messages {
+			msg, ok := raw.(map[string]any)
+			if !ok || (msg["role"] != "system" && msg["role"] != "developer") {
+				continue
+			}
+			if content, ok := msg["content"]; ok {
+				msg["content"] = sanitizeSystemConventionsContent(content)
+			}
+		}
+	}
+}
+
 func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.RequestInterceptResponse, format string) []byte {
 	if req.RequestID == "" {
 		debugLog("handleProtectedAGY: missing RequestID")
@@ -865,6 +912,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 
 	cloakProtectedToolNames(rootMap, canonicalOMPSafeMappingSet, format)
 	rewriteProtectedBrand(rootMap, format)
+	sanitizeProtectedSystemConventions(rootMap)
 
 	if !validateProtectedPostTransform(rootMap, format) {
 		debugLog("handleProtectedAGY: post-transform validation failed")
