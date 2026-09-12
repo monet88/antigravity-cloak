@@ -152,7 +152,7 @@ func TestRewriteRequestBodyCloaksCodexTools(t *testing.T) {
 	body := `{
 		"system":"You are Codex.",
 		"tools":[
-			{"type":"function","function":{"name":"exec_command","description":"Execute Codex shell"}},
+			{"type":"function","function":{"name":"exec","description":"Execute Codex shell"}},
 			{"type":"function","function":{"name":"request_user_input","description":"Ask the user"}}
 		],
 		"messages":[]
@@ -400,13 +400,17 @@ func TestUncloakTablesInitialization(t *testing.T) {
 	if defaultUncloakTables["claude_code"]["run_command"] != "Bash" {
 		t.Fatal("expected Bash")
 	}
-	// Codex keys on the shell-mode surface: exec_command owns run_command, and
-	// the code-mode "exec" is deliberately absent (see defaultCloakTables).
-	if defaultUncloakTables["codex"]["run_command"] != "exec_command" {
-		t.Fatal("expected exec_command")
+	// Codex keys on the code-mode surface: "exec" owns run_command, and the
+	// collaboration children are keyed in opencodex's flattened "__" spelling
+	// (see defaultCloakTables).
+	if defaultUncloakTables["codex"]["run_command"] != "exec" {
+		t.Fatal("expected exec")
 	}
-	if defaultUncloakTables["codex"]["view_file"] != "view_image" {
-		t.Fatal("expected view_image")
+	if defaultUncloakTables["codex"]["manage_subagents"] != "collaboration__list_agents" {
+		t.Fatal("expected collaboration__list_agents")
+	}
+	if defaultUncloakTables["codex"]["search_web"] != "web_search" {
+		t.Fatal("expected web_search")
 	}
 	// Verify no key collision within a client's cloak table
 	for client, cloaks := range defaultCloakTables {
@@ -710,17 +714,19 @@ func TestBuildUncloakTableWithCloakedRequest(t *testing.T) {
 	}
 }
 
-func TestCodexShellModeCloakRoundTrip(t *testing.T) {
-	// Shell-mode Codex declares exec_command and view_image as their own
-	// tools[] entries. The request side renames them to AGY names, and the
-	// reverse side must restore those exact shell-mode source names rather
-	// than the code-mode "exec" this table deliberately omits.
+func TestCodexCodeModeCloakRoundTrip(t *testing.T) {
+	// A code-mode Codex session declares one freeform "exec" entry point plus
+	// the collaboration children, which opencodex flattens to "<ns>__<child>"
+	// for the chat-completions function-tool format. The request side renames
+	// them to AGY names and the reverse must restore those exact spellings.
 	body := []byte(`{
 			"tools":[
-				{"type":"function","function":{"name":"exec_command"}},
-				{"type":"function","function":{"name":"view_image"}},
+				{"type":"function","function":{"name":"exec"}},
+				{"type":"function","function":{"name":"web_search"}},
 				{"type":"function","function":{"name":"request_user_input"}},
-				{"type":"function","function":{"name":"spawn_agent"}}
+				{"type":"function","function":{"name":"collaboration__spawn_agent"}},
+				{"type":"function","function":{"name":"collaboration__followup_task"}},
+				{"type":"function","function":{"name":"collaboration__list_agents"}}
 			],
 			"messages":[]
 		}`)
@@ -729,12 +735,12 @@ func TestCodexShellModeCloakRoundTrip(t *testing.T) {
 		t.Fatalf("rewrite = changed:%v client:%q, want true/codex", changed, client)
 	}
 	got := string(rewritten)
-	for _, want := range []string{"run_command", "view_file", "ask_question", "invoke_subagent"} {
+	for _, want := range []string{"run_command", "search_web", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"} {
 		if !strings.Contains(got, `"`+want+`"`) {
 			t.Fatalf("expected cloaked target %q in %s", want, got)
 		}
 	}
-	for _, unwanted := range []string{"exec_command", "view_image"} {
+	for _, unwanted := range []string{"web_search", "request_user_input", "collaboration__spawn_agent", "collaboration__followup_task", "collaboration__list_agents"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("source name %q survived cloaking: %s", unwanted, got)
 		}
@@ -744,8 +750,8 @@ func TestCodexShellModeCloakRoundTrip(t *testing.T) {
 	if uncloakClient != "codex" {
 		t.Fatalf("buildUncloakTable client = %q, want codex", uncloakClient)
 	}
-	if uncloakTable["run_command"] != "exec_command" || uncloakTable["view_file"] != "view_image" {
-		t.Fatalf("uncloak table = %v, want run_command->exec_command and view_file->view_image", uncloakTable)
+	if uncloakTable["run_command"] != "exec" || uncloakTable["manage_subagents"] != "collaboration__list_agents" {
+		t.Fatalf("uncloak table = %v, want run_command->exec and manage_subagents->collaboration__list_agents", uncloakTable)
 	}
 }
 
@@ -754,11 +760,11 @@ func TestCodexTableKeepsTargetsUnique(t *testing.T) {
 	// inverse, so a duplicate target would restore whichever source name the
 	// inversion happened to keep and hand the client a tool it never declared.
 	table := copyToolMappings(defaultCloakTables)["codex"]
-	if _, ok := table["exec"]; ok {
-		t.Fatal("codex table must not map exec; exec_command owns run_command")
+	if _, ok := table["exec"]; !ok {
+		t.Fatal("codex table must map exec; it is the sole code-mode entry point")
 	}
-	if _, ok := table["exec_command"]; !ok {
-		t.Fatal("codex table must map exec_command")
+	if _, ok := table["exec_command"]; ok {
+		t.Fatal("codex table must not map exec_command; run_command already has an owner")
 	}
 	seen := map[string]string{}
 	for src, target := range table {

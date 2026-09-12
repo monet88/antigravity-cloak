@@ -56,24 +56,24 @@ These tools remain in the static OMP source identity inventory for source-side c
 
 ##### 3. OpenAI Codex (`codex`)
 
-Responses API, verified 2026-09-12 against codex-cli 0.154.0. Namespaced tools are keyed by base name (`spawn_agent`, `sleep`): the wire carries a namespace container whose children are bare names, with the namespace in a sibling field on each call item. `splitToolNamespace` splits on `:` alone, so a flattened `collaboration.spawn_agent` or `collaboration__spawn_agent` form does not resolve to a base name.
-- `exec_command` $\to$ `run_command`
-- `view_image` $\to$ `view_file`
+Chat Completions, as delivered by opencodex's `openai-chat` adapter (verified 2026-09-12 from this plugin's own debug log of a live `cpa/agy` session). Namespaced children arrive flattened as `<namespace>__<child>`, matching opencodex's `namespacedToolName`, so they are keyed in that exact spelling; `splitToolNamespace` splits on `:` alone and deliberately does not resolve them.
+- `exec` $\to$ `run_command`
+- `web_search` $\to$ `search_web`
 - `request_user_input` $\to$ `ask_question`
-- `spawn_agent` $\to$ `invoke_subagent`
-- `followup_task` $\to$ `manage_task`
-- `list_agents` $\to$ `manage_subagents`
+- `collaboration__spawn_agent` $\to$ `invoke_subagent`
+- `collaboration__followup_task` $\to$ `manage_task`
+- `collaboration__list_agents` $\to$ `manage_subagents`
 
-`exec` is deliberately unmapped: it and `exec_command` both want `run_command`, and every target must stay 1:1 within a client because `defaultUncloakTables` is built by inverting this table.
+Only names that occupy a tool-name position are listed. Helpers that exist solely as prose inside the `exec` description — `apply_patch`, `exec_command`, `write_stdin`, `view_image`, `tool_search`, the goal and MCP-resource tools — stay pass-through, because the reverse path restores a name only where it appears as a tool name. `exec` is the sole entry point and therefore owns `run_command`; a shell-mode session declares `exec_command` instead, which is absent because one target cannot carry two sources.
 
 Only `tools[]` entries are renameable, and which names a session declares depends on the model's tool mode:
 
 | `tool_mode` | wire surface | table coverage |
 | :--- | :--- | :--- |
-| `code_mode_only` (default: `gpt-6-astra`, the GPT-5.6 family, `codex-auto-review`, and the `deepseek` provider) | one freeform `exec`; every other tool described inside it | `exec` unmapped; the nested names are reachable by text rewriting only |
-| unset, i.e. shell mode (`gpt-5.5` / `5.4` / `5.4-mini`, and the `CPA` provider) | `exec_command`, `write_stdin`, `apply_patch`, `view_image`, `request_user_input`, … as their own `tools[]` entries | `exec_command` and `view_image` map; `exec`, `write_stdin`, `apply_patch` and `wait` pass through |
+| `code_mode_only` — the default for every routed provider here | one freeform `exec`, plus `wait`, `request_user_input*`, `clock__sleep`, the `collaboration__*` children and `web_search` as their own `tools[]` entries | the table above; the prose-only helpers stay pass-through |
+| unset, i.e. shell mode (`gpt-5.5` / `5.4` / `5.4-mini`) | `exec_command`, `write_stdin`, `apply_patch`, `view_image` as their own `tools[]` entries | `exec` owns `run_command`, so `exec_command` has no mapping here; `write_stdin` and `apply_patch` pass through |
 
-Intentional pass-through (no Antigravity-native counterpart, so a substitution would collide or invent a tool): `wait`, `write_stdin`, `apply_patch`, `request_user_input_async`, `sleep`, `send_message`, `wait_agent`, `interrupt_agent`.
+Intentional pass-through: `wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message` (whose Antigravity name is already identical), plus the prose-only helpers listed above.
 
 `shell_command` is a `shell_type` catalog label, not a tool name, and `update_plan` has left the catalog entirely. The rest — `apply_patch`, `view_image`, `tool_search`, the goal tools and the MCP-resource tools — are mode-dependent: `tools[]` entries in shell mode, description text in code mode. The per-mode carriers are tabulated in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**, together with the rationale for every name this table maps and every one it passes through.
 

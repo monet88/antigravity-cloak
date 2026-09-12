@@ -3101,44 +3101,42 @@ var defaultCloakTables = map[string]map[string]string{
 		"ToolSearch": "search_web", "Skill": "call_mcp_tool", "Workflow": "schedule",
 	},
 	"codex": {
-		// Which names Codex declares depends on the model's tool mode, so this
-		// table keys on the shell-mode surface (verified 2026-09-12 on
-		// codex-cli 0.154.0):
+		// Code mode is the default for every routed provider here, so this table
+		// keys on what a code-mode session actually declares. The list below was
+		// read off this plugin's own debug log for a live cpa/agy session over
+		// opencodex's openai-chat adapter (2026-09-12), which delivers Chat
+		// Completions:
 		//
-		//   shell mode (gpt-5.5 / 5.4 / 5.4-mini, and routed providers set to
-		//     codexToolMode: shell) declares exec_command, write_stdin,
-		//     apply_patch, view_image and the collaboration children as their
-		//     own tools[] entries, so each is independently renameable.
+		//   exec, wait, request_user_input, request_user_input_async,
+		//   clock__sleep, collaboration__followup_task,
+		//   collaboration__interrupt_agent, collaboration__list_agents,
+		//   collaboration__send_message, collaboration__spawn_agent,
+		//   collaboration__wait_agent, web_search
 		//
-		//   code_mode_only (gpt-6-astra, the gpt-5.6 family, codex-auto-review)
-		//     declares a single freeform "exec" tool instead; the per-tool
-		//     surface above then exists only as text inside its description,
-		//     which the text-rewrite path reaches without a table entry.
+		// Namespaced children are keyed flattened, the way opencodex's
+		// namespacedToolName lowers them ("<namespace>__<child>") so they survive
+		// the chat-completions function-tool format. That exact spelling is what
+		// the request-scoped reverse matches a declared name against, so these
+		// pairs survive narrowing; a bare "spawn_agent" key would not.
 		//
-		// "exec" is deliberately absent. It and "exec_command" occupy the same
-		// shell-execution slot, and targets must stay 1:1 within a client
-		// because defaultUncloakTables is built by inverting this map; two
-		// sources owning run_command would make the restore pick the wrong
-		// name for whichever mode sent it. The shell-mode name wins because it
-		// is what the routed providers reaching this gateway send, and because
-		// its parameter shape (a command string) matches run_command's, where
-		// code mode's freeform JavaScript container does not.
+		// Only names that occupy a tool-name position are listed. The helpers that
+		// exist solely as prose inside the "exec" description -- apply_patch,
+		// exec_command, write_stdin, view_image, tool_search, the goal and
+		// MCP-resource tools -- stay pass-through deliberately: the reverse path
+		// restores a name only where it appears as a tool name, so cloaking prose
+		// would hand the client a helper it never declared.
 		//
-		// Namespaced wire names are keyed by base name, matching detectClient:
-		// the wire sends a namespace container whose children are bare names.
-		//
-		// Deliberate pass-through, because Antigravity has no native
-		// counterpart and a substitution would either collide with a target
-		// above or invent a tool that does not exist: "wait", "write_stdin",
-		// "apply_patch", "request_user_input_async", "sleep", "wait_agent",
-		// "interrupt_agent", and "send_message" (whose Antigravity name is
-		// already identical, so cloaking it would be a no-op).
-		"exec_command":       "run_command",
-		"view_image":         "view_file",
-		"request_user_input": "ask_question",
-		"spawn_agent":        "invoke_subagent",
-		"followup_task":      "manage_task",
-		"list_agents":        "manage_subagents",
+		// "exec" is the sole entry point and therefore owns run_command. A
+		// shell-mode session declares exec_command instead; it is absent because
+		// one target cannot carry two sources in the inverted reverse map, and
+		// this table serves the mode every routed provider on this workstation
+		// runs.
+		"exec":                         "run_command",
+		"web_search":                   "search_web",
+		"request_user_input":           "ask_question",
+		"collaboration__spawn_agent":   "invoke_subagent",
+		"collaboration__followup_task": "manage_task",
+		"collaboration__list_agents":   "manage_subagents",
 	},
 	"oh_my_pi": {
 		"read":       "view_file",
@@ -3199,24 +3197,37 @@ var ompSourceIdentityInventory = map[string]bool{
 // for request body detection in detectClient. It spans BOTH tool modes so that
 // detection survives the mode switch described on defaultCloakTables["codex"]:
 // shell mode contributes exec_command, write_stdin, apply_patch and view_image,
-// code mode contributes the freeform exec. Names generic enough to belong to any
-// harness ("wait", "sleep", "send_message") are deliberately absent, and this
-// inventory may exceed the rename table because detection and renaming are
-// separate concerns -- the same way ompSourceIdentityInventory exceeds the OMP
-// Safe Mapping Set.
+// code mode contributes the freeform exec and the collaboration children.
+//
+// The collaboration entries are listed BOTH bare and in opencodex's flattened
+// "<namespace>__<child>" spelling, because that flattened form is what actually
+// reaches this plugin over the openai-chat adapter; a bare-only inventory would
+// score a real code-mode request one hit short of minToolNameHits whenever it
+// declares exec plus namespace children and nothing else.
+//
+// Names generic enough to belong to any harness ("wait", "sleep",
+// "send_message") are deliberately absent, and this inventory may exceed the
+// rename table because detection and renaming are separate concerns -- the same
+// way ompSourceIdentityInventory exceeds the OMP Safe Mapping Set.
 var codexSourceIdentityInventory = map[string]bool{
-	"exec":                     true,
-	"exec_command":             true,
-	"write_stdin":              true,
-	"apply_patch":              true,
-	"view_image":               true,
-	"request_user_input":       true,
-	"request_user_input_async": true,
-	"spawn_agent":              true,
-	"followup_task":            true,
-	"list_agents":              true,
-	"wait_agent":               true,
-	"interrupt_agent":          true,
+	"exec":                           true,
+	"exec_command":                   true,
+	"write_stdin":                    true,
+	"apply_patch":                    true,
+	"view_image":                     true,
+	"request_user_input":             true,
+	"request_user_input_async":       true,
+	"spawn_agent":                    true,
+	"followup_task":                  true,
+	"list_agents":                    true,
+	"wait_agent":                     true,
+	"interrupt_agent":                true,
+	"collaboration__spawn_agent":     true,
+	"collaboration__followup_task":   true,
+	"collaboration__list_agents":     true,
+	"collaboration__wait_agent":      true,
+	"collaboration__interrupt_agent": true,
+	"collaboration__send_message":    true,
 }
 
 // ompCloakedTargetIdentityInventory contains the nine canonical AGY-facing
