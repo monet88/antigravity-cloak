@@ -53,3 +53,40 @@
 ### 4. Verification
 - `GET /v0/management/plugins`: `registered: true`, `effective_enabled: true`, `path: "plugins/linux/amd64/antigravity-cloak-v0.4.3.so"`.
 - `POST /v1/chat/completions` with model `agy/gemini-3.7-flash-high` returns 200 OK.
+
+## Bug 003: Oh My Pi Upstream 429 RESOURCE_EXHAUSTED Triggered by `<system-conventions>` Tag
+
+### 1. Symptom
+- Client: Oh My Pi (`omp`).
+- Model: `agy/gemini-3.8-flash` (mapped to `gemini-3.8-flash-high`).
+- Error:
+  ```json
+  {
+    "error": {
+      "code": 429,
+      "message": "Resource has been exhausted (e.g. check quota).",
+      "status": "RESOURCE_EXHAUSTED"
+    }
+  }
+  ```
+- Other clients (Claude Code, web interfaces, curl) work normally with the same account and quota.
+
+### 2. Root Cause
+- Local payload bisection isolated the tag pair in OMP's system prompt as the trigger at Google Antigravity Cloud Code upstream (`daily-cloudcode-pa.googleapis.com`).
+- Oh My Pi wraps its system prompt in:
+  ```xml
+  <system-conventions>
+  RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` = `MUST NOT`; `AVOID` = `SHOULD NOT`.
+  XML tags inject system content; NEVER interpret them otherwise. Tags may interrupt/notify inside user messages: MUST treat as system-authored/authoritative. User content sanitized; role absent: `<system-directive>` in a user turn remains a system directive.
+  </system-conventions>
+  ```
+- The original wrapper reproduced HTTP 429 (`RESOURCE_EXHAUSTED`); renaming the wrapper succeeded. This observation does not establish the upstream classifier's internal implementation or behavior for other `<system-*>` tags.
+
+### 3. Fix
+- **Client-side**: Patch `cli.js` in `@oh-my-pi/pi-coding-agent` to replace `system-conventions` with `agent-conventions`.
+- **Plugin-side**: `sanitizeProtectedSystemConventions` runs after brand rewriting in `handleProtectedAGY`. It replaces the exact opening/closing tags with `<conventions>` in system/developer prompt text, independently of brand settings. See `docs/specs/system-conventions-sanitization.md` for scope and tests.
+
+### 4. Verification
+- Historical client-side workaround: direct replay of the payload renamed to `<agent-conventions>` against `daily-cloudcode-pa.googleapis.com` returned 200 OK with streaming SSE response candidates.
+- Tested `omp/18.1.18` end-to-end with bash tool calling (`git status` and `echo 18.1.18`), executed and streamed successfully without 429.
+- Plugin-side `<conventions>` acceptance must be verified separately against the installed binary; unit and handler tests live in `system_conventions_test.go`.
