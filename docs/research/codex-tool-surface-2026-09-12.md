@@ -72,6 +72,7 @@ The model's own tool list reported six of twelve top-level names already renamed
 | 2026-09-12 (ninth pass) | Captured a live `cpa/agy` debug log, re-keyed `defaultCloakTables["codex"]` on the code-mode wire surface it revealed, and added the flattened `collaboration__*` spellings to `codexSourceIdentityInventory` — a code-mode request declaring `exec` plus namespace children and nothing else had scored one hit against a floor of two, which is why every previous request mutated nothing. |
 | 2026-09-12 (tenth pass) | Recorded the live acceptance: the header and detection paths both resolving `client=codex`, all six renames on the wire, all six source names absent, and the probe command executing. Added the reverse constraint (a name is restored only in a tool-name position), the `ocx restart` requirement for provider headers, and the disclosure that the previously deployed artifact had been built from an older commit and carried no `exec` entry at all. |
 | 2026-09-12 (eleventh pass) | Split the decision record into [ADR 0004](../adr/0004-cloak-codex-tool-names-by-wire-position.md), corrected `AGENTS.md`'s claim that a `handleStreamChunkIntercept: changed=%t` line exists, and refreshed the provider table for the `cpa` / `opencode-free` rename. |
+| 2026-09-12 (twelfth pass) | Recorded why the `mcp__*` family stays pass-through, after verifying AGY's side of it: `call_mcp_tool`'s three-field envelope against our own surface reference, and the real per-tool schema cache under `~/.gemini/antigravity-cli/mcp/` (17 servers, 411 tools). The model's "eager native `mcp_<server>_<tool>`" half was not corroborated and is marked as such. |
 
 ---
 
@@ -455,7 +456,19 @@ Three criteria, in order. They are the same three the earlier shell-mode pass us
 | `apply_patch`, `exec_command`, `write_stdin`, `view_image`, `tool_search` | — | Pass through. Prose-only in code mode; see the first criterion. |
 | `wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent` | — | Pass through. No AGY counterpart; the nearest primitive for `wait` / `write_stdin` is `manage_task`, already owned. |
 | `collaboration__send_message` | `send_message` | Pass through. Already identical, so mapping it would invert onto itself. |
-| `mcp__<server>__<tool>` | — | Pass through, per existing MCP policy. |
+| `mcp__<server>__<tool>` | — | Pass through. See [Why MCP stays pass-through](#why-mcp-stays-pass-through). |
+
+### Why MCP stays pass-through
+
+`fastctx.inspect_local_file`, `context7.resolve_library_id` and the rest of the `mcp__*` family are not cloaked, and that is structural rather than a policy preference. Three independent reasons, in the order they bite.
+
+**A code-mode session does not declare them.** Every live catalog row carries `supports_search_tool: true`, so MCP declarations are deferred rather than inlined, and the captured wire listed twelve declared names with no `mcp__*` among them. The MCP tools are reachable only as nested helpers inside the `exec` isolate — confirmed by calling `context7.resolve_library_id` down that path and getting a real answer in 1.9s — which is the prose position the reverse cannot restore.
+
+**`call_mcp_tool` is one target for the whole family.** The AGY CLI's own MCP registry under `~/.gemini/antigravity-cli/mcp/` holds 17 servers and 411 tool schemas, so mapping any of them onto the single bridge tool would put N sources on one target, which the inverted reverse cannot express.
+
+**AGY's MCP identity is not a flat name.** It is the pair `(ServerName, ToolName)` carried inside `Arguments`, and `ToolName` is whatever the server itself publishes — `resolve-library-id` in the AGY cache against `mcp__context7__resolve_library_id` on this wire. Making a call look AGY-native is therefore an identity transformation (split the server out, recover the published tool name, rebuild the envelope), not a rename. Forcing a rename onto `call_mcp_tool` would also invite the model to answer with its native three-field envelope, which the reverse would hand back to Codex as the right name carrying the wrong arguments.
+
+AGY's side of this is not hearsay. `call_mcp_tool`'s `ServerName` / `ToolName` / `Arguments` are documented in [the Antigravity surface reference](antigravity-tool-surface-2026-09-06.md), and the per-tool schema cache is real: `~/.gemini/antigravity-cli/mcp/context7/resolve-library-id.json` is a draft-07 schema with `libraryName` required. What stays uncorroborated is the other half of the model's account — an "eagerly loaded" mode registering MCP tools as native `mcp_<server>_<tool>` names. No manifest or log line carrying that form was found, and the per-server directory exists for every server, so it cannot separate eager from lazy.
 
 ## Detection and identity
 
