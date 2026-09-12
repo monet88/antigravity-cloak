@@ -18,6 +18,8 @@ Verified on 2026-09-12 against three primary sources: the local Codex runtime to
 | 2026-09-12 (fourth pass) | Added the recommended cloak table for the shell-mode surface, and synced `AGENTS.md` and `CONTEXT.md`, whose Codex sections had claimed the shell-mode names were absent from `tools[]` altogether. |
 | 2026-09-12 (fifth pass) | Implemented the table: `exec_command -> run_command` and `view_image -> view_file` in, `exec` out, plus `codexSourceIdentityInventory` for detection and a request-scoped reverse. Renamed the `deepseek` provider here and recorded its move back to `code_mode_only`. |
 | 2026-09-12 (sixth pass) | Closed the doc sync: `CONTEXT.md`, `README.md` and `AGENTS.md` still described the shell-mode names as unmapped and named the retired `DS` provider. Also answered the `openai` question — nothing to adjust there, because it is a native-slug provider and the lever is routed-only. |
+| 2026-09-12 (seventh pass) | Replaced the "inference" framing of the `shell` consequence with opencodex's own field documentation, and named `.ref/opencodex` (v2.51.0) as the citation target. |
+| 2026-09-12 (eighth pass) | Re-pointed every `src/...` citation at `.ref/opencodex` v2.51.0, the tree the runtime moves to, and corrected two catalog-table claims it exposed: the opencodex snapshot leaves `codex-auto-review` at `tool_mode: null` (not `code_mode_only`), and the live catalog now carries `code_mode_only` on both `deepseek/*` rows. |
 
 ---
 
@@ -61,13 +63,13 @@ Evidence: the declaration walker accepts `""`/`"function"` and `"custom"`, treat
 
 Observed live on this workstation: thread `01a09445-…` (code mode) logs `ToolCall: exec const r = await tools.exec_command({…})` under `otel.name="custom_tool_call"`, while thread `01a09482-…` (shell mode) logs `ToolCall: exec_command {"cmd": …}` with `tool_name="exec_command"` and zero `custom_tool_call` records. The string `exec_command` appears in both; in code mode it is code the model wrote, in shell mode it is a declared tool.
 
-CLIProxyAPI does not interpret `tool_mode`; the field is consumed by the Codex client. Treat the table below as client catalog data, and the `tools[]` consequence as inference corroborated by the local surface.
+CLIProxyAPI does not interpret `tool_mode`; the field is consumed by the Codex client. Treat the table below as client catalog data, and the `tools[]` consequence as stated by the generator rather than inferred: opencodex documents it on the field itself — `"shell" leaves tool_mode unset so Codex declares top-level shell tools (exec_command)`, and `"code_mode_only" (default) sets entry.tool_mode = "code_mode_only" (unified exec helper tool)` (`src/types/provider.ts:240-245`, with the same wording on the custom-model override at `src/types/config.ts:204-209`). The runtime observations above are the corroborating evidence.
 
 ### Tool surface by mode
 
 Two declaration sets, one per mode. A name appearing in both does not mean the same thing: in code mode `exec_command` is a string inside the `exec` description, while in shell mode it is a `tools[]` entry with its own schema.
 
-**Code mode** — `tool_mode: code_mode_only`: `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `codex-auto-review`, and any routed provider left at the default. Evidence: the `exec` description and base instructions of a `code_mode_only` model, plus the code-mode thread log.
+**Code mode** — `tool_mode: code_mode_only`: `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `codex-auto-review`, and any routed provider left at the default. Evidence: the `exec` description and base instructions of a `code_mode_only` model, plus the code-mode thread log. The client's bundled catalog and opencodex's upstream snapshot disagree on exactly one slug in this list, `codex-auto-review` — see [Which catalog each surface actually reads](#which-catalog-each-surface-actually-reads).
 
 | wire name | carrier in code mode |
 | --- | --- |
@@ -128,17 +130,19 @@ Four catalogs describe this surface, and they disagree in places, so any finding
 | source | what it is | models | `tool_mode` | `shell_type` |
 | --- | --- | --- | --- | --- |
 | `codex debug models --bundled` on the installed `codex-cli` 0.154.0 | the **client's own** embedded catalog | 11 | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`, `gpt-daybreak-blue-latest`, `gpt-daybreak-red-latest`, `codex-auto-review`; unset on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2` | `unified_exec` |
-| `src/codex/data/upstream-models.json` in opencodex 2.48.0 | opencodex's copy of the OpenAI upstream snapshot | 9 | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`, `codex-auto-review`; `null` on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2` | `unified_exec` |
+| `src/codex/data/upstream-models.json` in opencodex v2.51.0 | opencodex's copy of the OpenAI upstream snapshot | 9 | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`; `null` on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini`, `gpt-5.2`, **`codex-auto-review`** | `unified_exec` |
 | `.ref/CLIProxyAPI/internal/registry/models/codex_client_models.json` | gateway-side mirror of a client catalog | 8 | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`, `gpt-reserve`, `codex-auto-review`; unset on `gpt-5.5` | `shell_command` |
-| `C:\Users\monet\.codex\opencodex-catalog.json` | the **live** catalog the local Codex loads, generated by opencodex | 14 | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna`; absent on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` and on every routed row | `unified_exec` |
+| `C:\Users\monet\.codex\opencodex-catalog.json` | the **live** catalog the local Codex loads, generated by opencodex | 14 | `code_mode_only` on `gpt-6-astra`, `gpt-5.6-sol/terra/luna` and on both `deepseek/*` rows; absent on `gpt-5.5`, `gpt-5.4`, `gpt-5.4-mini` and on all four `CPA/*` rows | `unified_exec` |
 
 Only the last row governs runtime behaviour here: both Codex homes set `model_catalog_json` to it (`C:\Users\monet\.codex\config.toml` and `C:\Users\monet\AppData\Roaming\orca\codex-runtime-home\home\config.toml`), and `codex debug models` agrees with it.
 
-The `models` column is each source's own total; slugs that do not bear on the mode split are omitted from this page. Two differences between the rows are worth naming, and only one of them is real.
+The `models` column is each source's own total; slugs that do not bear on the mode split are omitted from this page. Three differences between the rows are worth naming, and two of them are real.
 
 `shell_type` is a genuine disagreement: the gateway mirror says `shell_command`, the client and opencodex say `unified_exec`. The first pass of this document recorded the mirror's value. The client's own value is the one in force, and `shell_type` does not distinguish code mode from shell mode in any case — every model in every catalog carries one.
 
-`multi_agent_version` looks like a disagreement and is not. This workstation has `multiAgentMode: v2` with `keepNativeChatGptOnV1: true`, so `applyMultiAgentMode` (`src/codex/catalog/parsing.ts:660`) pins native ChatGPT rows to `v1` and routed rows to `v2`. That reproduces the live catalog exactly: every native row is `v1`, every `deepseek/*` and `CPA/*` row is `v2`.
+`multi_agent_version` looks like a disagreement and is not. This workstation has `multiAgentMode: v2` with `keepNativeChatGptOnV1: true`, so `applyMultiAgentMode` (`src/codex/catalog/parsing.ts:683`) pins native ChatGPT rows to `v1` and routed rows to `v2`. That reproduces the live catalog exactly: every native row is `v1`, every `deepseek/*` and `CPA/*` row is `v2`.
+
+`codex-auto-review` is the third, and it is a real `tool_mode` disagreement rather than a labeling artifact. The client's bundled catalog and the gateway mirror both mark it `code_mode_only`, while opencodex's upstream snapshot carries `tool_mode: null` on it (`codex/data/upstream-models.json`). Nothing in this plugin turns on the answer — the slug is absent from the live catalog, so no session here resolves to it — but it is the sharpest illustration of why a claim about "the" Codex tool surface has to name its catalog. Note also that opencodex's snapshot is a copy of an OpenAI upstream file and is byte-identical between the installed 2.48.0 tree and the `.ref` 2.51.0 checkout, so this disagreement is upstream data, not a regression introduced by either version.
 
 ---
 
@@ -146,13 +150,13 @@ The `models` column is each source's own total; slugs that do not bear on the mo
 
 ### The field
 
-`codexToolMode?: "code_mode_only" | "shell"` is declared on a provider (`src/types/provider.ts:194`) and on a custom model (`src/types/config.ts:209`). It is Zod-validated (`src/config.ts:595`), which was added deliberately: the provider schema ends in `.passthrough()`, so a misspelled key used to survive verbatim and silently resolve to the `code_mode_only` default while the operator believed shell mode was on (#2106).
+`codexToolMode?: "code_mode_only" | "shell"` is declared on a provider (`src/types/provider.ts:245`) and on a custom model (`src/types/config.ts:209`). It is Zod-validated (`src/config.ts:638`), which was added deliberately: the provider schema ends in `.passthrough()`, so a misspelled key used to survive verbatim and silently resolve to the `code_mode_only` default while the operator believed shell mode was on (#2106).
 
-`code_mode_only` — the default — writes `tool_mode = "code_mode_only"` onto the model's catalog entry; `shell` deletes the field (`src/codex/catalog/parsing.ts:633`).
+`code_mode_only` — the default — writes `tool_mode = "code_mode_only"` onto the model's catalog entry; `shell` deletes the field (`src/codex/catalog/parsing.ts:656`).
 
 ### It is a routed-only lever
 
-This is the finding that decides every other question. opencodex writes `tool_mode` from exactly one function, `applyRoutedCodexToolMode`, and every call site is on a routed path: `normalizeRoutedCatalogEntry` (`parsing.ts:716`) plus `sync.ts:379`, `:381` and `:423`, all inside `if (isRouted)`. Native bare-slug rows are never touched by it — they keep whatever the template or snapshot declared.
+This is the finding that decides every other question. opencodex writes `tool_mode` from exactly one function, `applyRoutedCodexToolMode`, and every call site is on a routed path: `normalizeRoutedCatalogEntry` (`parsing.ts:731`) plus `sync.ts:387`, `:389` and `:435`, all inside `if (isRouted)`. Native bare-slug rows are never touched by it — they keep whatever the template or snapshot declared.
 
 Consequences:
 
@@ -168,15 +172,15 @@ ocx config set providers.deepseek.codexToolMode shell
 ocx config set providers.deepseek.codexToolMode code_mode_only
 ```
 
-Saving regenerates the catalog immediately and a new session picks it up; the proxy does not need a restart. The dashboard's provider JSON editor **Providers overview → Edit JSON** accepts the same field (`codexToolMode` is `editor`-writable in `src/server/auth-cors.ts:778`). Do not run the CLI while that editor is open — the stale baseline returns a 409. CPA's tab form cannot set the field and its PATCH does not carry it, so saving the Settings tab does not wipe it.
+Saving regenerates the catalog immediately and a new session picks it up; the proxy does not need a restart. The dashboard's provider JSON editor **Providers overview → Edit JSON** accepts the same field (`codexToolMode` is `editor`-writable in `src/server/auth-cors.ts:788`). Do not run the CLI while that editor is open — the stale baseline returns a 409. CPA's tab form cannot set the field and its PATCH does not carry it, so saving the Settings tab does not wipe it.
 
 A combo inherits `shell` only when **every** member is shell (`src/codex/catalog/aggregation.ts:213`); one code-mode member holds the whole combo in code mode.
 
 ### Cost of dropping `code_mode_only`
 
-The "roughly 2.7x turn-1 prompt tokens" figure that circulates with this topic belongs to a **different** change: stamping `supports_search_tool = false` forces every MCP declaration into `exec.description`, measured at 96,699 → 258,929 characters (`src/codex/catalog/parsing.ts:744-752`). All 14 live rows here advertise `supports_search_tool: true`, so that regression is not in play, and the actual cost of switching a routed provider to shell mode was **not** measured in this pass — the `logs` table in `logs_2.sqlite` stores no token counts and `ocx observe` exposes none.
+The "roughly 2.7x turn-1 prompt tokens" figure that circulates with this topic belongs to a **different** change: stamping `supports_search_tool = false` forces every MCP declaration into `exec.description`, measured at 96,699 → 258,929 characters (`src/codex/catalog/parsing.ts:767-775`). All 14 live rows here advertise `supports_search_tool: true`, so that regression is not in play, and the actual cost of switching a routed provider to shell mode was **not** measured in this pass — the `logs` table in `logs_2.sqlite` stores no token counts and `ocx observe` exposes none.
 
-What is directly observable is the MCP consequence. The same comment `src/codex/catalog/parsing.ts:745-748` records that under code mode deferred MCP tools stay callable through the `exec` `tools` global with no `tool_search` round-trip. With no `exec`, that path is gone: MCP tools arrive through `tool_search` instead, which is what happened in the shell-mode session used for this pass — context7, gitnexus, exa and node_repl all arrived that way.
+What is directly observable is the MCP consequence. The same comment `src/codex/catalog/parsing.ts:768-771` records that under code mode deferred MCP tools stay callable through the `exec` `tools` global with no `tool_search` round-trip. With no `exec`, that path is gone: MCP tools arrive through `tool_search` instead, which is what happened in the shell-mode session used for this pass — context7, gitnexus, exa and node_repl all arrived that way.
 
 Separately, and **not** a consequence of shell mode: the Orca home that session ran under (`C:\Users\monet\AppData\Roaming\orca\codex-runtime-home\home\config.toml`) configures only context7, exa, gitnexus and node_repl. The primary home (`C:\Users\monet\.codex\config.toml:256`) additionally configures `fastctx`. So the **FastCtx** tools (`inspect_local_file`, `grep`, `glob`, `run`) that `AGENTS.md` mandates for local file work were absent because of the home, not the tool mode — but in that home those instructions are unactionable either way.
 
@@ -196,7 +200,7 @@ From `codex debug models --bundled` on the installed client, which is the model-
 
 Reading the table: the GPT-6 / GPT-5.6 generation is uniformly **code mode**. Astra is the flagship and the only row the client marks self-described; Sol, Terra and Luna are the 5.6 tier (frontier / balanced / fast), and Sol and Terra carry the `ultra` effort while Luna deliberately ends at `max`. All four advertise the 272k default with an 872k ceiling, and all four turn on `use_responses_lite`, which is the flag that moves tool delivery into `AdditionalTools` inside `input[]` rather than a top-level `tools[]` array. Astra is also the only row in this group with `experimental_supported_tools: send_user_message_async, clock`. `gpt-5.5` is the contrast case: no `tool_mode`, no responses-lite, no `ultra`, a flat 272k window, and its instructions name `apply_patch` and `exec_command` directly — that is why it exposes per-tool declarations.
 
-The `ultra` level on `gpt-5.5` / `5.4` / `5.4-mini` is injected by opencodex, not declared upstream (`sync.ts:255`, `ensureUltraReasoningLevel` at `sync.ts:257`); it is wire-clamped to `xhigh`.
+The `ultra` level on `gpt-5.5` / `5.4` / `5.4-mini` is injected by opencodex, not declared upstream (`sync.ts:263`, `ensureUltraReasoningLevel` at `sync.ts:265`); it is wire-clamped to `xhigh`.
 
 ---
 
@@ -520,9 +524,9 @@ Bump the date in the file name when the surface materially changes.
 ## Primary Verification Sources
 
 - **Local Codex runtime surface**: top-level tools and the `exec` nested catalog, observed in-session on 2026-09-12.
-- **Live catalog the client loads**: `C:\Users\monet\.codex\opencodex-catalog.json`, generated by opencodex 2.48.0; referenced by `model_catalog_json` in both Codex homes.
+- **Live catalog the client loads**: `C:\Users\monet\.codex\opencodex-catalog.json`, generated by opencodex (the installed runtime was 2.48.0 when this pass ran; `.ref/opencodex` v2.51.0 is the tree cited here); referenced by `model_catalog_json` in both Codex homes.
 - **Client's embedded catalog**: `codex debug models --bundled`, from the installed `codex-cli` 0.154.0.
-- **Catalog generator**: `C:\Users\monet\AppData\Roaming\npm\node_modules\@bitkyc08\opencodex\src\` — `codex/catalog/parsing.ts` (`applyRoutedCodexToolMode`, `normalizeRoutedCatalogEntry`, `applyMultiAgentMode`), `codex/catalog/sync.ts`, `codex/catalog/aggregation.ts`, `codex/data/upstream-models.json`, `config.ts`, `types/provider.ts`, `server/auth-cors.ts`.
+- **Catalog generator**: `C:\Users\monet\AppData\Roaming\npm\node_modules\@bitkyc08\opencodex\src\` (installed **2.48.0**) — `codex/catalog/parsing.ts` (`applyRoutedCodexToolMode`, `normalizeRoutedCatalogEntry`, `applyMultiAgentMode`), `codex/catalog/sync.ts`, `codex/catalog/aggregation.ts`, `codex/data/upstream-models.json`, `config.ts`, `types/provider.ts`, `server/auth-cors.ts`. - **opencodex source checkout (the citation target)**: `.ref/opencodex`, a git checkout of `lidge-jun/opencodex` at tag **v2.51.0**. **Every `src/...` line number in this document refers to this tree**, which is also the tree the runtime moves to on the next upgrade. Line numbers drift between releases and do not do so uniformly, so re-grep instead of adding an offset: on the installed 2.48.0 tree the same anchors sat at `ROUTED_CODEX_TOOL_MODE` 631, `applyRoutedCodexToolMode` 633, `applyMultiAgentMode` 660, `normalizeRoutedCatalogEntry` 708, `config.ts` 595, `types/provider.ts` 194, `server/auth-cors.ts` 778, and `codex/catalog/sync.ts` held its call sites at 379 / 381 / 423 with `ensureUltraReasoningLevel` at 257. `types/config.ts:209` and `codex/catalog/aggregation.ts:213` are the two anchors that did not move.
 - **Runtime log**: `C:\Users\monet\AppData\Roaming\orca\codex-runtime-home\home\logs_2.sqlite`, table `logs`, queried by `thread_id`.
 - **Upstream client catalog**: `.ref/CLIProxyAPI/internal/registry/models/codex_client_models.json`, carrying per-model tool configuration and the client base instructions.
 - **Wire handling**: `.ref/CLIProxyAPI/internal/translator/openai/openai/responses/openai_openai-responses_tools.go`, `.ref/CLIProxyAPI/internal/client/codex/optimize-multi-agent-v2/`, `.ref/CLIProxyAPI/sdk/api/handlers/handlers_interceptors.go`, `.ref/CLIProxyAPI/sdk/api/handlers/handlers_execution.go`.
