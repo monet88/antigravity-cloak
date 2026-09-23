@@ -28,3 +28,4 @@ test/
 .agents
 __pycache__/
 *.pyc
+.commandcode/

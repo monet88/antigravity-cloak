@@ -37,8 +37,10 @@ The following tools are intentionally excluded from cloaking and pass through un
 - Standard tools: `todo`, `hub`, `eval`.
 - Vibe Mode: `vibe_spawn`, `vibe_send`, `vibe_wait`, `vibe_kill`, `vibe_list`.
 - Autoresearch Mode: `init_experiment`, `run_experiment`, `log_experiment`, `update_notes`.
+- Autolearn & Memory: `learn`, `manage_skill` (OMP long-term memory & managed skill primitives; AGY has no equivalent).
+- Semantic Search: `find` (Judge cascade semantic search; cannot map to `grep_search` to avoid declaration collision with `grep`).
 
-These tools remain in the static OMP source identity inventory for source-side client identification but are never transformed, avoiding ambiguous reverse mappings.
+These tools remain in the static OMP source identity inventory or pass through unmolested, avoiding ambiguous reverse mappings and schema collisions.
 > **Virtual Devices (`xd://`)**: Auxiliary tools (`ast_grep`, `ast_edit`, `lsp`, `checkpoint`, `rewind`, `browser`, `retain`, `recall`, `reflect`, `memory_edit`, `security_scan`) and MCP servers (`xd://mcp__<server>_<tool>`) in `oh_my_pi` are dispatched through `read`/`write` to `xd://<target>`. Because `read`/`write` are cloaked automatically, these calls need no separate top-level MCP mapping.
 
 ##### 2. Claude Code (`claude_code`)
@@ -119,9 +121,9 @@ Protected OMP aliases (`Oh My Pi`, `oh-my-pi`, `omp`) mask to `Antigravity` even
 ### 5. Configuration Lifecycle
 Managed via `atomic.Pointer[filterConfig]`, enabling lock-free, zero-copy configuration reads on hot request and streaming paths with thread-safe live reconfiguration.
 
-### 6. Upstream Safety Sanitization (Google Cloud Code / Antigravity)
+### 6. Upstream Safety Sanitization & Envelope Conventions (Google Cloud Code / Antigravity)
 - **System Conventions Sanitization**: A compatibility transformation of OMP's exact `<system-conventions>` wrapper to `<conventions>`, retaining the enclosed instructions. Its scope is system/developer prompt text on ProtectedAGY requests; it does not alter tool data or explicit non-AGY bypass traffic. See [ADR 0003](docs/adr/0003-sanitize-system-prompt-conventions-tag-for-google-upstream.md).
-
+- **Request Type Envelope Context**: OMP upstream omitted `requestType: "agent"` to prevent requests from being routed into Google's constrained agent quota bucket on consumer/free-tier accounts. CPA injects `requestType: "agent"` at the executor layer; on Antigravity Pro/paid tier accounts, this agent bucket is unconstrained and behaves normally without patching.
 ## Key Files & Directories
 
 - `main.go`: Complete plugin implementation (lifecycle hooks, interceptors, brand rewriter, stream manager, configuration store).
