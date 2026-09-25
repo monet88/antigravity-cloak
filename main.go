@@ -39,6 +39,7 @@ import "C"
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
@@ -216,6 +217,7 @@ func handleRequestComplete(request []byte) []byte {
 	debugLog("handleRequestComplete: RequestID=%q Outcome=%s", comp.RequestID, comp.Outcome)
 	if comp.RequestID != "" {
 		globalLifecycleManager.deleteRoute(comp.RequestID)
+		globalAliasPlanManager.delete(comp.RequestID)
 		globalStreamManager.deleteSession("req:" + comp.RequestID)
 	}
 	return mustEnvelope(struct{}{})
@@ -351,6 +353,16 @@ func protected503Response(resp pluginapi.RequestInterceptResponse) []byte {
 	return mustEnvelope(resp)
 }
 
+func toolCloak503Response(resp pluginapi.RequestInterceptResponse) []byte {
+	resp.Terminate = true
+	resp.StatusCode = http.StatusServiceUnavailable
+	resp.ResponseHeaders = http.Header{
+		"Content-Type": []string{"application/json"},
+	}
+	resp.ResponseBody = []byte("{\"error\":{\"code\":\"tool_cloak_required\",\"message\":\"Request could not be safely cloaked.\"}}")
+	return mustEnvelope(resp)
+}
+
 func decodeStrictProtectedJSON(data []byte) (map[string]any, bool) {
 	if len(bytes.TrimSpace(data)) == 0 {
 		return nil, false
@@ -404,8 +416,8 @@ func inspectAndValidateProtectedTools(rootMap map[string]any, format string) ([]
 		if name == "" {
 			continue
 		}
-		prefix, base := splitToolNamespace(name)
-		targetBase, isMapped := canonicalOMPSafeMappingSet[base]
+		prefix, base, resolvedBase := resolveOMPSourceIdentity(name)
+		targetBase, isMapped := canonicalOMPSafeMappingSet[resolvedBase]
 		var finalBase string
 		var transformed bool
 		if isMapped {
@@ -458,7 +470,7 @@ func cloakProtectedToolNames(rootMap map[string]any, cloakTable map[string]strin
 				if fn, ok := tMap["function"].(map[string]any); ok {
 					if name, ok := fn["name"].(string); ok {
 						prefix, base := splitToolNamespace(name)
-						if target, exists := cloakTable[base]; exists {
+						if target, exists := lookupProtectedOMPTarget(base, cloakTable); exists {
 							fn["name"] = prefix + target
 							changed = true
 						}
@@ -467,7 +479,7 @@ func cloakProtectedToolNames(rootMap map[string]any, cloakTable map[string]strin
 			} else if sourceFormat == "anthropic" {
 				if name, ok := tMap["name"].(string); ok {
 					prefix, base := splitToolNamespace(name)
-					if target, exists := cloakTable[base]; exists {
+					if target, exists := lookupProtectedOMPTarget(base, cloakTable); exists {
 						tMap["name"] = prefix + target
 						changed = true
 					}
@@ -495,7 +507,7 @@ func cloakProtectedToolNames(rootMap map[string]any, cloakTable map[string]strin
 						}
 						if name, ok := fn["name"].(string); ok {
 							prefix, base := splitToolNamespace(name)
-							if target, exists := cloakTable[base]; exists {
+							if target, exists := lookupProtectedOMPTarget(base, cloakTable); exists {
 								fn["name"] = prefix + target
 								changed = true
 							}
@@ -505,7 +517,7 @@ func cloakProtectedToolNames(rootMap map[string]any, cloakTable map[string]strin
 				if msg["role"] == "tool" {
 					if name, ok := msg["name"].(string); ok {
 						prefix, base := splitToolNamespace(name)
-						if target, exists := cloakTable[base]; exists {
+						if target, exists := lookupProtectedOMPTarget(base, cloakTable); exists {
 							msg["name"] = prefix + target
 							changed = true
 						}
@@ -521,7 +533,7 @@ func cloakProtectedToolNames(rootMap map[string]any, cloakTable map[string]strin
 						if cnt["type"] == "tool_use" {
 							if name, ok := cnt["name"].(string); ok {
 								prefix, base := splitToolNamespace(name)
-								if target, exists := cloakTable[base]; exists {
+								if target, exists := lookupProtectedOMPTarget(base, cloakTable); exists {
 									cnt["name"] = prefix + target
 									changed = true
 								}
@@ -538,7 +550,7 @@ func cloakProtectedToolNames(rootMap map[string]any, cloakTable map[string]strin
 			if fn, ok := tc["function"].(map[string]any); ok {
 				if name, ok := fn["name"].(string); ok {
 					prefix, base := splitToolNamespace(name)
-					if target, exists := cloakTable[base]; exists {
+					if target, exists := lookupProtectedOMPTarget(base, cloakTable); exists {
 						fn["name"] = prefix + target
 						changed = true
 					}
@@ -547,7 +559,7 @@ func cloakProtectedToolNames(rootMap map[string]any, cloakTable map[string]strin
 		} else if sourceFormat == "anthropic" {
 			if name, ok := tc["name"].(string); ok {
 				prefix, base := splitToolNamespace(name)
-				if target, exists := cloakTable[base]; exists {
+				if target, exists := lookupProtectedOMPTarget(base, cloakTable); exists {
 					tc["name"] = prefix + target
 					changed = true
 				}
@@ -560,8 +572,8 @@ func cloakProtectedToolNames(rootMap map[string]any, cloakTable map[string]strin
 
 func validateProtectedPostTransform(rootMap map[string]any, sourceFormat string) bool {
 	hasUncloakedSource := func(name string) bool {
-		_, base := splitToolNamespace(name)
-		_, exists := canonicalOMPSafeMappingSet[base]
+		_, _, resolvedBase := resolveOMPSourceIdentity(name)
+		_, exists := canonicalOMPSafeMappingSet[resolvedBase]
 		return exists
 	}
 
@@ -1063,6 +1075,12 @@ func handleResponseIntercept(request []byte) []byte {
 				return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
 			}
 		}
+		if plan := globalAliasPlanManager.get(req.RequestID); plan != nil {
+			if modified, changed := uncloakResponseBodyExact(req.Body, plan.reverse, plan.sourceFormat); changed {
+				return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
+			}
+			return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+		}
 	}
 
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
@@ -1155,6 +1173,10 @@ func handleStreamChunkIntercept(request []byte) []byte {
 				resp := globalStreamManager.processChunk(&req, format)
 				return mustEnvelope(resp)
 			}
+		}
+		if plan := globalAliasPlanManager.get(req.RequestID); plan != nil {
+			resp := globalStreamManager.processChunk(&req, plan.sourceFormat)
+			return mustEnvelope(resp)
 		}
 	}
 
@@ -1324,6 +1346,27 @@ func splitToolNamespace(name string) (string, string) {
 	return "", name
 }
 
+// resolveOMPSourceIdentity recognizes one OMP wire-escape underscore on the
+// base identity only when the unescaped spelling is a verified OMP built-in.
+// It preserves the exact namespace and original base for downstream reversal.
+func resolveOMPSourceIdentity(name string) (prefix, originalBase, resolvedBase string) {
+	prefix, originalBase = splitToolNamespace(name)
+	resolvedBase = originalBase
+	if strings.HasPrefix(originalBase, "_") {
+		candidate := strings.TrimPrefix(originalBase, "_")
+		if ompSourceIdentityInventory[candidate] {
+			resolvedBase = candidate
+		}
+	}
+	return prefix, originalBase, resolvedBase
+}
+
+func lookupProtectedOMPTarget(base string, cloakTable map[string]string) (string, bool) {
+	_, _, resolvedBase := resolveOMPSourceIdentity(base)
+	target, ok := cloakTable[resolvedBase]
+	return target, ok
+}
+
 // lookupCloak maps a tool name (with or without namespace prefix) to its cloaked equivalent.
 func lookupCloak(name string, cloakTable map[string]string) (string, bool) {
 	if target, exists := cloakTable[name]; exists {
@@ -1471,6 +1514,7 @@ func reverseAssistantBrandInJSON(root any, format string) bool {
 	}
 	return changed
 }
+
 // isAssistantTextPartType reports whether an OpenAI content part type is
 // assistant-visible text. The allowlist is text, output_text, and untyped
 // (empty) parts; data/control/tool/reasoning/refusal parts keep literal
@@ -2404,6 +2448,249 @@ const (
 	streamDispositionCleanTerminal
 )
 
+type requestAliasPair struct {
+	SourceIdentity   string
+	UpstreamIdentity string
+	Changed          bool
+}
+
+type requestAliasPlan struct {
+	client        string
+	sourceFormat  string
+	pairs         []requestAliasPair
+	forward       map[string]string
+	reverse       map[string]string
+	cachedUncloak *cachedUncloakPattern
+	expected      int
+	disposition   atomic.Int32
+}
+
+func (p *requestAliasPlan) getDisposition() streamDisposition {
+	if p == nil {
+		return streamDispositionNone
+	}
+	return streamDisposition(p.disposition.Load())
+}
+
+func (p *requestAliasPlan) setDisposition(target streamDisposition) {
+	if p == nil {
+		return
+	}
+	for {
+		cur := p.disposition.Load()
+		if streamDisposition(cur) >= target {
+			return
+		}
+		if p.disposition.CompareAndSwap(cur, int32(target)) {
+			return
+		}
+	}
+}
+
+func fallbackAliasForSource(source string) string {
+	sum := sha256.Sum256([]byte("request-alias-v1\x00" + source))
+	return fmt.Sprintf("wp_ext_%x", sum[:16])
+}
+
+func buildRequestAliasUncloakPattern(reverse map[string]string) (*cachedUncloakPattern, error) {
+	if len(reverse) == 0 {
+		return nil, nil
+	}
+	targets := make([]string, 0, len(reverse))
+	lookup := make(map[string]string, len(reverse))
+	for target, source := range reverse {
+		targets = append(targets, target)
+		lookup[target] = source
+	}
+	sort.Strings(targets)
+	escaped := make([]string, 0, len(targets))
+	for _, target := range targets {
+		escaped = append(escaped, regexp.QuoteMeta(target))
+	}
+	pattern := "\"name\"[[:space:]]*:[[:space:]]*\"(" + strings.Join(escaped, "|") + ")\""
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	return &cachedUncloakPattern{re: re, lookup: lookup, exactOnly: true}, nil
+}
+
+func buildRequestAliasPlan(client string, sourceIdentities []string, preferred map[string]string) (*requestAliasPlan, error) {
+	client = normalizeClientKey(client)
+	if client == "" {
+		return nil, fmt.Errorf("client identity is required")
+	}
+
+	unique := make(map[string]struct{}, len(sourceIdentities))
+	for _, source := range sourceIdentities {
+		if source == "" {
+			return nil, fmt.Errorf("source identity is required")
+		}
+		unique[source] = struct{}{}
+	}
+	sources := make([]string, 0, len(unique))
+	for source := range unique {
+		sources = append(sources, source)
+	}
+	sort.Strings(sources)
+
+	plan := &requestAliasPlan{
+		client:  client,
+		pairs:   make([]requestAliasPair, 0, len(sources)),
+		forward: make(map[string]string, len(sources)),
+		reverse: make(map[string]string, len(sources)),
+	}
+	ownerByTarget := make(map[string]string, len(sources))
+	for _, source := range sources {
+		target, overridden := preferred[source]
+		if overridden {
+			if target == "" {
+				return nil, fmt.Errorf("empty alias target for %q", source)
+			}
+		} else {
+			target = fallbackAliasForSource(source)
+		}
+		if owner, exists := ownerByTarget[target]; exists && owner != source {
+			return nil, fmt.Errorf("alias collision: %q and %q resolve to %q", owner, source, target)
+		}
+		ownerByTarget[target] = source
+		changed := source != target
+		plan.pairs = append(plan.pairs, requestAliasPair{
+			SourceIdentity: source, UpstreamIdentity: target, Changed: changed,
+		})
+		plan.forward[source] = target
+		if changed {
+			plan.reverse[target] = source
+		}
+	}
+	cached, err := buildRequestAliasUncloakPattern(plan.reverse)
+	if err != nil {
+		return nil, fmt.Errorf("compile alias reverse pattern: %w", err)
+	}
+	plan.cachedUncloak = cached
+	return plan, nil
+}
+
+type requestAliasPlanManager struct {
+	mu    sync.Mutex
+	plans map[string]*requestAliasPlan
+}
+
+func newRequestAliasPlanManager() *requestAliasPlanManager {
+	return &requestAliasPlanManager{plans: make(map[string]*requestAliasPlan)}
+}
+
+var globalAliasPlanManager = newRequestAliasPlanManager()
+
+func (m *requestAliasPlanManager) set(requestID string, plan *requestAliasPlan) error {
+	if requestID == "" || plan == nil {
+		return fmt.Errorf("request alias plan requires correlation")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, exists := m.plans[requestID]; exists {
+		return fmt.Errorf("request alias plan already exists for %q", requestID)
+	}
+	m.plans[requestID] = plan
+	return nil
+}
+
+func (m *requestAliasPlanManager) get(requestID string) *requestAliasPlan {
+	if requestID == "" {
+		return nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.plans[requestID]
+}
+
+func (m *requestAliasPlanManager) delete(requestID string) {
+	if requestID == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.plans, requestID)
+	m.mu.Unlock()
+}
+
+func requestAliasSourceIdentities(body []byte, sourceFormat string) ([]string, error) {
+	format := normalizeSourceFormat(sourceFormat)
+	if format != "openai" && format != "anthropic" {
+		return nil, fmt.Errorf("unsupported source format %q", sourceFormat)
+	}
+	root, ok := decodeStrictProtectedJSON(body)
+	if !ok {
+		return nil, fmt.Errorf("request body must be one strict JSON object")
+	}
+	toolsValue, exists := root["tools"]
+	if !exists {
+		return nil, nil
+	}
+	tools, ok := toolsValue.([]any)
+	if !ok {
+		return nil, fmt.Errorf("unsupported tools representation")
+	}
+	sources := make([]string, 0, len(tools))
+	for _, raw := range tools {
+		tool, ok := raw.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("unsupported tool declaration")
+		}
+		var name string
+		if format == "openai" {
+			if typ, hasType := tool["type"].(string); hasType && typ != "" && typ != "function" {
+				return nil, fmt.Errorf("unsupported openai tool type %q", typ)
+			}
+			fn, ok := tool["function"].(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("unsupported openai tool declaration")
+			}
+			name, _ = fn["name"].(string)
+		} else {
+			name, _ = tool["name"].(string)
+		}
+		if name == "" {
+			return nil, fmt.Errorf("tool declaration is missing a name")
+		}
+		sources = append(sources, name)
+	}
+	return sources, nil
+}
+
+func admitRequestAliasPlan(req *pluginapi.RequestInterceptRequest, client string, preferred map[string]string) (*requestAliasPlan, error) {
+	if req == nil || req.RequestID == "" {
+		return nil, fmt.Errorf("request correlation is required")
+	}
+	sources, err := requestAliasSourceIdentities(req.Body, req.SourceFormat)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := buildRequestAliasPlan(client, sources, preferred)
+	if err != nil {
+		return nil, err
+	}
+	plan.sourceFormat = normalizeSourceFormat(req.SourceFormat)
+	plan.expected = requestChoiceCount(req.Body)
+	if err := globalAliasPlanManager.set(req.RequestID, plan); err != nil {
+		return nil, err
+	}
+	globalStreamManager.resetSession("req:"+req.RequestID, plan.client, plan.cachedUncloak, plan.expected)
+	return plan, nil
+}
+
+func admitRequestAliasPlanOrReject(req *pluginapi.RequestInterceptRequest, resp pluginapi.RequestInterceptResponse, client string, preferred map[string]string) (*requestAliasPlan, []byte) {
+	plan, err := admitRequestAliasPlan(req, client, preferred)
+	if err == nil {
+		return plan, nil
+	}
+	requestID := ""
+	if req != nil {
+		requestID = req.RequestID
+	}
+	debugLog("request alias admission rejected RequestID=%q client=%q: %v", requestID, client, err)
+	return nil, toolCloak503Response(resp)
+}
+
 type explicitOMPRouteState struct {
 	routeKind               explicitOMPRouteKind
 	client                  string
@@ -2436,6 +2723,7 @@ func (s *explicitOMPRouteState) setDisposition(target streamDisposition) {
 		}
 	}
 }
+
 type explicitOMPLifecycleManager struct {
 	mu     sync.Mutex
 	routes map[string]*explicitOMPRouteState
@@ -2602,6 +2890,11 @@ func (m *streamSessionManager) cleanupStaleLocked() {
 		}
 		if strings.HasPrefix(k, "req:") {
 			reqID := strings.TrimPrefix(k, "req:")
+			if plan := globalAliasPlanManager.get(reqID); plan != nil {
+				if s.payloadStarted || plan.getDisposition() == streamDispositionPayloadActive || len(s.tail) > 0 || len(s.laneProgress) > 0 {
+					continue
+				}
+			}
 			if route := globalLifecycleManager.getRoute(reqID); route != nil && route.routeKind == routeKindProtectedAGY {
 				if s.payloadStarted || route.getDisposition() == streamDispositionPayloadActive || len(s.tail) > 0 || hasPendingBrandCarry(s) || len(s.laneProgress) > 0 {
 					continue
@@ -2616,8 +2909,14 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 	key := m.sessionKey(req)
 
 	var protectedRoute *explicitOMPRouteState
+	var aliasPlan *requestAliasPlan
 	if req.RequestID != "" {
 		protectedRoute = globalLifecycleManager.getRoute(req.RequestID)
+		aliasPlan = globalAliasPlanManager.get(req.RequestID)
+	}
+	if aliasPlan != nil && aliasPlan.getDisposition() == streamDispositionCleanTerminal {
+		debugLog("StreamSessionManager: alias-plan late chunk after clean terminal key=%s", key)
+		return pluginapi.StreamChunkInterceptResponse{}
 	}
 	if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
 		if protectedRoute.malformed || protectedRoute.client != "oh_my_pi" {
@@ -2642,6 +2941,12 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		// If session was already pre-registered by request intercept, keep it.
 		if sessClient := m.getClient(key); sessClient != "" {
 			debugLog("StreamSessionManager: header-init using pre-registered session key=%s client=%s", key, sessClient)
+			return pluginapi.StreamChunkInterceptResponse{}
+		}
+		if aliasPlan != nil {
+			if aliasPlan.getDisposition() == streamDispositionNone {
+				m.ensureSession(key, aliasPlan.client, aliasPlan.cachedUncloak, aliasPlan.expected)
+			}
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
 		if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
@@ -2685,7 +2990,15 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 	sess := m.sessions[key]
 	m.mu.Unlock()
 	if sess == nil {
-		if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
+		if aliasPlan != nil {
+			if aliasPlan.getDisposition() == streamDispositionPayloadActive {
+				debugLog("StreamSessionManager: alias-plan disposable session lost after payload started key=%s", key)
+				return pluginapi.StreamChunkInterceptResponse{}
+			}
+			if aliasPlan.getDisposition() == streamDispositionNone {
+				sess = m.ensureSession(key, aliasPlan.client, aliasPlan.cachedUncloak, aliasPlan.expected)
+			}
+		} else if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
 			if protectedRoute.getDisposition() == streamDispositionPayloadActive {
 				debugLog("StreamSessionManager: disposable session lost after payload started key=%s", key)
 				return pluginapi.StreamChunkInterceptResponse{}
@@ -2704,6 +3017,10 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		return pluginapi.StreamChunkInterceptResponse{}
 	}
 	m.mu.Lock()
+	if aliasPlan != nil {
+		aliasPlan.setDisposition(streamDispositionPayloadActive)
+		sess.payloadStarted = true
+	}
 	if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
 		protectedRoute.setDisposition(streamDispositionPayloadActive)
 		sess.payloadStarted = true
@@ -2804,6 +3121,9 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			}
 			if !hasPendingBrandCarry(sess) {
 				m.deleteSession(key)
+				if aliasPlan != nil {
+					aliasPlan.setDisposition(streamDispositionCleanTerminal)
+				}
 				if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
 					protectedRoute.setDisposition(streamDispositionCleanTerminal)
 				}
@@ -2857,6 +3177,9 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		}
 		if done && !hasPendingBrandCarry(sess) {
 			m.deleteSession(key)
+			if aliasPlan != nil {
+				aliasPlan.setDisposition(streamDispositionCleanTerminal)
+			}
 			if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
 				protectedRoute.setDisposition(streamDispositionCleanTerminal)
 			}
