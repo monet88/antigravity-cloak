@@ -1076,6 +1076,9 @@ func handleResponseIntercept(request []byte) []byte {
 			}
 		}
 		if plan := globalAliasPlanManager.get(req.RequestID); plan != nil {
+			// A pinned plan is the sole reverse authority for that request. If
+			// it has no match, do not fall through to global/static inversion:
+			// a target untouched by this request must remain untouched.
 			if modified, changed := uncloakResponseBodyExact(req.Body, plan.reverse, plan.sourceFormat); changed {
 				return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
 			}
@@ -1340,7 +1343,7 @@ func detectionRequestBody(originalRequest, requestBody []byte) []byte {
 // splitToolNamespace separates an optional namespace prefix (e.g. "functions:", "default_api:")
 // from the base tool name. It returns (prefix, baseName). If no prefix is present, it returns ("", name).
 func splitToolNamespace(name string) (string, string) {
-	if idx := strings.LastIndex(name, ":"); idx >= 0 {
+	if idx := strings.LastIndex(name, ":"); idx > 0 {
 		return name[:idx+1], name[idx+1:]
 	}
 	return "", name
@@ -2679,6 +2682,9 @@ func admitRequestAliasPlan(req *pluginapi.RequestInterceptRequest, client string
 }
 
 func admitRequestAliasPlanOrReject(req *pluginapi.RequestInterceptRequest, resp pluginapi.RequestInterceptResponse, client string, preferred map[string]string) (*requestAliasPlan, []byte) {
+	// Issue #35 is an expand-only step. This admission seam is intentionally
+	// not called by handleRequestInterceptBefore yet; later migration tickets
+	// opt eligible clients into it without changing today's legacy request path.
 	plan, err := admitRequestAliasPlan(req, client, preferred)
 	if err == nil {
 		return plan, nil

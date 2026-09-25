@@ -172,6 +172,18 @@ func TestRequestAliasPlanPinnedAcrossReloadAndDisposableCleanup(t *testing.T) {
 		t.Fatalf("response did not use pinned exact reverse authority: %s", response.Body)
 	}
 
+	// The pinned plan is authoritative even when it has no reverse match.
+	// Falling through to the legacy Claude table here would incorrectly turn
+	// view_file into Read even though this request mapped Read -> target_a.
+	var unrelated pluginapi.ResponseInterceptResponse
+	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+		RequestID: requestID, SourceFormat: "openai", Model: "agy/model", RequestedModel: "agy/model",
+		Body: []byte("{\"choices\":[{\"message\":{\"tool_calls\":[{\"function\":{\"name\":\"view_file\",\"arguments\":\"{}\"}}]}}]}"),
+	}, &unrelated)
+	if len(unrelated.Body) != 0 {
+		t.Fatalf("active alias plan must block legacy reverse fallback: %s", unrelated.Body)
+	}
+
 	var completed struct{}
 	ompMeasurementCall(t, pluginabi.MethodRequestComplete, pluginapi.RequestCompletion{RequestID: requestID}, &completed)
 	if got := globalAliasPlanManager.get(requestID); got != nil {

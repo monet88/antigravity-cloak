@@ -130,7 +130,8 @@ func TestProtectedOMPEscapeRecognitionIsFinite(t *testing.T) {
 		"tools":[
 			{"type":"function","function":{"name":"_read"}},
 			{"type":"function","function":{"name":"_foo"}},
-			{"type":"function","function":{"name":"__read"}}
+			{"type":"function","function":{"name":"__read"}},
+			{"type":"function","function":{"name":":_read"}}
 		]
 	}`)
 	var admitted pluginapi.RequestInterceptResponse
@@ -141,7 +142,7 @@ func TestProtectedOMPEscapeRecognitionIsFinite(t *testing.T) {
 	if !bytes.Contains(admitted.Body, []byte(`"name":"view_file"`)) {
 		t.Fatalf("verified escaped builtin was not canonicalized: %s", admitted.Body)
 	}
-	for _, exact := range []string{`"name":"_foo"`, `"name":"__read"`} {
+	for _, exact := range []string{`"name":"_foo"`, `"name":"__read"`, `"name":":_read"`} {
 		if !bytes.Contains(admitted.Body, []byte(exact)) {
 			t.Fatalf("unknown escaped identity was silently canonicalized: want %s in %s", exact, admitted.Body)
 		}
