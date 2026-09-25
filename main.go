@@ -1577,6 +1577,9 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 	if cached == nil || cached.re == nil {
 		return nil, false
 	}
+	if cached.exactOnly {
+		return uncloakStreamChunkExact(body, cached.lookup)
+	}
 
 	// Find all matches of "name":"<target_tool_name>" and replace with originals.
 	// Uses FindAllSubmatchIndex to extract the tool name capture group and look
@@ -1601,13 +1604,7 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 		}
 		// loc[2]:loc[3] is capture group 1 (the tool name)
 		toolName := bodyStr[loc[2]:loc[3]]
-		var orig string
-		var ok bool
-		if cached.exactOnly {
-			orig, ok = cached.lookup[toolName]
-		} else {
-			orig, ok = lookupUncloak(toolName, cached.lookup)
-		}
+		orig, ok := lookupUncloak(toolName, cached.lookup)
 		if ok {
 			buf.WriteString(bodyStr[lastEnd:loc[2]])
 			buf.WriteString(orig)
@@ -1622,6 +1619,57 @@ func uncloakStreamChunk(body []byte, cached *cachedUncloakPattern) ([]byte, bool
 
 	buf.WriteString(bodyStr[lastEnd:])
 	return []byte(buf.String()), true
+}
+
+func uncloakStreamChunkExact(body []byte, uncloakTable map[string]string) ([]byte, bool) {
+	rewriteJSON := func(payload []byte) ([]byte, bool) {
+		if modified, changed := uncloakResponseBodyExact(payload, uncloakTable, "openai"); changed {
+			return modified, true
+		}
+		return uncloakResponseBodyExact(payload, uncloakTable, "anthropic")
+	}
+
+	if modified, changed := rewriteJSON(bytes.TrimSpace(body)); changed {
+		return modified, true
+	}
+
+	events := splitSSEEventsForBrand(body)
+	var out bytes.Buffer
+	changedOverall := false
+	for _, ev := range events {
+		lines := strings.Split(string(ev), "\n")
+		changedEvent := false
+		for i, line := range lines {
+			hasCR := strings.HasSuffix(line, "\r")
+			trimmed := strings.TrimSpace(line)
+			if !strings.HasPrefix(trimmed, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
+			if payload == "" || payload == "[DONE]" {
+				continue
+			}
+			modified, changed := rewriteJSON([]byte(payload))
+			if !changed {
+				continue
+			}
+			lines[i] = "data: " + string(modified)
+			if hasCR {
+				lines[i] += "\r"
+			}
+			changedEvent = true
+		}
+		if changedEvent {
+			out.WriteString(strings.Join(lines, "\n"))
+			changedOverall = true
+		} else {
+			out.Write(ev)
+		}
+	}
+	if !changedOverall {
+		return nil, false
+	}
+	return out.Bytes(), true
 }
 
 func (m *streamSessionManager) reverseBrandSSE(sess *streamSession, sseBytes []byte, format string) ([]byte, bool) {

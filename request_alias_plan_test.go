@@ -239,6 +239,33 @@ func TestRequestAliasPlanFragmentedStreamUsesPinnedAuthority(t *testing.T) {
 	}
 }
 
+func TestRequestAliasPlanStreamLeavesUnrelatedNameFieldsUntouched(t *testing.T) {
+	isolateRequestAliasPlan(t)
+	const requestID = "alias-plan-stream-unrelated-name"
+	req := pluginapi.RequestInterceptRequest{
+		RequestID: requestID, SourceFormat: "openai", Model: "agy/model", RequestedModel: "agy/model",
+		Body: []byte("{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"DynamicTool\"}}]}"),
+	}
+	plan, rejection := admitRequestAliasPlanOrReject(&req, pluginapi.RequestInterceptResponse{}, "claude_code", map[string]string{"DynamicTool": "wp_shared_tool"})
+	if rejection != nil || plan == nil {
+		t.Fatalf("valid plan rejected: %s", rejection)
+	}
+
+	frame := []byte("data: {\"metadata\":{\"name\":\"wp_shared_tool\"},\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"wp_shared_tool\",\"arguments\":\"{}\"}}]}}]}\n\n")
+	var result pluginapi.StreamChunkInterceptResponse
+	ompMeasurementCall(t, pluginabi.MethodResponseInterceptStreamChunk, pluginapi.StreamChunkInterceptRequest{
+		RequestID: requestID, SourceFormat: "openai", Model: "agy/model", ChunkIndex: 0, Body: frame,
+	}, &result)
+	wire := appendOMPMeasurementWire(nil, frame, result)
+
+	if !bytes.Contains(wire, []byte(`"metadata":{"name":"wp_shared_tool"}`)) {
+		t.Fatalf("unrelated name field was rewritten: %s", wire)
+	}
+	if !bytes.Contains(wire, []byte(`"name":"DynamicTool"`)) {
+		t.Fatalf("tool identity was not restored: %s", wire)
+	}
+}
+
 func TestRequestAliasPlanAnthropicExactReversal(t *testing.T) {
 	isolateRequestAliasPlan(t)
 	const requestID = "alias-plan-anthropic"
