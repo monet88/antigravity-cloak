@@ -95,6 +95,7 @@ Supported clients:
 > Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 > Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
 > Which tool names a given Codex model actually sends, and the recommended mapping for the shell-mode surface, are recorded in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**.
+> Where the Claude Code table diverges from OMP (wrong targets, missing tools, absent identity/protection), and the ranked fix options, are recorded in **[the Claude Code gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md)**.
 
 ### MCP tools behavior
 - **Oh My Pi (`oh_my_pi`)** mounts MCP servers under the virtual-device protocol (`xd://mcp__<server>_<tool>`) and invokes them through its standard `read`/`write` tools. Those core tools are already cloaked to `view_file`/`write_to_file`, so OMP MCP traffic is protected without a separate top-level mapping.

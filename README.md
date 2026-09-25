@@ -35,6 +35,11 @@ The built-in preset is enabled by default and covers major AI coding editors, as
 
 ## Configuration
 
+For deterministic client identity, send `X-Cloak-Client` with `claude_code`,
+`codex`, or `oh_my_pi` on requests to CLIProxyAPI. See
+[client header setup](docs/client-identity-headers.md) for Claude Code settings,
+Codex provider headers, and the opencodex proxy hop.
+
 In CLIProxyAPI `config.yaml`:
 
 ```yaml

@@ -44,17 +44,44 @@ These tools remain in the static OMP source identity inventory or pass through u
 > **Virtual Devices (`xd://`)**: Auxiliary tools (`ast_grep`, `ast_edit`, `lsp`, `checkpoint`, `rewind`, `browser`, `retain`, `recall`, `reflect`, `memory_edit`, `security_scan`) and MCP servers (`xd://mcp__<server>_<tool>`) in `oh_my_pi` are dispatched through `read`/`write` to `xd://<target>`. Because `read`/`write` are cloaked automatically, these calls need no separate top-level MCP mapping.
 
 ##### 2. Claude Code (`claude_code`)
-- `Bash` $\to$ `run_command`
-- `Edit` $\to$ `replace_file_content`
-- `Read` $\to$ `view_file`
-- `Write` $\to$ `write_to_file`
-- `Grep` $\to$ `grep_search`
-- `Glob` $\to$ `list_dir`
-- `Agent` $\to$ `invoke_subagent`
-- `AskUserQuestion` $\to$ `ask_question`
-- `ToolSearch` $\to$ `search_web`
-- `Skill` $\to$ `call_mcp_tool`
-- `Workflow` $\to$ `schedule`
+
+**Status legend:** ✅ live and correct · ⚠️ live but target is wrong · ⬜ missing (AGY target exists, no mapping) · ➖ deliberate pass-through.
+
+| CC Tool | Antigravity Target | Status | Classification / Note |
+| :--- | :--- | :--- | :--- |
+| `Read` | `view_file` | ✅ | Direct semantic alias |
+| `Write` | `write_to_file` | ✅ | Direct semantic alias |
+| `Edit` | `replace_file_content` | ✅ | Direct semantic alias |
+| `Bash` | `run_command` | ✅ | Direct semantic alias |
+| `Grep` | `grep_search` | ✅ | Direct semantic alias |
+| `Agent` | `invoke_subagent` | ✅ | Direct semantic alias; the CC subagent control surface (`ListAgents`, `SendMessage`, `TaskStop`) stays unmapped — see rows below |
+| `AskUserQuestion` | `ask_question` | ✅ | Direct semantic alias |
+| `Glob` | `list_dir` | ⚠️ | **Wrong target.** AGY `list_dir` lists one directory's immediate children and takes no pattern; `Glob` is a pattern matcher. Correct target is `find_by_name` (what OMP's `glob` already uses). See [gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md). |
+| `ToolSearch` | `search_web` | ⚠️ | **Semantic mismatch.** `ToolSearch` discovers deferred tools; AGY `search_web` queries the internet. Candidate for pass-through. |
+| `Skill` | `call_mcp_tool` | ⚠️ | **Schema mismatch.** AGY `call_mcp_tool` requires `ServerName` + `ToolName` + `Arguments`; `Skill` sends `skill` + `args`. Candidate for pass-through. |
+| `Workflow` | `schedule` | ⚠️ | **Schema mismatch.** AGY `schedule` takes `Prompt` / `DurationSeconds` / `CronExpression`; `Workflow` sends a `script` body. `ScheduleWakeup` is the closer fit. |
+
+**Missing mappings** (AGY native target exists, CC tool exists, no row above):
+
+| CC Tool | Antigravity Target | Note |
+| :--- | :--- | :--- |
+| `WebFetch` | `read_url_content` | Clearest omission — one-to-one, no schema conflict |
+| `TaskStop` | `manage_task` | Deferred tool in current CC builds |
+| `ListAgents` | `manage_subagents` | |
+| `SendMessage` | `send_message` | AGY's bare `send_message` is generic; see the Codex pass-through rationale in [CONTEXT §3](CONTEXT.md) |
+| `ListMcpResourcesTool` | `list_resources` | |
+| `ReadMcpResourceTool` | `read_resource` | |
+| `ScheduleWakeup`, `CronCreate` / `CronDelete` / `CronList` | `schedule` | One AGY target, several CC sources — injectivity conflict, see [ADR 0004](docs/adr/0004-cloak-codex-tool-names-by-wire-position.md) §2 |
+
+**Deliberate pass-through** (no AGY equivalent): `NotebookEdit`, `ReportFindings`, `EnterPlanMode` / `ExitPlanMode`, `EnterWorktree` / `ExitWorktree`, `DeferredToolPlaceholder`, and top-level `mcp__*` tools.
+
+**Known gaps beyond the table** — full detail in [the Claude Code gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md):
+- No `claudeCodeSourceIdentityInventory`; `detectClient` counts the runtime table directly against a floor of 2 name hits, with no `clientDistinctiveTools` guard.
+- No `ProtectedAGY` admission for `X-Cloak-Client: claude_code` on `agy/*` — the header resolves identity only, so no fail-closed 503.
+- `requestsRequestScopedReverse` does not cover `claude_code`, so the CC reverse table is never narrowed to the names the request declared.
+- Brand restoration is one-directional: `Claude Code -> Antigravity` on the request path only; assistant-visible `Antigravity` is not restored for CC as `Antigravity -> omp` is for OMP.
+
+⚠️ **Not yet verified on the wire.** No live Claude Code request capture exists; the ⚠️ findings derive from the declared AGY parameter sets in [the AGY tool surface reference](docs/research/antigravity-tool-surface-2026-09-06.md), not from an observed failed call.
 
 ##### 3. OpenAI Codex (`codex`)
 
