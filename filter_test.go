@@ -467,8 +467,8 @@ func TestDetectClientCountsConfiguredCodexSourceKeys(t *testing.T) {
 	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
 tool_mappings:
   codex:
-    custom_wire_a: run_command
-    custom_wire_b: manage_task
+    custom_wire_a: wp_custom_wire_a
+    custom_wire_b: wp_custom_wire_b
 `)))
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; body=%s", code, raw)
@@ -2706,6 +2706,31 @@ func TestAliasPlan_ConfigValidation(t *testing.T) {
 					yaml:        "tool_mappings:\n  " + client + ":\n    unrelated: wp_list_workers\n",
 					wantErr:     true,
 					errContains: "non-injective target naming",
+				},
+				{
+					name:        "collision with static tier-1 target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    unrelated: run_command\n",
+					wantErr:     true,
+					errContains: "non-injective target naming",
+				},
+				{
+					name:        "remap of an unrelated tier-1 owner does not free the target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    unrelated: run_command\n    Read: wp_read_alias\n    web_search: wp_web_search_alias\n",
+					wantErr:     true,
+					errContains: "non-injective target naming",
+				},
+				{
+					name:        "case-variant of tier-1 owner does not free target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    unrelated: run_command\n    bash: wp_bash_alias\n    Exec: wp_exec_alias\n",
+					wantErr:     true,
+					errContains: "non-injective target naming",
+				},
+				{
+					// Effective-state validation, not a target blacklist: remapping the
+					// tier-1 owner away (Bash for Claude Code, exec for Codex) releases
+					// run_command for a custom source in the same delta.
+					name: "remap-away of the tier-1 owner frees its target",
+					yaml: "tool_mappings:\n  " + client + ":\n    unrelated: run_command\n    Bash: wp_bash_alias\n    exec: wp_exec_alias\n",
 				},
 			}
 

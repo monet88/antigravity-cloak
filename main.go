@@ -1021,16 +1021,11 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		}
 	}
 
-	activeReverse := make(map[string]string, len(decls)*2)
+	activeReverse := make(map[string]string, len(decls))
 	for _, d := range decls {
 		target := d.finalBase
 		transformedFullName := d.prefix + target
 		activeReverse[transformedFullName] = d.originalFullName
-		if d.prefix != "" {
-			if _, exists := activeReverse[target]; !exists {
-				activeReverse[target] = d.originalFullName
-			}
-		}
 	}
 
 	var protectedCachedUncloak *cachedUncloakPattern
@@ -4598,6 +4593,12 @@ func validateAliasPlanConfigMappings(client string, mappings map[string]string) 
 	ownerByTarget := make(map[string]string)
 	ownerByFinalBase := make(map[string]string)
 
+	baseline := make(map[string]string)
+	if staticTier1, ok := defaultCloakTables[client]; ok {
+		for orig, target := range staticTier1 {
+			baseline[orig] = target
+		}
+	}
 	var shared map[string]string
 	switch client {
 	case "claude_code":
@@ -4610,13 +4611,27 @@ func validateAliasPlanConfigMappings(client string, mappings map[string]string) 
 			if client == "codex" && orig == "exec_command" && target == "run_command" {
 				continue
 			}
-			ownerByTarget[target] = orig
-			_, base := splitToolNamespace(target)
-			ownerByFinalBase[base] = orig
+			baseline[orig] = target
 		}
 	}
 
-	for orig, target := range mappings {
+	for bOrig, bTarget := range baseline {
+		if _, remapped := mappings[bOrig]; remapped {
+			continue
+		}
+		ownerByTarget[bTarget] = bOrig
+		_, base := splitToolNamespace(bTarget)
+		ownerByFinalBase[base] = bOrig
+	}
+
+	keys := make([]string, 0, len(mappings))
+	for k := range mappings {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, orig := range keys {
+		target := mappings[orig]
 		origTrimmed := strings.TrimSpace(orig)
 		targetTrimmed := strings.TrimSpace(target)
 		if origTrimmed == "" {

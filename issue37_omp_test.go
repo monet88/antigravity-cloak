@@ -752,3 +752,78 @@ func TestOMP_AutoresearchAndMemorySharedAliases(t *testing.T) {
 	var completed struct{}
 	ompMeasurementCall(t, pluginabi.MethodRequestComplete, pluginapi.RequestCompletion{RequestID: requestID}, &completed)
 }
+
+// A namespaced Protected OMP declaration grants reverse authority for its exact
+// namespaced target only: functions:read authorizes functions:view_file ->
+// functions:read, never bare view_file -> functions:read. Native bare AGY
+// targets in a correlated response must stay untouched, while bare sources
+// (read -> view_file) keep their normal reverse behavior.
+func TestOMP_NamespacedDeclarationGrantsExactReverseAuthorityOnly(t *testing.T) {
+	isolateOMPMeasurement(t)
+	const requestID = "omp-namespaced-exact-reverse"
+	body := []byte(`{
+		"messages":[],
+		"tools":[{"type":"function","function":{"name":"functions:read"}}]
+	}`)
+	var admitted pluginapi.RequestInterceptResponse
+	ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(requestID, "openai", body), &admitted)
+	if admitted.Terminate {
+		t.Fatalf("request rejected: %s", admitted.ResponseBody)
+	}
+	if !bytes.Contains(admitted.Body, []byte(`"name":"functions:view_file"`)) {
+		t.Fatalf("namespaced declaration was not cloaked: %s", admitted.Body)
+	}
+	route := globalLifecycleManager.getRoute(requestID)
+	if route == nil {
+		t.Fatal("ProtectedAGY route not pinned")
+	}
+	if got := route.activeReverse["functions:view_file"]; got != "functions:read" {
+		t.Fatalf("exact namespaced reverse authority lost: activeReverse[functions:view_file] = %q", got)
+	}
+	if got, exists := route.activeReverse["view_file"]; exists {
+		t.Fatalf("namespaced declaration must not authorize bare view_file: got %q", got)
+	}
+
+	// A native bare AGY target name must remain untouched downstream.
+	var native pluginapi.ResponseInterceptResponse
+	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+		RequestID: requestID, SourceFormat: "openai", Model: "agy/measurement",
+		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`),
+	}, &native)
+	if len(native.Body) != 0 {
+		t.Fatalf("native bare target was rewritten by a namespaced declaration: %s", native.Body)
+	}
+
+	// The exact namespaced target still restores to its exact source spelling.
+	var correlated pluginapi.ResponseInterceptResponse
+	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+		RequestID: requestID, SourceFormat: "openai", Model: "agy/measurement",
+		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"functions:view_file","arguments":"{}"}}]}}]}`),
+	}, &correlated)
+	if !bytes.Contains(correlated.Body, []byte(`"name":"functions:read"`)) {
+		t.Fatalf("namespaced target did not restore to its exact source: %s", correlated.Body)
+	}
+
+	// Bare-source behavior is preserved: read -> view_file reverses normally.
+	const bareID = "omp-bare-exact-reverse"
+	var bareAdmitted pluginapi.RequestInterceptResponse
+	ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(bareID, "openai", []byte(`{"messages":[],"tools":[{"type":"function","function":{"name":"read"}}]}`)), &bareAdmitted)
+	if bareAdmitted.Terminate {
+		t.Fatalf("bare request rejected: %s", bareAdmitted.ResponseBody)
+	}
+	bareRoute := globalLifecycleManager.getRoute(bareID)
+	if bareRoute == nil {
+		t.Fatal("bare ProtectedAGY route not pinned")
+	}
+	if got := bareRoute.activeReverse["view_file"]; got != "read" {
+		t.Fatalf("bare source reverse authority lost: activeReverse[view_file] = %q", got)
+	}
+	var bareRestored pluginapi.ResponseInterceptResponse
+	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+		RequestID: bareID, SourceFormat: "openai", Model: "agy/measurement",
+		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`),
+	}, &bareRestored)
+	if !bytes.Contains(bareRestored.Body, []byte(`"name":"read"`)) {
+		t.Fatalf("bare target did not restore to its source: %s", bareRestored.Body)
+	}
+}

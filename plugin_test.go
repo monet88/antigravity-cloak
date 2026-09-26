@@ -56,12 +56,12 @@ func TestReconfigureWithToolMappingsOverride(t *testing.T) {
 	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
 tool_mappings:
   claude_code:
-    bash: run_command
+    Bash: run_command
     my_custom_tool: ask_permission
   codex:
     exec: run_command
   Claude_Code:
-    grep: grep_search
+    Grep: grep_search
 `)))
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; body=%s", code, raw)
@@ -73,7 +73,7 @@ tool_mappings:
 	}
 	// Client keys are normalized to lowercase, so "Claude_Code" merges into
 	// "claude_code" rather than creating a separate, unreachable entry.
-	if cfg.ToolMappings["claude_code"]["grep"] != "grep_search" {
+	if cfg.ToolMappings["claude_code"]["Grep"] != "grep_search" {
 		t.Fatalf("expected mixed-case client key to normalize into claude_code; got %#v", cfg.ToolMappings["claude_code"])
 	}
 	if _, exists := cfg.ToolMappings["Claude_Code"]; exists {
