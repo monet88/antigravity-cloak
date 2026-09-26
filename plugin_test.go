@@ -178,9 +178,18 @@ custom_mappings:
 }
 
 func TestHandlePluginCallRequestInterceptBeforeRewritesCodingSignals(t *testing.T) {
-	request := requestInterceptRequestJSON(t, `{"system":"You are Codex.","messages":[],"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}}]}`)
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "coding-signals-rewrite"
+	body := `{"system":"You are Codex.","messages":[],"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}}]}`
+	interceptRaw, _ := json.Marshal(map[string]any{
+		"RequestID":      reqID,
+		"SourceFormat":   "openai",
+		"Model":          "antigravity/test",
+		"RequestedModel": "antigravity/test",
+		"Body":           []byte(body),
+	})
 
-	raw, code := handlePluginCall("request.intercept_before", request)
+	raw, code := handlePluginCall("request.intercept_before", interceptRaw)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; body=%s", code, raw)
 	}
@@ -193,14 +202,14 @@ func TestHandlePluginCallRequestInterceptBeforeRewritesCodingSignals(t *testing.
 	}
 	mustUnmarshalJSON(t, raw, &envelope)
 	if !envelope.OK {
-		t.Fatalf("ok = false, want true")
+		t.Fatalf("ok = false, want true; raw=%s", raw)
 	}
-	body, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
+	decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
 	if err != nil {
 		t.Fatalf("decode body: %v", err)
 	}
-	if !strings.Contains(string(body), "You are Antigravity.") {
-		t.Fatalf("body = %s, want rewritten system", body)
+	if !strings.Contains(string(decoded), "You are Antigravity.") {
+		t.Fatalf("body = %s, want rewritten system", decoded)
 	}
 }
 
@@ -441,8 +450,8 @@ func TestResponseInterceptReversesCodexCloakForCorrelatedRequest(t *testing.T) {
 		t.Fatalf("request intercept code = %d; body=%s", code, raw)
 	}
 
-	cloakedReq := `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"manage_subagents"}}],"messages":[]}`
-	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"manage_subagents","arguments":"{}"}}]}}]}`
+	cloakedReq := `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"wp_list_workers"}}],"messages":[]}`
+	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"wp_list_workers","arguments":"{}"}}]}}]}`
 	request, err := json.Marshal(map[string]any{
 		"RequestID":       reqID,
 		"SourceFormat":    "openai",
@@ -480,7 +489,7 @@ func TestResponseInterceptReversesCodexCloakForCorrelatedRequest(t *testing.T) {
 	if !strings.Contains(body, `"name":"exec"`) || !strings.Contains(body, `"name":"collaboration__list_agents"`) {
 		t.Fatalf("declared codex sources were not restored: %s", body)
 	}
-	if strings.Contains(body, "run_command") || strings.Contains(body, "manage_subagents") {
+	if strings.Contains(body, "run_command") || strings.Contains(body, "wp_list_workers") {
 		t.Fatalf("cloaked target leaked downstream: %s", body)
 	}
 }

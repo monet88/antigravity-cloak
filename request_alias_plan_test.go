@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -90,6 +92,11 @@ func TestRequestAliasPlanRejectsNonInjectiveTargets(t *testing.T) {
 		{"native target collision", []string{"Read", "view_file"}, map[string]string{"Read": "view_file", "view_file": "view_file"}},
 		{"static generated collision", []string{"Read", "DynamicTool"}, map[string]string{"Read": fallbackAliasForSource("DynamicTool")}},
 		{"invalid empty override", []string{"Read"}, map[string]string{"Read": ""}},
+		{"namespace variants collision", []string{"functions:foo", "default_api:foo"}, nil},
+		{"namespace mapped variants collision", []string{"functions:Read", "default_api:Read"}, map[string]string{"Read": "view_file"}},
+		{"namespace and bare mapped collision", []string{"Read", "functions:Read"}, map[string]string{"Read": "view_file"}},
+		{"namespace and native target collision", []string{"functions:Read", "default_api:view_file"}, map[string]string{"Read": "view_file"}},
+		{"namespace and bare unknown collision", []string{"foo", "functions:foo"}, nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -315,5 +322,120 @@ func TestRequestAliasPlansDoNotCrossRequestBoundaries(t *testing.T) {
 		if !bytes.Contains(response.Body, []byte("\"name\":\""+tc.source+"\"")) {
 			t.Fatalf("request %s restored wrong authority: %s", tc.id, response.Body)
 		}
+	}
+}
+
+func TestRequestAliasPlanConcurrentIsolation(t *testing.T) {
+	isolateRequestAliasPlan(t)
+
+	const workerCount = 16
+	type testWorkload struct {
+		requestID    string
+		client       string
+		sourceFormat string
+		sourceName   string
+		cloakedName  string
+		forbidden    string
+	}
+
+	workloads := make([]testWorkload, workerCount)
+	for i := 0; i < workerCount; i++ {
+		client := "claude_code"
+		sourceFormat := "anthropic"
+		sourceName := "Bash"
+		cloakedName := "run_command"
+		forbidden := "exec"
+		if i%2 == 1 {
+			client = "codex"
+			sourceFormat = "openai"
+			sourceName = "exec"
+			cloakedName = "run_command"
+			forbidden = "Bash"
+		}
+		workloads[i] = testWorkload{
+			requestID:    fmt.Sprintf("concurrent-req-%02d", i),
+			client:       client,
+			sourceFormat: sourceFormat,
+			sourceName:   sourceName,
+			cloakedName:  cloakedName,
+			forbidden:    forbidden,
+		}
+	}
+
+	var startWg sync.WaitGroup
+	var doneWg sync.WaitGroup
+	startWg.Add(1)
+
+	errors := make(chan error, workerCount*2)
+
+	for _, w := range workloads {
+		doneWg.Add(1)
+		go func(work testWorkload) {
+			defer doneWg.Done()
+			startWg.Wait() // all workers start simultaneously
+
+			// 1. Admit alias plan concurrently using legitimate sources mapping to the same target run_command
+			var reqBody []byte
+			if work.sourceFormat == "anthropic" {
+				reqBody = []byte(fmt.Sprintf(`{"tools":[{"name":%q,"description":""}]}`, work.sourceName))
+			} else {
+				reqBody = []byte(fmt.Sprintf(`{"tools":[{"type":"function","function":{"name":%q}}]}`, work.sourceName))
+			}
+			req := pluginapi.RequestInterceptRequest{
+				RequestID:    work.requestID,
+				SourceFormat: work.sourceFormat,
+				Body:         reqBody,
+			}
+			preferred := map[string]string{work.sourceName: work.cloakedName}
+			plan, rejection := admitRequestAliasPlanOrReject(&req, pluginapi.RequestInterceptResponse{}, work.client, preferred)
+			if rejection != nil || plan == nil {
+				errors <- fmt.Errorf("worker %s: admission failed: %s", work.requestID, rejection)
+				return
+			}
+
+			// 2. Perform concurrent response uncloaking against the common cloaked target run_command
+			var respReqBody []byte
+			if work.sourceFormat == "anthropic" {
+				respReqBody = []byte(fmt.Sprintf(`{"content":[{"type":"tool_use","name":%q,"input":{}}]}`, work.cloakedName))
+			} else {
+				respReqBody = []byte(fmt.Sprintf(`{"choices":[{"message":{"tool_calls":[{"function":{"name":%q,"arguments":"{}"}}]}}]}`, work.cloakedName))
+			}
+			var resp pluginapi.ResponseInterceptResponse
+			ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+				RequestID:    work.requestID,
+				SourceFormat: work.sourceFormat,
+				Body:         respReqBody,
+			}, &resp)
+
+			// 3. Verify exact source name is restored without cross-contamination or loss
+			expectedNeedle := fmt.Sprintf(`"name":%q`, work.sourceName)
+			altNeedle := fmt.Sprintf(`"name": %q`, work.sourceName)
+			if !bytes.Contains(resp.Body, []byte(expectedNeedle)) && !bytes.Contains(resp.Body, []byte(altNeedle)) {
+				errors <- fmt.Errorf("worker %s: reverse map loss: expected %s, got %s", work.requestID, expectedNeedle, string(resp.Body))
+				return
+			}
+			if bytes.Contains(resp.Body, []byte(work.cloakedName)) {
+				errors <- fmt.Errorf("worker %s leaked cloaked target %s: %s", work.requestID, work.cloakedName, string(resp.Body))
+				return
+			}
+
+			// 4. Verify competing client's source identity never contaminated this response
+			if bytes.Contains(resp.Body, []byte(work.forbidden)) {
+				errors <- fmt.Errorf("worker %s cross-contaminated by competing client source %s: %s", work.requestID, work.forbidden, string(resp.Body))
+				return
+			}
+
+			// 5. Complete request lifecycle
+			var completed struct{}
+			ompMeasurementCall(t, pluginabi.MethodRequestComplete, pluginapi.RequestCompletion{RequestID: work.requestID}, &completed)
+		}(w)
+	}
+
+	startWg.Done() // release all workers simultaneously
+	doneWg.Wait()
+	close(errors)
+
+	for err := range errors {
+		t.Errorf("concurrency error: %v", err)
 	}
 }

@@ -2,12 +2,15 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
@@ -406,8 +409,8 @@ func TestUncloakTablesInitialization(t *testing.T) {
 	if defaultUncloakTables["codex"]["run_command"] != "exec" {
 		t.Fatal("expected exec")
 	}
-	if defaultUncloakTables["codex"]["manage_subagents"] != "collaboration__list_agents" {
-		t.Fatal("expected collaboration__list_agents")
+	if defaultUncloakTables["codex"]["invoke_subagent"] != "collaboration__spawn_agent" {
+		t.Fatal("expected collaboration__spawn_agent")
 	}
 	if defaultUncloakTables["codex"]["search_web"] != "web_search" {
 		t.Fatal("expected web_search")
@@ -484,18 +487,26 @@ func TestDetectCloakedClient(t *testing.T) {
 		toolNames  []string
 		wantClient string
 	}{
-		// All Claude Code cloak TARGETS present → detected as claude_code
-		{"cloaked claude code", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "list_dir", "invoke_subagent", "ask_question", "search_web", "call_mcp_tool", "schedule"}, "claude_code"},
-		// All Codex cloak TARGETS present → detected as codex
-		{"cloaked codex", []string{"run_command", "search_web", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"}, "codex"},
-		// A realistic cloaked Codex body mixes five cloak targets with pass-through
+		// All Claude Code static cloak TARGETS present → detected as claude_code.
+		// Only Tier-1 AGY roles are in the static table; Tier-2 (ListAgents,
+		// SendMessage, TaskStop, MCP resources) are in shared aliases, whose
+		// wp_ targets are not in the static uncloak table.
+		{"cloaked claude code", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "find_by_name", "invoke_subagent", "ask_question", "search_web", "read_url_content"}, "claude_code"},
+		// Codex cloak TARGETS present → detected as codex.
+		// The static codex table now has fewer targets (exec->run_command,
+		// web_search->search_web, request_user_input->ask_question,
+		// collaboration__spawn_agent->invoke_subagent), and several overlap
+		// with the expanded CC table. A pure-codex stream is detected from
+		// request context (buildUncloakTable), not cloaked-target detection.
+		{"cloaked codex", []string{"run_command", "search_web", "ask_question", "invoke_subagent"}, "codex"},
+		// A realistic cloaked Codex body mixes four cloak targets with pass-through
 		// names that no client table owns, so target-coverage detection cannot reach
 		// its 80% threshold. That is expected: response/stream uncloaking resolves
 		// the client from OriginalRequest tool names via buildUncloakTable, not from
 		// the target-coverage fallback.
-		{"cloaked codex with pass-throughs stays undetected", []string{"run_command", "wait", "request_user_input_async", "sleep", "send_message", "wait_agent", "interrupt_agent", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"}, ""},
+		{"cloaked codex with pass-throughs stays undetected", []string{"run_command", "wait", "request_user_input_async", "sleep", "send_message", "wait_agent", "interrupt_agent", "ask_question", "invoke_subagent"}, ""},
 		// Both clients' targets present (native Antigravity) → returns ""
-		{"native antigravity superset", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "list_dir", "invoke_subagent", "ask_question", "search_web", "call_mcp_tool", "schedule", "multi_replace_file_content", "generate_image", "manage_task", "send_message", "define_subagent", "list_resources", "list_permissions", "read_resource", "ask_permission"}, ""},
+		{"native antigravity superset", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "find_by_name", "invoke_subagent", "ask_question", "search_web", "read_url_content", "multi_replace_file_content", "generate_image", "define_subagent", "list_permissions", "ask_permission"}, ""},
 		// Too few targets → no match
 		{"too few matches", []string{"run_command", "ask_question"}, ""},
 		// Unknown tools → no match
@@ -710,12 +721,11 @@ func TestBuildUncloakTableWithCloakedRequest(t *testing.T) {
 			{"type":"function","function":{"name":"view_file"}},
 			{"type":"function","function":{"name":"write_to_file"}},
 			{"type":"function","function":{"name":"grep_search"}},
-			{"type":"function","function":{"name":"list_dir"}},
+			{"type":"function","function":{"name":"find_by_name"}},
 			{"type":"function","function":{"name":"invoke_subagent"}},
 			{"type":"function","function":{"name":"ask_question"}},
 			{"type":"function","function":{"name":"search_web"}},
-			{"type":"function","function":{"name":"call_mcp_tool"}},
-			{"type":"function","function":{"name":"schedule"}}
+			{"type":"function","function":{"name":"read_url_content"}}
 		],
 		"messages":[]
 	}`
@@ -755,12 +765,16 @@ func TestCodexCodeModeCloakRoundTrip(t *testing.T) {
 		t.Fatalf("rewrite = changed:%v client:%q, want true/codex", changed, client)
 	}
 	got := string(rewritten)
-	for _, want := range []string{"run_command", "search_web", "ask_question", "invoke_subagent", "manage_task", "manage_subagents"} {
+	// The static table maps exec, web_search, request_user_input,
+	// collaboration__spawn_agent. The collaboration__followup_task and
+	// collaboration__list_agents were moved to codexSharedAliases and
+	// are only cloaked by the alias-plan path, not the legacy path.
+	for _, want := range []string{"run_command", "search_web", "ask_question", "invoke_subagent"} {
 		if !strings.Contains(got, `"`+want+`"`) {
 			t.Fatalf("expected cloaked target %q in %s", want, got)
 		}
 	}
-	for _, unwanted := range []string{"web_search", "request_user_input", "collaboration__spawn_agent", "collaboration__followup_task", "collaboration__list_agents"} {
+	for _, unwanted := range []string{"web_search", "request_user_input", "collaboration__spawn_agent"} {
 		if strings.Contains(got, unwanted) {
 			t.Fatalf("source name %q survived cloaking: %s", unwanted, got)
 		}
@@ -770,28 +784,8 @@ func TestCodexCodeModeCloakRoundTrip(t *testing.T) {
 	if uncloakClient != "codex" {
 		t.Fatalf("buildUncloakTable client = %q, want codex", uncloakClient)
 	}
-	if uncloakTable["run_command"] != "exec" || uncloakTable["manage_subagents"] != "collaboration__list_agents" {
-		t.Fatalf("uncloak table = %v, want run_command->exec and manage_subagents->collaboration__list_agents", uncloakTable)
-	}
-}
-
-func TestCodexTableKeepsTargetsUnique(t *testing.T) {
-	// Only one source may own run_command: defaultUncloakTables is its exact
-	// inverse, so a duplicate target would restore whichever source name the
-	// inversion happened to keep and hand the client a tool it never declared.
-	table := copyToolMappings(defaultCloakTables)["codex"]
-	if _, ok := table["exec"]; !ok {
-		t.Fatal("codex table must map exec; it is the sole code-mode entry point")
-	}
-	if _, ok := table["exec_command"]; ok {
-		t.Fatal("codex table must not map exec_command; run_command already has an owner")
-	}
-	seen := map[string]string{}
-	for src, target := range table {
-		if prev, dup := seen[target]; dup {
-			t.Fatalf("duplicate target %q shared by %q and %q", target, prev, src)
-		}
-		seen[target] = src
+	if uncloakTable["run_command"] != "exec" || uncloakTable["invoke_subagent"] != "collaboration__spawn_agent" {
+		t.Fatalf("uncloak table = %v, want run_command->exec and invoke_subagent->collaboration__spawn_agent", uncloakTable)
 	}
 }
 
@@ -947,7 +941,7 @@ func TestSplitSSEEvents(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			complete, incomplete := splitSSEEvents([]byte(tt.input))
+			complete, incomplete := splitSSEEventsWithNewBytes([]byte(tt.input), len(tt.input))
 			if string(complete) != tt.wantComplete {
 				t.Fatalf("complete = %q, want %q", string(complete), tt.wantComplete)
 			}
@@ -1096,7 +1090,7 @@ func TestSessionKeyFallsBackToBodyHash(t *testing.T) {
 // request: every declared Codex source name already replaced by its AGY target.
 // That is the body the host republishes downstream, because it only records the
 // executed payload after request.intercept_before rewrote it.
-const cloakedCodexRequest = `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"search_web"}},{"type":"function","function":{"name":"ask_question"}},{"type":"function","function":{"name":"invoke_subagent"}},{"type":"function","function":{"name":"manage_task"}},{"type":"function","function":{"name":"manage_subagents"}}],"messages":[]}`
+const cloakedCodexRequest = `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"search_web"}},{"type":"function","function":{"name":"ask_question"}},{"type":"function","function":{"name":"invoke_subagent"}}],"messages":[]}`
 
 func TestStreamFallbackUncloaksAlreadyCloakedCodexStream(t *testing.T) {
 	// Schema < 3 repeats the request body on every payload chunk, and that body
@@ -1468,9 +1462,6 @@ func TestDetectClientOhMyPi(t *testing.T) {
 		t.Fatalf("detectCloakedClient(%v) = %q, want non-oh_my_pi for standalone targets", cloakedTargets, cloakedClient)
 	}
 	// When independent attribution is present, corroboration succeeds.
-	if !corroborateCloakedTargetOMP(cloakedTargets) {
-		t.Fatalf("corroborateCloakedTargetOMP(%v) = false, want true", cloakedTargets)
-	}
 	if got := detectCloakedClientWithSignal(cloakedTargets, true); got != "oh_my_pi" {
 		t.Fatalf("detectCloakedClientWithSignal(%v, true) = %q, want 'oh_my_pi'", cloakedTargets, got)
 	}
@@ -1488,6 +1479,149 @@ func TestParseToolMappingsOhMyPiAliases(t *testing.T) {
 	}
 	if parsed["oh_my_pi"]["custom_tool"] != "custom_target" {
 		t.Fatalf("parsed mapping = %v, want oh_my_pi.custom_tool = custom_target", parsed)
+	}
+}
+
+func TestProtectedOMP_ConfigValidation(t *testing.T) {
+	// 1. Valid noncanonical custom mapping: accepted and honored
+	validYAML := []byte(`
+tool_mappings:
+  omp:
+    custom_tool: "custom_target"
+    my_extra: "wp_extra"
+`)
+	cfg, err := parseFilterConfigYAML(validYAML)
+	if err != nil {
+		t.Fatalf("expected valid noncanonical mapping to be accepted, got error: %v", err)
+	}
+	if cfg.ToolMappings["oh_my_pi"]["custom_tool"] != "custom_target" || cfg.ToolMappings["oh_my_pi"]["my_extra"] != "wp_extra" {
+		t.Fatalf("valid noncanonical mappings not stored in cfg: %v", cfg.ToolMappings["oh_my_pi"])
+	}
+
+	// 2. Reject mutating canonical nine mapping
+	mutatingYAML := []byte(`
+tool_mappings:
+  omp:
+    read: "custom_read"
+`)
+	if _, err := parseFilterConfigYAML(mutatingYAML); err == nil {
+		t.Fatal("expected mutating canonical mapping 'read' -> 'custom_read' to be rejected")
+	}
+
+	// 3. Reject non-injective mapping: custom tool mapping to canonical target
+	nonInjectiveCanonicalYAML := []byte(`
+tool_mappings:
+  omp:
+    my_read: "view_file"
+`)
+	if _, err := parseFilterConfigYAML(nonInjectiveCanonicalYAML); err == nil {
+		t.Fatal("expected custom tool mapping to canonical target 'view_file' to be rejected")
+	}
+
+	// 4. Reject non-injective mapping: duplicate custom targets
+	duplicateTargetYAML := []byte(`
+tool_mappings:
+  omp:
+    custom_a: "wp_tool"
+    custom_b: "wp_tool"
+`)
+	if _, err := parseFilterConfigYAML(duplicateTargetYAML); err == nil {
+		t.Fatal("expected duplicate custom mapping targets to be rejected")
+	}
+
+	// 4b. Reject non-injective mapping: custom tool mapping to shared alias target (e.g. wp_todo)
+	sharedCollisionYAML := []byte(`
+tool_mappings:
+  omp:
+    custom_tool: "wp_todo"
+`)
+	if _, err := parseFilterConfigYAML(sharedCollisionYAML); err == nil {
+		t.Fatal("expected custom tool mapping to shared alias target 'wp_todo' to be rejected at config time")
+	} else if !strings.Contains(err.Error(), `owned by "todo"`) {
+		t.Fatalf("expected error mentioning owned by \"todo\", got: %v", err)
+	}
+
+	// 4c. Re-declaring the same shared mapping (todo -> wp_todo) is accepted
+	sharedIdentityYAML := []byte(`
+tool_mappings:
+  omp:
+    todo: "wp_todo"
+`)
+	if _, err := parseFilterConfigYAML(sharedIdentityYAML); err != nil {
+		t.Fatalf("expected identity shared alias mapping to be accepted, got error: %v", err)
+	}
+
+	// 5. Reject forbidden target naming: leading underscore
+	forbiddenUnderscoreYAML := []byte(`
+tool_mappings:
+  omp:
+    custom_tool: "_reserved_target"
+`)
+	if _, err := parseFilterConfigYAML(forbiddenUnderscoreYAML); err == nil {
+		t.Fatal("expected target with leading underscore to be rejected")
+	}
+
+	// 6. Reject forbidden target naming: whitespace (internal, trailing, leading, tab)
+	whitespaceTargets := []struct {
+		name   string
+		target string
+	}{
+		{"internal_space", "has space"},
+		{"trailing_space", "view_file "},
+		{"leading_space", " view_file"},
+		{"tab", "view\tfile"},
+		{"trailing_tab", "custom_target\t"},
+	}
+	for _, tc := range whitespaceTargets {
+		yaml := []byte(fmt.Sprintf("\ntool_mappings:\n  omp:\n    custom_tool: %q\n", tc.target))
+		if _, err := parseFilterConfigYAML(yaml); err == nil {
+			t.Fatalf("expected target with %s %q to be rejected at config parse", tc.name, tc.target)
+		} else if !strings.Contains(err.Error(), "contains whitespace") {
+			t.Fatalf("expected error mentioning whitespace for %s, got: %v", tc.name, err)
+		}
+
+		rawResp, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, yaml))
+		if code != 0 {
+			t.Fatalf("reconfigure code = %d for %s", code, tc.name)
+		}
+		var env struct {
+			OK    bool `json:"ok"`
+			Error struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		mustUnmarshalJSON(t, rawResp, &env)
+		if env.OK || env.Error.Code != "invalid_config" || !strings.Contains(env.Error.Message, "whitespace") {
+			t.Fatalf("expected visible invalid_config whitespace envelope at reconfigure time for %s, got: %s", tc.name, rawResp)
+		}
+	}
+
+	// 7. Reject empty target
+	emptyTargetYAML := []byte(`
+tool_mappings:
+  omp:
+    custom_tool: ""
+`)
+	if _, err := parseFilterConfigYAML(emptyTargetYAML); err == nil {
+		t.Fatal("expected empty target to be rejected")
+	}
+
+	// 8. Reconfigure lifecycle rejects invalid config visibly
+	rawResp, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, mutatingYAML))
+	if code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	var env struct {
+		OK    bool `json:"ok"`
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	mustUnmarshalJSON(t, rawResp, &env)
+	if env.OK || env.Error.Code != "invalid_config" || !strings.Contains(env.Error.Message, "immutable") {
+		t.Fatalf("expected visible invalid_config envelope at reconfigure time, got: %s", rawResp)
 	}
 }
 
@@ -2009,6 +2143,30 @@ func TestStreamSessionManagerCleanupStaleSessions(t *testing.T) {
 	}
 }
 
+func TestStreamSessionManagerCleanupStalePreservesProtectedActiveSession(t *testing.T) {
+	const requestID = "cleanup-protected-active"
+	globalLifecycleManager.setRoute(requestID, &explicitOMPRouteState{
+		routeKind: routeKindProtectedAGY,
+		client:    "oh_my_pi",
+	})
+	defer globalLifecycleManager.deleteRoute(requestID)
+
+	mgr := newStreamSessionManager()
+	mgr.sessions["req:"+requestID] = &streamSession{
+		client:         "oh_my_pi",
+		updatedAt:      time.Now().Add(-10 * time.Minute),
+		payloadStarted: true,
+	}
+
+	mgr.mu.Lock()
+	mgr.cleanupStaleLocked()
+	_, exists := mgr.sessions["req:"+requestID]
+	mgr.mu.Unlock()
+	if !exists {
+		t.Fatal("expected stale ProtectedAGY session with active payload state to survive cleanup")
+	}
+}
+
 func TestDetectCloakedClientOhMyPiStandardNineTools(t *testing.T) {
 	// Canonical 9 tools sent by Oh My Pi after cloaking (using find_by_name, not list_dir)
 	ompCloakedTools := []string{
@@ -2024,9 +2182,6 @@ func TestDetectCloakedClientOhMyPiStandardNineTools(t *testing.T) {
 		t.Fatalf("detectCloakedClient(ompCloakedTools) = %q, want non-oh_my_pi for standalone target names", got)
 	}
 	// When independent OMP attribution is present, corroboration succeeds.
-	if !corroborateCloakedTargetOMP(ompCloakedTools) {
-		t.Fatalf("corroborateCloakedTargetOMP(ompCloakedTools) = false, want true")
-	}
 	if gotCorroborated := detectCloakedClientWithSignal(ompCloakedTools, true); gotCorroborated != "oh_my_pi" {
 		t.Fatalf("detectCloakedClientWithSignal(ompCloakedTools, true) = %q, want 'oh_my_pi'", gotCorroborated)
 	}
@@ -2044,9 +2199,6 @@ func TestDetectCloakedClientNamespaceNormalized(t *testing.T) {
 	if got := detectCloakedClient(qualifiedNine); got == "oh_my_pi" {
 		t.Fatalf("qualified nine standalone => %q, want non-oh_my_pi", got)
 	}
-	if !corroborateCloakedTargetOMP(qualifiedNine) {
-		t.Fatalf("corroborateCloakedTargetOMP(qualifiedNine) = false, want true")
-	}
 	if got := detectCloakedClientWithSignal(qualifiedNine, true); got != "oh_my_pi" {
 		t.Fatalf("qualified nine with signal => %q, want oh_my_pi", got)
 	}
@@ -2059,9 +2211,6 @@ func TestDetectCloakedClientNamespaceNormalized(t *testing.T) {
 	}
 	if got := detectCloakedClient(mixed); got == "oh_my_pi" {
 		t.Fatalf("mixed nine standalone => %q, want non-oh_my_pi", got)
-	}
-	if !corroborateCloakedTargetOMP(mixed) {
-		t.Fatalf("corroborateCloakedTargetOMP(mixed) = false, want true")
 	}
 	if got := detectCloakedClientWithSignal(mixed, true); got != "oh_my_pi" {
 		t.Fatalf("mixed nine with signal => %q, want oh_my_pi", got)
@@ -2076,9 +2225,6 @@ func TestDetectCloakedClientNamespaceNormalized(t *testing.T) {
 	}
 	if got := detectCloakedClient(belowThreshold); got != "" {
 		t.Fatalf("below-threshold set should not qualify, got %q", got)
-	}
-	if corroborateCloakedTargetOMP(belowThreshold) {
-		t.Fatalf("corroborateCloakedTargetOMP(belowThreshold) = true, want false")
 	}
 	if got := detectCloakedClientWithSignal(belowThreshold, true); got != "" {
 		t.Fatalf("below-threshold set with signal should not qualify, got %q", got)
@@ -2129,74 +2275,6 @@ func TestBuildUncloakTableFallbackQualified(t *testing.T) {
 	}
 	if origTable == nil || origTable["view_file"] != "read" || origTable["find_by_name"] != "glob" {
 		t.Fatalf("expected OMP uncloak table with view_file->read and find_by_name->glob, got %v", origTable)
-	}
-}
-
-func TestHandleRequestAndStreamUncloakRoundTripOhMyPi(t *testing.T) {
-	const reqID = "omp-roundtrip-test-1"
-	reqPayload := `{"model":"agy/gemini-3.7-flash","stream":true,"messages":[{"role":"user","content":"test"}],"tools":[{"type":"function","function":{"name":"bash","description":"run bash"}},{"type":"function","function":{"name":"read","description":"read file"}},{"type":"function","function":{"name":"edit","description":"edit file"}},{"type":"function","function":{"name":"write","description":"write file"}},{"type":"function","function":{"name":"grep","description":"search"}},{"type":"function","function":{"name":"glob","description":"find"}},{"type":"function","function":{"name":"task","description":"subtask"}},{"type":"function","function":{"name":"ask","description":"ask"}},{"type":"function","function":{"name":"todo","description":"task"}}],"stream":true}`
-
-	reqJSON, _ := json.Marshal(pluginapi.RequestInterceptRequest{
-		RequestID:      reqID,
-		SourceFormat:   "openai",
-		Model:          "agy/gemini-3.7-flash",
-		RequestedModel: "agy/gemini-3.7-flash",
-		Body:           []byte(reqPayload),
-	})
-
-	// 1. Request Intercept Before
-	respEnv := handleRequestInterceptBefore(reqJSON)
-	var reqEnv struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			Body []byte `json:"Body"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(respEnv, &reqEnv); err != nil {
-		t.Fatalf("unmarshal request resp: %v", err)
-	}
-	if !strings.Contains(string(reqEnv.Result.Body), "run_command") {
-		t.Fatalf("expected request tools cloaked to run_command: %s", string(reqEnv.Result.Body))
-	}
-
-	// 2. Stream Header Init (ChunkIndex = -1)
-	initJSON, _ := json.Marshal(pluginapi.StreamChunkInterceptRequest{
-		RequestID:       reqID,
-		SourceFormat:    "openai",
-		Model:           "agy/gemini-3.7-flash",
-		RequestedModel:  "agy/gemini-3.7-flash",
-		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
-		OriginalRequest: reqEnv.Result.Body,
-		RequestBody:     reqEnv.Result.Body,
-	})
-	handleStreamChunkIntercept(initJSON)
-
-	// 3. Stream Payload Chunk with tool_call "run_command"
-	payloadChunk := "data: {\"id\":\"1\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"run_command\",\"arguments\":\"{\\\"command\\\":\\\"ls\\\"}\"}}]}}]}\n\n"
-	chunkJSON, _ := json.Marshal(pluginapi.StreamChunkInterceptRequest{
-		RequestID:      reqID,
-		SourceFormat:   "openai",
-		Model:          "agy/gemini-3.7-flash",
-		RequestedModel: "agy/gemini-3.7-flash",
-		ChunkIndex:     0,
-		Body:           []byte(payloadChunk),
-	})
-	streamEnv := handleStreamChunkIntercept(chunkJSON)
-	var streamEnvResp struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			Body []byte `json:"Body"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(streamEnv, &streamEnvResp); err != nil {
-		t.Fatalf("unmarshal stream chunk resp: %v", err)
-	}
-	streamOut := string(streamEnvResp.Result.Body)
-	if strings.Contains(streamOut, "run_command") {
-		t.Fatalf("run_command leaked through stream without uncloaking: %s", streamOut)
-	}
-	if !strings.Contains(streamOut, `"name":"bash"`) && !strings.Contains(streamOut, `"name": "bash"`) {
-		t.Fatalf("expected run_command uncloaked to bash: %s", streamOut)
 	}
 }
 
@@ -2301,9 +2379,9 @@ func TestRewriteRequestBodyWithNamespacePrefix(t *testing.T) {
 
 func TestUncloakResponseBodyWithNamespacePrefix(t *testing.T) {
 	uncloakTable := map[string]string{
-		"view_file":    "read",
-		"manage_task":  "todo",
-		"run_command":  "bash",
+		"view_file":   "read",
+		"manage_task": "todo",
+		"run_command": "bash",
 	}
 
 	body := `{
@@ -2467,6 +2545,211 @@ func TestReplaceToolNamesInTextLongTierOneBounds(t *testing.T) {
 			got, _ := replaceToolNamesInText(tt.input, cached)
 			if got != tt.want {
 				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestModelGateBeforeAlias503_EmptyRequestID(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`model_prefixes: [agy/]`)))
+
+	cases := []struct {
+		name         string
+		client       string
+		sourceFormat string
+		reqBody      string
+	}{
+		{
+			name:         "claude_code",
+			client:       "claude_code",
+			sourceFormat: "anthropic",
+			reqBody:      `{"tools":[{"name":"Bash","description":"run commands"}],"messages":[{"role":"user","content":"hi"}]}`,
+		},
+		{
+			name:         "codex",
+			client:       "codex",
+			sourceFormat: "openai",
+			reqBody:      `{"tools":[{"type":"function","function":{"name":"exec"}}],"messages":[{"role":"user","content":"hi"}]}`,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// 1. Model outside the gate ("other/model") with EMPTY RequestID ("")
+			// Because modelAllowsCloak runs before alias plan correlation, the request
+			// must be gate-skipped (passthrough) with Terminate=false and NO 503 tool_cloak_required.
+			headers := http.Header{"X-Cloak-Client": {tc.client}}
+			rawPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, "", tc.sourceFormat, "other/model", []byte(tc.reqBody), headers)
+
+			rawResp, code := handlePluginCall("request.intercept_before", rawPayload)
+			if code != 0 {
+				t.Fatalf("code = %d", code)
+			}
+
+			var envelope struct {
+				OK     bool `json:"ok"`
+				Result struct {
+					Terminate       bool                `json:"Terminate"`
+					StatusCode      int                 `json:"StatusCode"`
+					ResponseBody    string              `json:"ResponseBody"`
+					ResponseHeaders map[string][]string `json:"ResponseHeaders"`
+				} `json:"result"`
+			}
+			mustUnmarshalJSON(t, rawResp, &envelope)
+
+			if envelope.Result.Terminate {
+				t.Fatalf("expected request outside model gate to NOT terminate, got Terminate=true with status=%d", envelope.Result.StatusCode)
+			}
+			if envelope.Result.StatusCode != 0 {
+				t.Fatalf("expected status 0 (no HTTP error), got %d", envelope.Result.StatusCode)
+			}
+			if strings.Contains(envelope.Result.ResponseBody, "tool_cloak_required") {
+				t.Fatalf("unexpected tool_cloak_required in gate-skipped response: %s", envelope.Result.ResponseBody)
+			}
+
+			// 2. Control check: on an eligible model ("agy/model"), the same empty RequestID MUST fail closed with 503 tool_cloak_required
+			rawEligible := makeIntegrationRequestInterceptPayloadWithHeaders(t, "", tc.sourceFormat, "agy/model", []byte(tc.reqBody), headers)
+			rawRespEligible, codeEligible := handlePluginCall("request.intercept_before", rawEligible)
+			if codeEligible != 0 {
+				t.Fatalf("code = %d", codeEligible)
+			}
+			var envelopeEligible struct {
+				OK     bool `json:"ok"`
+				Result struct {
+					Terminate    bool   `json:"Terminate"`
+					StatusCode   int    `json:"StatusCode"`
+					ResponseBody string `json:"ResponseBody"`
+				} `json:"result"`
+			}
+			mustUnmarshalJSON(t, rawRespEligible, &envelopeEligible)
+			if !envelopeEligible.Result.Terminate || envelopeEligible.Result.StatusCode != 503 {
+				t.Fatalf("expected eligible model with empty RequestID to fail closed with 503, got terminate=%t status=%d",
+					envelopeEligible.Result.Terminate, envelopeEligible.Result.StatusCode)
+			}
+		})
+	}
+}
+
+func TestAliasPlan_ConfigValidation(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+
+	clients := []string{"claude_code", "codex"}
+	for _, client := range clients {
+		t.Run(client, func(t *testing.T) {
+			cases := []struct {
+				name        string
+				yaml        string
+				wantErr     bool
+				errContains string
+			}{
+				{
+					name: "valid custom mapping",
+					yaml: "tool_mappings:\n  " + client + ":\n    my_tool: wp_custom_tool\n",
+				},
+				{
+					name:        "internal whitespace target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    my_tool: wp custom tool\n",
+					wantErr:     true,
+					errContains: "contains whitespace",
+				},
+				{
+					name:        "trailing space target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    my_tool: \"wp_custom \"\n",
+					wantErr:     true,
+					errContains: "contains whitespace",
+				},
+				{
+					name:        "leading space target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    my_tool: \" wp_custom\"\n",
+					wantErr:     true,
+					errContains: "contains whitespace",
+				},
+				{
+					name:        "tab in target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    my_tool: \"wp\tcustom\"\n",
+					wantErr:     true,
+					errContains: "contains whitespace",
+				},
+				{
+					name:        "empty target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    my_tool: \"\"\n",
+					wantErr:     true,
+					errContains: "empty mapping target",
+				},
+				{
+					name:        "leading underscore target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    my_tool: _custom_target\n",
+					wantErr:     true,
+					errContains: "leading underscore or colon is reserved",
+				},
+				{
+					name:        "leading colon target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    my_tool: \":custom_target\"\n",
+					wantErr:     true,
+					errContains: "leading underscore or colon is reserved",
+				},
+				{
+					name:        "collision within custom mappings",
+					yaml:        "tool_mappings:\n  " + client + ":\n    tool1: wp_shared\n    tool2: wp_shared\n",
+					wantErr:     true,
+					errContains: "non-injective target naming",
+				},
+				{
+					name:        "collision with namespace variants",
+					yaml:        "tool_mappings:\n  " + client + ":\n    tool1: functions:wp_shared\n    tool2: default_api:wp_shared\n",
+					wantErr:     true,
+					errContains: "non-injective target naming",
+				},
+				{
+					name:        "collision with reserved shared alias target",
+					yaml:        "tool_mappings:\n  " + client + ":\n    unrelated: wp_list_workers\n",
+					wantErr:     true,
+					errContains: "non-injective target naming",
+				},
+			}
+
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					_, err := parseFilterConfigYAML([]byte(tc.yaml))
+					if tc.wantErr {
+						if err == nil {
+							t.Fatalf("expected error containing %q, got nil", tc.errContains)
+						}
+						if !strings.Contains(err.Error(), tc.errContains) {
+							t.Fatalf("error %q does not contain %q", err.Error(), tc.errContains)
+						}
+
+						// Also verify plugin.reconfigure fails visibly with invalid_config error envelope
+						rawResp, _ := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(tc.yaml)))
+						var env struct {
+							OK    bool `json:"ok"`
+							Error struct {
+								Code    string `json:"code"`
+								Message string `json:"message"`
+							} `json:"error"`
+						}
+						mustUnmarshalJSON(t, rawResp, &env)
+						if env.OK || env.Error.Code != "invalid_config" {
+							t.Fatalf("expected visible invalid_config envelope at reconfigure time for %s, got: %s", tc.name, rawResp)
+						}
+					} else {
+						if err != nil {
+							t.Fatalf("unexpected error: %v", err)
+						}
+						rawResp, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(tc.yaml)))
+						if code != 0 {
+							t.Fatalf("reconfigure failed with code %d", code)
+						}
+						var env struct {
+							OK bool `json:"ok"`
+						}
+						mustUnmarshalJSON(t, rawResp, &env)
+						if !env.OK {
+							t.Fatalf("reconfigure expected ok=true, got: %s", rawResp)
+						}
+					}
+				})
 			}
 		})
 	}

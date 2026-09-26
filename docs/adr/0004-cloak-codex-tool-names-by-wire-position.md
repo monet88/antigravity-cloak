@@ -39,3 +39,14 @@ A live debug-log capture of a `cpa/agy` session listed these declared names: `ex
 - **The artifact name is not a version marker.** The build deployed before this ADR was named `v0.5.1` yet had been compiled from an older commit; `vcs.revision` inside the binary is the only reliable provenance. Bumping `pluginVersion` on a behaviour change would make the name honest again.
 - Evidence, per-name rationale and the adoption of the opposite (shell-mode) table are recorded in [the Codex surface reference](../research/codex-tool-surface-2026-09-12.md).
 
+## Amendment (2026-09-25 — Issue #32 / PR #36 / PR #38)
+
+1. **Request-Scoped Aliasing Expanded Across All Clients**:
+   Request-scoped aliasing is no longer Codex-only. Under parent #32, the request-scoped alias plan architecture is generalized across all supported clients (`claude_code`, `oh_my_pi`, `codex`).
+2. **Codex Shell Mode and Collaboration Tools Cloaked**:
+   - `exec_command` is cloaked to `run_command` in shell mode via `codexSharedAliases`. Because alias plans resolve targets per-request, `exec` (code mode) and `exec_command` (shell mode) no longer cause an injectivity collision in the static table at initialization.
+   - Shell-mode declarations (`apply_patch`, `write_stdin`, `view_image`) and collaboration helpers (`collaboration__followup_task`, `collaboration__list_agents`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message`) are mapped to stable shared aliases (`wp_*`).
+   - Dynamic MCP declarations (`mcp__*`) and unknown tools receive deterministic fallback aliases (`wp_ext_<hash>`).
+3. **Reversal Scoping**:
+   `requestsRequestScopedReverse` now applies to both `codex` and `claude_code` (with OMP using active reverse authority), scoping reverse restoration exclusively to declared tool names and alias plan outputs for each request.
+

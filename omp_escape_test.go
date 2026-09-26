@@ -142,9 +142,18 @@ func TestProtectedOMPEscapeRecognitionIsFinite(t *testing.T) {
 	if !bytes.Contains(admitted.Body, []byte(`"name":"view_file"`)) {
 		t.Fatalf("verified escaped builtin was not canonicalized: %s", admitted.Body)
 	}
-	for _, exact := range []string{`"name":"_foo"`, `"name":"__read"`, `"name":":_read"`} {
-		if !bytes.Contains(admitted.Body, []byte(exact)) {
-			t.Fatalf("unknown escaped identity was silently canonicalized: want %s in %s", exact, admitted.Body)
+	// Unknown escaped identities now get deterministic fallback aliases.
+	// Verify they are NOT their original names (they should be wp_ext_<hash>).
+	for _, unwanted := range []string{`"name":"_foo"`, `"name":"__read"`, `"name":":_read"`} {
+		if bytes.Contains(admitted.Body, []byte(unwanted)) {
+			t.Fatalf("unknown declaration should get a fallback alias, but found raw identity %s in %s", unwanted, admitted.Body)
+		}
+	}
+	// Verify fallback aliases are present.
+	for _, name := range []string{"_foo", "__read", ":_read"} {
+		fb := fallbackAliasForSource(name)
+		if !bytes.Contains(admitted.Body, []byte(`"name":"`+fb+`"`)) {
+			t.Fatalf("expected fallback alias %s for %s in %s", fb, name, admitted.Body)
 		}
 	}
 }
@@ -181,6 +190,133 @@ func TestProtectedOMPEscapedCanonicalCollisionsReject(t *testing.T) {
 			if route := globalLifecycleManager.getRoute(requestID); route != nil {
 				t.Fatal("rejected request must not pin ProtectedAGY route")
 			}
+		})
+	}
+}
+
+func TestProtectedOMP_BareNonInventoryPlusEscaped_RoundTrip(t *testing.T) {
+	isolateOMPMeasurement(t)
+
+	cases := []struct {
+		bare    string
+		escaped string
+		target  string
+	}{
+		{"find", "_find", "wp_find"},
+		{"learn", "_learn", "wp_learn"},
+		{"manage_skill", "_manage_skill", "wp_manage_skill"},
+	}
+
+	for _, tc := range cases {
+		// Scenario 1: Request with bare declaration + historical escaped tool call
+		t.Run("decl-"+tc.bare+"-history-"+tc.escaped, func(t *testing.T) {
+			requestID := "omp-" + tc.bare + "-plus-escaped-history"
+			fbEscaped := fallbackAliasForSource(tc.escaped)
+			body := []byte(`{
+				"messages":[
+					{"role":"assistant","tool_calls":[{"id":"call_1","type":"function","function":{"name":"` + tc.escaped + `","arguments":"{}"}}]},
+					{"role":"tool","tool_call_id":"call_1","name":"` + tc.escaped + `","content":"ok"}
+				],
+				"tools":[
+					{"type":"function","function":{"name":"` + tc.bare + `"}},
+					{"type":"function","function":{"name":"read"}}
+				]
+			}`)
+
+			var admitted pluginapi.RequestInterceptResponse
+			ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(requestID, "openai", body), &admitted)
+			if admitted.Terminate {
+				t.Fatalf("request unexpectedly rejected: %s", admitted.ResponseBody)
+			}
+
+			gotReq := string(admitted.Body)
+			if !strings.Contains(gotReq, `"name":"`+tc.target+`"`) {
+				t.Fatalf("expected %s to cloak to %s in request: %s", tc.bare, tc.target, gotReq)
+			}
+			if !strings.Contains(gotReq, `"name":"`+fbEscaped+`"`) {
+				t.Fatalf("expected %s to cloak to %s in request: %s", tc.escaped, fbEscaped, gotReq)
+			}
+			if strings.Contains(gotReq, `"name":"`+tc.bare+`"`) || strings.Contains(gotReq, `"name":"`+tc.escaped+`"`) {
+				t.Fatalf("raw %s or %s leaked in request: %s", tc.bare, tc.escaped, gotReq)
+			}
+
+			route := globalLifecycleManager.getRoute(requestID)
+			if route == nil {
+				t.Fatal("route state not pinned")
+			}
+			if got := route.activeReverse[tc.target]; got != tc.bare {
+				t.Fatalf("activeReverse[%s] = %q, want %q (should NOT be overwritten by %s)", tc.target, got, tc.bare, tc.escaped)
+			}
+			if got := route.activeReverse[fbEscaped]; got != tc.escaped {
+				t.Fatalf("activeReverse[%s] = %q, want %q", fbEscaped, got, tc.escaped)
+			}
+
+			// Response uncloak: tc.target MUST restore to tc.bare, not tc.escaped!
+			respBody := []byte(`{
+				"choices": [{
+					"message": {
+						"role": "assistant",
+						"tool_calls": [
+							{"id": "c1", "type": "function", "function": {"name": "` + tc.target + `", "arguments": "{}"}},
+							{"id": "c2", "type": "function", "function": {"name": "` + fbEscaped + `", "arguments": "{}"}}
+						]
+					}
+				}]
+			}`)
+			var uncloaked pluginapi.ResponseInterceptResponse
+			ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+				RequestID:    requestID,
+				SourceFormat: "openai",
+				Model:        "agy/measurement",
+				Body:         respBody,
+			}, &uncloaked)
+
+			gotResp := string(uncloaked.Body)
+			if !strings.Contains(gotResp, `"name":"`+tc.bare+`"`) {
+				t.Fatalf("expected %s to restore to %q, got: %s", tc.target, tc.bare, gotResp)
+			}
+			if !strings.Contains(gotResp, `"name":"`+tc.escaped+`"`) {
+				t.Fatalf("expected %s to restore to %q, got: %s", fbEscaped, tc.escaped, gotResp)
+			}
+			if strings.Contains(gotResp, `"name":"`+tc.target+`"`) || strings.Contains(gotResp, `"name":"`+fbEscaped+`"`) {
+				t.Fatalf("cloaked target leaked in response: %s", gotResp)
+			}
+
+			var completed struct{}
+			ompMeasurementCall(t, pluginabi.MethodRequestComplete, pluginapi.RequestCompletion{RequestID: requestID}, &completed)
+		})
+
+		// Scenario 2: Request declaring both bare and escaped in tools[]
+		t.Run("both-declared-in-tools-"+tc.bare, func(t *testing.T) {
+			requestID := "omp-both-declared-" + tc.bare
+			fbEscaped := fallbackAliasForSource(tc.escaped)
+			body := []byte(`{
+				"messages":[],
+				"tools":[
+					{"type":"function","function":{"name":"` + tc.bare + `"}},
+					{"type":"function","function":{"name":"` + tc.escaped + `"}}
+				]
+			}`)
+
+			var admitted pluginapi.RequestInterceptResponse
+			ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(requestID, "openai", body), &admitted)
+			if admitted.Terminate {
+				t.Fatalf("request unexpectedly rejected: %s", admitted.ResponseBody)
+			}
+
+			route := globalLifecycleManager.getRoute(requestID)
+			if route == nil {
+				t.Fatal("route state not pinned")
+			}
+			if got := route.activeReverse[tc.target]; got != tc.bare {
+				t.Fatalf("activeReverse[%s] = %q, want %q", tc.target, got, tc.bare)
+			}
+			if got := route.activeReverse[fbEscaped]; got != tc.escaped {
+				t.Fatalf("activeReverse[%s] = %q, want %q", fbEscaped, got, tc.escaped)
+			}
+
+			var completed struct{}
+			ompMeasurementCall(t, pluginabi.MethodRequestComplete, pluginapi.RequestCompletion{RequestID: requestID}, &completed)
 		})
 	}
 }

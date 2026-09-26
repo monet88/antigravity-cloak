@@ -1,12 +1,12 @@
-# Spec: Oh My Pi Tool Cloaking & Upstream Signal Sync (Superseded by #25)
+# Spec: Oh My Pi Tool Cloaking & Upstream Signal Sync (Superseded by #25 & #37)
 
-> **SUPERSEDED BY SPEC #25 / ISSUE #25**
-> The original 12-tool / Vibe / Autoresearch mapping contract described in this historical document has been superseded by the AGY CLI-native Safe Mapping Set (Issue #25, #26, #27, #28).
+> **SUPERSEDED BY SPEC #25 / ISSUE #25 & ISSUE #37**
+> The original 12-tool / Vibe / Autoresearch mapping contract described in this historical document has been superseded by the AGY CLI-native Safe Mapping Set (Issue #25, #26, #27, #28) and full declaration cloaking (Issue #37, parent #32).
 > In the current contract:
 > - The canonical Safe Mapping Set contains exactly 9 entries (`read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`).
 > - `glob` maps to `find_by_name`, not `list_dir`.
-> - `todo`, `hub`, `eval`, `find`, `learn`, `manage_skill`, all `vibe_*` tools, and Autoresearch tools (`init_experiment`, etc.) are intentional pass-through tools.
-> - Reverse mapping is request-scoped to active canonical pairs actually transformed on that request.
+> - Extended tools (`todo`, `hub`, `eval`, `find`, `learn`, `manage_skill`, all `vibe_*` tools, and Autoresearch tools) are no longer intentional pass-through on eligible Protected routes; they cloak to shared aliases (`wp_*`) via `ompSharedAliases`, with unknown declarations receiving deterministic fallback aliases (`wp_ext_<hash>`).
+> - Reverse mapping is request-scoped to active pairs actually transformed on that request.
 > - Protected OMP on `agy/*` fails closed with exact 503 JSON rejection; explicit non-AGY OMP requests take the durable zero-mutation bypass path.
 > Refer to **[CONTEXT.md](../../CONTEXT.md)** and **[docs/research/antigravity-tool-surface-2026-09-06.md](../research/antigravity-tool-surface-2026-09-06.md)** for current normative specifications.
 ## Problem Statement
@@ -16,7 +16,7 @@ Coding CLI agents (such as Claude Code, OpenAI Codex, and Oh My Pi) interact wit
 ## Solution
 
 Provide seamless, bidirectional cloaking and brand rewriting in the `antigravity-cloak` dynamic plugin:
-1. Two-way tool cloaking for Oh My Pi (12 core tools mapped to Antigravity equivalents on request, seamlessly restored on response/streaming SSE chunks).
+1. Two-way tool cloaking for Oh My Pi (canonical tools mapped to Antigravity equivalents on request, extended tools mapped to shared aliases, seamlessly restored on response/streaming SSE chunks).
 2. Comprehensive brand rewriting across 50+ mainstream AI coding assistants and agents in system prompts and system-role messages.
 3. Ratio-ranked client detection to avoid collisions across multiple clients with overlapping cloaked target sets.
 4. Complete end-to-end two-way verification protocol and checklist documentation.
@@ -34,24 +34,24 @@ Provide seamless, bidirectional cloaking and brand rewriting in the `antigravity
 9. As an Oh My Pi user, I want `run_command` model responses uncloaked back to `bash`, so that my local shell executes the command.
 10. As an Oh My Pi user, I want my `grep` tool calls cloaked to `grep_search`, so that regex search requests work natively.
 11. As an Oh My Pi user, I want `grep_search` model responses uncloaked back to `grep`, so that Oh My Pi processes the search output.
-12. As an Oh My Pi user, I want my `glob` tool calls cloaked to `list_dir`, so that file listing requests match backend schemas.
-13. As an Oh My Pi user, I want `list_dir` model responses uncloaked back to `glob`, so that directory entries are parsed properly.
+12. As an Oh My Pi user, I want my `glob` tool calls cloaked to `find_by_name`, so that file listing/matching requests match backend schemas.
+13. As an Oh My Pi user, I want `find_by_name` model responses uncloaked back to `glob`, so that directory entries are parsed properly.
 14. As an Oh My Pi user, I want my `task` tool calls cloaked to `invoke_subagent`, so that background subagents are recognized by Antigravity.
 15. As an Oh My Pi user, I want `invoke_subagent` model responses uncloaked back to `task`, so that Oh My Pi spawns its subagent jobs.
 16. As an Oh My Pi user, I want my `ask` tool calls cloaked to `ask_question`, so that interactive clarification requests work with Antigravity.
 17. As an Oh My Pi user, I want `ask_question` model responses uncloaked back to `ask`, so that interactive selection UI renders on my terminal.
-18. As an Oh My Pi user, I want my `todo` tool calls cloaked to `manage_task`, so that task status tracking routes to Antigravity.
-19. As an Oh My Pi user, I want `manage_task` model responses uncloaked back to `todo`, so that checklist items update locally.
-20. As an Oh My Pi user, I want my `hub` tool calls cloaked to `send_message`, so that inter-agent communication and process controls route properly.
-21. As an Oh My Pi user, I want `send_message` model responses uncloaked back to `hub`, so that messaging channels remain intact.
+18. As an Oh My Pi user, I want my `todo` tool calls cloaked to `wp_todo` (formerly `manage_task` in early draft), so that checklist tracking routes to Antigravity without colliding with administrative tool semantics.
+19. As an Oh My Pi user, I want `wp_todo` model responses uncloaked back to `todo`, so that checklist items update locally.
+20. As an Oh My Pi user, I want my `hub` tool calls cloaked to `wp_hub` (formerly `send_message` in early draft), so that messaging channels remain intact without owning generic targets.
+21. As an Oh My Pi user, I want `wp_hub` model responses uncloaked back to `hub`, so that messaging channels remain intact.
 22. As an Oh My Pi user, I want my `web_search` tool calls cloaked to `search_web`, so that search queries follow Antigravity standards.
 23. As an Oh My Pi user, I want `search_web` model responses uncloaked back to `web_search`, so that search results deliver to Oh My Pi.
-24. As an Oh My Pi user, I want my `eval` tool calls cloaked to `execute_code`, so that Python/JS code kernel runs are understood by the backend.
-25. As an Oh My Pi user, I want `execute_code` model responses uncloaked back to `eval`, so that output from persistent kernels returns to Oh My Pi.
+24. As an Oh My Pi user, I want my `eval` tool calls cloaked to `wp_eval` (formerly `execute_code` in early draft), so that Python/JS code kernel runs route cleanly.
+25. As an Oh My Pi user, I want `wp_eval` model responses uncloaked back to `eval`, so that output from persistent kernels returns to Oh My Pi.
 26. As an agent user, I want streaming SSE chunks to be buffered along complete event boundaries, so that split tool names across network packets are uncloaked reliably.
 27. As an operator, I want the plugin to recognize prompts from over 50 mainstream coding tools (Cursor, Windsurf, Copilot, Cline, Devin, etc.) and rewrite them to Antigravity, so that all coding signals are masked.
 28. As an operator, I want client detection to use match-ratio ranking, so that overlapping target sets between Oh My Pi and Claude Code do not cause detection collisions or silent drop.
-29. As an operator, I want MCP tools (`mcp__*`) to pass through unmolested in both directions, so that custom MCP servers function without extra configuration.
+29. As an operator, I want MCP tools (`mcp__*`) on uncloaked/bypass routes to pass through unmolested, while on Protected routes top-level `mcp__*` tools receive deterministic reversible fallback aliases (`wp_ext_<hash>`) to shield client tool surfaces.
 30. As a developer, I want a structured verification checklist in the documentation, so that I can validate end-to-end two-way cloaking across all tools and streaming responses.
 
 ## Implementation Decisions
@@ -67,7 +67,7 @@ Provide seamless, bidirectional cloaking and brand rewriting in the `antigravity
 
 - **Black-Box RPC Emulation**: Test request interception (`request.intercept_before`), response interception (`response.intercept_after`), and stream chunk interception (`response.stream_chunk`) via high-level `handlePluginCall` envelopes.
 - **Format Matrix**: Test across both OpenAI (`chat-completions` / `responses`) and Anthropic payload structures, including Anthropic content_block SSE streams split mid tool name across TCP chunks.
-- **MCP Pass-Through**: Assert `mcp__*` tool names survive request cloaking and response/stream uncloaking untouched in both directions.
+- **MCP Cloaking & Pass-Through**: Assert `mcp__*` tool names survive unmolested on generic/bypass routes while receiving deterministic fallback aliases (`wp_ext_<hash>`) and exact restoration on Protected routes.
 - **Multi-Client Collision Matrix**: Test client detection with pure, mixed, and superset tool collections to ensure unambiguous identification.
 - **Streaming Split-Chunk Simulation**: Test chunk boundaries split mid-word (e.g. `run_` + `command`) with SSE reassembly buffer verification.
 

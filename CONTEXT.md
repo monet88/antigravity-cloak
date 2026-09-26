@@ -15,7 +15,7 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 ### 2. Tool Cloaking & Uncloaking
 - **Cloaking (Request Path)**: Translates client-native tool names (e.g., `Bash`, `read`, `shell_command`) into Antigravity-native tool names (e.g., `run_command`, `view_file`) before the request reaches the upstream LLM.
 - **Uncloaking (Response & Stream Path)**: Reverses the translation in upstream responses (JSON bodies and SSE stream chunks) back to the client's native tool names so the client remains unaware of the disguise.
-- **MCP Pass-through & Virtual Devices**: Top-level `mcp__*` tools bypass cloaking in both directions. Oh My Pi normally mounts MCP tools as virtual devices (`xd://mcp__<server>_<tool>`) and reaches them through core `read`/`write`, which are already cloaked to `view_file`/`write_to_file`.
+- **MCP Tools & Virtual Devices**: In Protected OMP and alias plans (Claude Code, Codex), dynamic top-level `mcp__*` declarations receive deterministic reversible fallback aliases (`wp_ext_<hash>`). Oh My Pi also mounts virtual devices (`xd://mcp__<server>_<tool>`) reached through core `read`/`write` (`view_file`/`write_to_file`).
 
 #### Cloak Mapping Tables
 
@@ -32,20 +32,19 @@ Replaces client-identifying keywords (e.g. `OpenCode`, `Codex`, `Claude Code`, `
 | `ask` | `ask_question` | Direct Semantic Alias | Interactive user prompt UI |
 | `web_search` | `search_web` | Direct Semantic Alias | Web search (when tool is exposed) |
 
-**Intentional Pass-Through Tools**:
-The following tools are intentionally excluded from cloaking and pass through untouched:
-- Standard tools: `todo`, `hub`, `eval`.
-- Vibe Mode: `vibe_spawn`, `vibe_send`, `vibe_wait`, `vibe_kill`, `vibe_list`.
-- Autoresearch Mode: `init_experiment`, `run_experiment`, `log_experiment`, `update_notes`.
-- Autolearn & Memory: `learn`, `manage_skill` (OMP long-term memory & managed skill primitives; AGY has no equivalent).
-- Semantic Search: `find` (Judge cascade semantic search; cannot map to `grep_search` to avoid declaration collision with `grep`).
-
-These tools remain in the static OMP source identity inventory or pass through unmolested, avoiding ambiguous reverse mappings and schema collisions.
+**Extended Tools & Fallback Aliases**:
+Tools beyond the canonical Safe Mapping Set are cloaked on Protected routes via shared aliases or deterministic fallbacks:
+- Standard tools: `todo` $\to$ `wp_todo`, `hub` $\to$ `wp_hub`, `eval` $\to$ `wp_eval`.
+- Vibe Mode: `vibe_spawn`, `vibe_send`, `vibe_wait`, `vibe_kill`, `vibe_list` $\to$ `wp_vibe_*`.
+- Autoresearch Mode: `init_experiment`, `run_experiment`, `log_experiment`, `update_notes` $\to$ `wp_*`.
+- Autolearn & Memory: `learn` $\to$ `wp_learn`, `manage_skill` $\to$ `wp_manage_skill`.
+- Semantic Search: `find` $\to$ `wp_find`.
+- Unknown or dynamic tools (including dynamic MCP declarations) receive deterministic reversible fallbacks (`wp_ext_<hash>`). Reverse uncloaking is request-scoped to active pairs.
 > **Virtual Devices (`xd://`)**: Auxiliary tools (`ast_grep`, `ast_edit`, `lsp`, `checkpoint`, `rewind`, `browser`, `retain`, `recall`, `reflect`, `memory_edit`, `security_scan`) and MCP servers (`xd://mcp__<server>_<tool>`) in `oh_my_pi` are dispatched through `read`/`write` to `xd://<target>`. Because `read`/`write` are cloaked automatically, these calls need no separate top-level MCP mapping.
 
 ##### 2. Claude Code (`claude_code`)
 
-**Status legend:** ✅ live and correct · ⚠️ live but target is wrong · ⬜ missing (AGY target exists, no mapping) · ➖ deliberate pass-through.
+**Status legend:** ✅ live and correct · 🔄 request-scoped shared alias (`wp_*`) · 🔀 deterministic fallback (`wp_ext_<hash>`).
 
 | CC Tool | Antigravity Target | Status | Classification / Note |
 | :--- | :--- | :--- | :--- |
@@ -54,57 +53,48 @@ These tools remain in the static OMP source identity inventory or pass through u
 | `Edit` | `replace_file_content` | ✅ | Direct semantic alias |
 | `Bash` | `run_command` | ✅ | Direct semantic alias |
 | `Grep` | `grep_search` | ✅ | Direct semantic alias |
-| `Agent` | `invoke_subagent` | ✅ | Direct semantic alias; the CC subagent control surface (`ListAgents`, `SendMessage`, `TaskStop`) stays unmapped — see rows below |
+| `Glob` | `find_by_name` | ✅ | Direct semantic alias (pattern-matching file finder) |
+| `Agent` | `invoke_subagent` | ✅ | Direct semantic alias |
 | `AskUserQuestion` | `ask_question` | ✅ | Direct semantic alias |
-| `Glob` | `list_dir` | ⚠️ | **Wrong target.** AGY `list_dir` lists one directory's immediate children and takes no pattern; `Glob` is a pattern matcher. Correct target is `find_by_name` (what OMP's `glob` already uses). See [gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md). |
-| `ToolSearch` | `search_web` | ⚠️ | **Semantic mismatch.** `ToolSearch` discovers deferred tools; AGY `search_web` queries the internet. Candidate for pass-through. |
-| `Skill` | `call_mcp_tool` | ⚠️ | **Schema mismatch.** AGY `call_mcp_tool` requires `ServerName` + `ToolName` + `Arguments`; `Skill` sends `skill` + `args`. Candidate for pass-through. |
-| `Workflow` | `schedule` | ⚠️ | **Schema mismatch.** AGY `schedule` takes `Prompt` / `DurationSeconds` / `CronExpression`; `Workflow` sends a `script` body. `ScheduleWakeup` is the closer fit. |
+| `WebSearch` | `search_web` | ✅ | Direct semantic alias |
+| `WebFetch` | `read_url_content` | ✅ | Direct semantic alias |
 
-**Missing mappings** (AGY native target exists, CC tool exists, no row above):
+**Tier-2 Shared Aliases & Tier-3 Fallback Aliases** (parent #32 / issue #36):
+Tools without a 1:1 AGY equivalent receive stable shared aliases (`wp_*`) via `claudeCodeSharedAliases`:
+- Subagent control: `ListAgents` $\to$ `wp_list_workers`, `TaskStop` $\to$ `wp_cancel_task`, `SendMessage` $\to$ `wp_send_message`
+- MCP resources: `ListMcpResourcesTool` $\to$ `wp_list_resources`, `ReadMcpResourceTool` $\to$ `wp_read_resource`, `ReadMcpResourceDirTool` $\to$ `wp_list_resource_dir`, `WaitForMcpServers` $\to$ `wp_wait_integrations`
+- Extended/Planning/Workflow: `ToolSearch` $\to$ `wp_find_tools`, `Skill` $\to$ `wp_invoke_skill`, `Workflow` $\to$ `wp_run_workflow`, `NotebookEdit` $\to$ `wp_edit_notebook`, `ReportFindings` $\to$ `wp_submit_report`, `EnterPlanMode` / `ExitPlanMode` $\to$ `wp_begin_planning` / `wp_finish_planning`, `EnterWorktree` / `ExitWorktree` $\to$ `wp_open_worktree` / `wp_close_worktree`, `ScheduleWakeup` $\to$ `wp_set_wakeup`, `CronCreate` / `CronDelete` / `CronList` $\to$ `wp_create_schedule` / `wp_delete_schedule` / `wp_list_schedules`
+- Deferred tool placeholders: `DeferredToolPlaceholder` $\to$ `wp_resolve_tool` (carried exclusively across normal protocol tool-identity positions: `tools[]`, message `tool_calls`/`tool_use`, and `tool_choice`; no unobserved special discovery carrier is claimed)
+- Undeclared tools and dynamic `mcp__*` tools receive deterministic fallback aliases (`wp_ext_<hash>`).
+- Request-scoped reversal (`requestsRequestScopedReverse`) narrows uncloaking to the active alias plan for that request, restoring exact declared source identities.
 
-| CC Tool | Antigravity Target | Note |
-| :--- | :--- | :--- |
-| `WebFetch` | `read_url_content` | Clearest omission — one-to-one, no schema conflict |
-| `TaskStop` | `manage_task` | Deferred tool in current CC builds |
-| `ListAgents` | `manage_subagents` | |
-| `SendMessage` | `send_message` | AGY's bare `send_message` is generic; see the Codex pass-through rationale in [CONTEXT §3](CONTEXT.md) |
-| `ListMcpResourcesTool` | `list_resources` | |
-| `ReadMcpResourceTool` | `read_resource` | |
-| `ScheduleWakeup`, `CronCreate` / `CronDelete` / `CronList` | `schedule` | One AGY target, several CC sources — injectivity conflict, see [ADR 0004](docs/adr/0004-cloak-codex-tool-names-by-wire-position.md) §2 |
-
-**Deliberate pass-through** (no AGY equivalent): `NotebookEdit`, `ReportFindings`, `EnterPlanMode` / `ExitPlanMode`, `EnterWorktree` / `ExitWorktree`, `DeferredToolPlaceholder`, and top-level `mcp__*` tools.
-
-**Known gaps beyond the table** — full detail in [the Claude Code gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md):
-- No `claudeCodeSourceIdentityInventory`; `detectClient` counts the runtime table directly against a floor of 2 name hits, with no `clientDistinctiveTools` guard.
-- No `ProtectedAGY` admission for `X-Cloak-Client: claude_code` on `agy/*` — the header resolves identity only, so no fail-closed 503.
-- `requestsRequestScopedReverse` does not cover `claude_code`, so the CC reverse table is never narrowed to the names the request declared.
+**Known remaining gaps** (historical baseline in [the Claude Code gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md)):
+- No `ProtectedAGY` admission for `X-Cloak-Client: claude_code` on `agy/*` — the header resolves identity only, so no fail-closed 503 (fail-closed 503 applies to missing/duplicate RequestID or alias-plan collision).
 - Brand restoration is one-directional: `Claude Code -> Antigravity` on the request path only; assistant-visible `Antigravity` is not restored for CC as `Antigravity -> omp` is for OMP.
 
-⚠️ **Not yet verified on the wire.** No live Claude Code request capture exists; the ⚠️ findings derive from the declared AGY parameter sets in [the AGY tool surface reference](docs/research/antigravity-tool-surface-2026-09-06.md), not from an observed failed call.
+⚠️ **Wire validation:** CC core mappings and alias plans are verified against recorded Anthropic message fixtures and protocol test suites.
 
 ##### 3. OpenAI Codex (`codex`)
 
 Chat Completions, as delivered by opencodex's `openai-chat` adapter (verified 2026-09-12 from this plugin's own debug log of a live `cpa/agy` session). Namespaced children arrive flattened as `<namespace>__<child>`, matching opencodex's `namespacedToolName`, so they are keyed in that exact spelling; `splitToolNamespace` splits on `:` alone and deliberately does not resolve them.
-- `exec` $\to$ `run_command`
+- `exec` $\to$ `run_command` (code mode)
 - `web_search` $\to$ `search_web`
 - `request_user_input` $\to$ `ask_question`
 - `collaboration__spawn_agent` $\to$ `invoke_subagent`
-- `collaboration__followup_task` $\to$ `manage_task`
-- `collaboration__list_agents` $\to$ `manage_subagents`
 
-Only names that occupy a tool-name position are listed. Helpers that exist solely as prose inside the `exec` description — `apply_patch`, `exec_command`, `write_stdin`, `view_image`, `tool_search`, the goal and MCP-resource tools — stay pass-through, because the reverse path restores a name only where it appears as a tool name. `exec` is the sole entry point and therefore owns `run_command`; a shell-mode session declares `exec_command` instead, which is absent because one target cannot carry two sources.
-
-Only `tools[]` entries are renameable, and which names a session declares depends on the model's tool mode:
+All declared tools in `tools[]`, history `tool_calls[]`, tool-role messages, and `tool_choice` are cloaked using request-scoped alias plans (issue #38, parent #32):
+- Names with proven AGY role equivalents map to the AGY targets above.
+- Tools without 1:1 AGY equivalents in code mode (`wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message`, `collaboration__followup_task`, `collaboration__list_agents`) or shell mode (`exec_command`, `write_stdin`, `apply_patch`, `view_image`) map to stable shared aliases (`wp_*`) via `codexSharedAliases` (`exec_command` maps to `run_command`).
+- Dynamic MCP declarations or undeclared tools receive deterministic fallback aliases (`wp_ext_<hash>`).
+- Request-scoped reversal (`requestsRequestScopedReverse`) ensures exact restoration of declared names on response and stream paths without collision across modes.
+- Client detection independence: generic shared tools (`wait`, `clock__sleep`) and neutral aliases (`wp_*`) are excluded from detection attribution inventory to prevent false-positive Codex attribution.
 
 | `tool_mode` | wire surface | table coverage |
 | :--- | :--- | :--- |
-| `code_mode_only` — the default for every routed provider here | one freeform `exec`, plus `wait`, `request_user_input*`, `clock__sleep`, the `collaboration__*` children and `web_search` as their own `tools[]` entries | the table above; the prose-only helpers stay pass-through |
-| unset, i.e. shell mode (`gpt-5.5` / `5.4` / `5.4-mini`) | `exec_command`, `write_stdin`, `apply_patch`, `view_image` as their own `tools[]` entries | `exec` owns `run_command`, so `exec_command` has no mapping here; `write_stdin` and `apply_patch` pass through |
+| `code_mode_only` — the default for every routed provider here | one freeform `exec`, plus `wait`, `request_user_input*`, `clock__sleep`, the `collaboration__*` children and `web_search` as their own `tools[]` entries | AGY role targets + `codexSharedAliases` (`wp_*`) + deterministic fallback aliases |
+| unset, i.e. shell mode (`gpt-5.5` / `5.4` / `5.4-mini`) | `exec_command`, `write_stdin`, `apply_patch`, `view_image` as their own `tools[]` entries | `exec_command -> run_command` + `codexSharedAliases` (`wp_*`) + deterministic fallback aliases |
 
-Intentional pass-through: `wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message` (AGY's bare `send_message` is generic, so the reverse is left out of it), plus the prose-only helpers listed above.
-
-`shell_command` is a `shell_type` catalog label, not a tool name, and `update_plan` has left the catalog entirely. The rest — `apply_patch`, `view_image`, `tool_search`, the goal tools and the MCP-resource tools — are mode-dependent: `tools[]` entries in shell mode, description text in code mode. The per-mode carriers are tabulated in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**, together with the rationale for every name this table maps and every one it passes through.
+`shell_command` is a `shell_type` catalog label, not a tool name, and `update_plan` has left the catalog entirely. The rest — `apply_patch`, `view_image`, `tool_search`, the goal tools and the MCP-resource tools — are mode-dependent: `tools[]` entries in shell mode, description text in code mode. The per-mode carriers are tabulated in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**.
 
 
 ### 3. Activation Model & Explicit OMP Routing
@@ -132,7 +122,9 @@ An invalid explicit value records an authoritative negative resolution (`negativ
 - **Corroboration-Only Rule**: Because canonical targets are native Antigravity tools, target names alone are never standalone OMP attribution. Target-only no-marker traffic cannot resolve to OMP.
 
 #### 5. Request-Scoped Active Reverse Authority
-Correlated Protected responses and streams reverse only canonical pairs whose source tool was actually declared and transformed in that request. Unused canonical targets remain pass-through and are never reverse-cloaked.
+Correlated responses and streams reverse only pairs whose source tool was actually declared and transformed in that specific request:
+- For Protected OMP, only canonical pairs whose source declaration was transformed become active in the request-scoped reverse map; inactive canonical targets and native AGY targets are never reverse-cloaked.
+- For Claude Code and OpenAI Codex, request-scoped reversal (`requestsRequestScopedReverse`) scopes the uncloak table to the active alias plan derived from the raw request body. Natively declared AGY targets or unused mode targets are never handed back as client source tools the client never declared.
 
 #### 6. Request Lifecycle Management
 Explicit OMP route state is lifecycle-owned and registered with CLIProxyAPI (`request_lifecycle_plugin: true`). State is cleaned up idempotently on `request.complete` (`succeeded`, `failed`, `rejected`, `canceled`). Disposable stream sessions are cleaned on `[DONE]`, and pre-payload sessions can be deterministically rehydrated from pinned route state without consulting live config or weaker evidence.

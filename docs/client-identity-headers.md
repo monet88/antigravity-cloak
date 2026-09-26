@@ -22,9 +22,9 @@ non-`agy/` routes still selects the durable no-mutation bypass.
 
 Configuration syntax was checked against official documentation on 2026-09-25.
 This guide documents supported configuration, not a claim that a particular
-running client or gateway has been configured or live-tested. The broader alias
-policy in [issue #32](https://github.com/monet88/antigravity-cloak/issues/32) remains
-separate implementation work.
+running client or gateway has been configured or live-tested. Request-scoped alias
+planning and shared/fallback tool aliases across clients are implemented per
+[issue #32](https://github.com/monet88/antigravity-cloak/issues/32).
 
 ## Claude Code: direct connection to CPA
 
@@ -169,8 +169,9 @@ This source check is not a new live validation of the installed proxy.
 3. Confirm the control header is absent from the request forwarded beyond CPA,
    including model-gate skips. Confirm the desired model is eligible for cloaking.
 4. Check transformed declarations, restored response/stream names, and a real
-   client tool execution with continuation. Header-based identity does not prove
-   that all tools cloak, or that issue #32 has been implemented.
+   client tool execution with continuation. Header-based identity establishes
+   client attribution, but end-to-end tool execution verifies active alias plan
+   transformation and response restoration.
 
 For controlled capture/debugging, follow the ordered
 [verification runbook](verification-checklist.md); do not enable full-body debug
