@@ -12,6 +12,17 @@ defined in [the Antigravity tool surface reference](antigravity-tool-surface-202
 the Codex surface and its per-mode carriers are in
 [the Codex surface reference](codex-tool-surface-2026-09-12.md).
 
+> [!IMPORTANT]
+> **SUPERSEDED STATUS (2026-09-25 / Issues #32, #36):**
+> This audit records the historical state of the Claude Code cloak at revision `ff3479e` (v0.5.2).
+> As of v0.6.0 (Issues #32, #36):
+> - `Glob` maps to `find_by_name` (not `list_dir`).
+> - Static source identity inventory (`claudeCodeSourceIdentityInventory`) and distinctive tool guards are implemented.
+> - Tier-2 tools (including `ToolSearch`, `Skill`, `Workflow`, subagent control, MCP resources, and former Group C tools such as `NotebookEdit`, `ReportFindings`, `EnterPlanMode`, `ExitPlanMode`, `EnterWorktree`, `ExitWorktree`, `DeferredToolPlaceholder`) are cloaked via stable shared aliases (`wp_*`) rather than pass-through or speculative AGY mappings.
+> - Request-scoped alias plans (`requestsRequestScopedReverse`) and fail-closed 503 (`tool_cloak_required`) on missing/duplicate RequestID or collision are active for Claude Code.
+>
+> Refer to [CONTEXT.md](../../CONTEXT.md) and [AGENTS.md](../../AGENTS.md) for authoritative current behavior.
+
 ---
 
 ## 1. Status Summary

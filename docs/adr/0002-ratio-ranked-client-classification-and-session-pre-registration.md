@@ -25,7 +25,7 @@ When integrating Oh My Pi (`oh_my_pi`) and handling streaming responses across v
      $$\text{hits} \times 5 \ge \text{totalObserved} \times 4 \quad (\ge 80\%)$$
    - The static table length is **not an alternative qualification path**: a candidate qualifies only when $\text{hits} \ge 3$ **and** the observed-ratio test above passes.
    - For native Antigravity superset requests where multiple distinct cloak tables reach $100\%$ full-table coverage ($\text{hits} = \text{tableSize}$ for $\ge 2$ tables, counted by `fullCoverageCount`), explicitly return `""` (no-op passthrough) to prevent corrupting native Antigravity traffic.
-   - Use deterministic integer ratio comparison ($h_1 \times o_2 > h_2 \times o_1$) to rank candidate clients without floating-point inaccuracies, breaking exact ties by absolute hit count and then by client id.
+   - Use deterministic integer ratio comparison ($h_1 \times o_2 > h_2 \times o_1$) to rank candidate clients without floating-point inaccuracies. When two candidates have identical ratio and hit count, break ties first by full-table coverage (a client matching 100% of its table takes precedence over a client matching only a fraction of its table, avoiding alphabetical superset shadowing), and finally deterministically by client id.
 
 2. **Request-Time Stream Session Pre-Registration**:
    - In `request.intercept_before`, as soon as client detection succeeds on the full request body, pre-register the detected client and its uncloak regex patterns in `StreamSessionManager` keyed by `RequestID` (and metadata correlation identifiers).

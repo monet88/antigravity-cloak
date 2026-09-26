@@ -98,7 +98,7 @@ const abiVersion = 1
 
 const (
 	pluginName       = "antigravity-cloak"
-	pluginVersion    = "0.5.2"
+	pluginVersion    = "0.6.0"
 	pluginRepository = "https://github.com/monet88/antigravity-cloak"
 )
 
@@ -394,45 +394,143 @@ type protectedDeclInfo struct {
 	transformed      bool
 }
 
-func inspectAndValidateProtectedTools(rootMap map[string]any, format string) ([]protectedDeclInfo, error) {
-	toolsRaw, ok := rootMap["tools"].([]any)
-	if !ok || len(toolsRaw) == 0 {
+func collectRequestSourceIdentitiesWithDeclared(root map[string]any, format string) ([]string, []string, error) {
+	var sources []string
+	var declared []string
+
+	// 1. Declarations in tools[]
+	if toolsValue, exists := root["tools"]; exists && toolsValue != nil {
+		tools, ok := toolsValue.([]any)
+		if !ok {
+			return nil, nil, fmt.Errorf("unsupported tools representation")
+		}
+		for _, raw := range tools {
+			tool, ok := raw.(map[string]any)
+			if !ok {
+				return nil, nil, fmt.Errorf("unsupported tool declaration")
+			}
+			var name string
+			if format == "openai" {
+				if typ, hasType := tool["type"].(string); hasType && typ != "" && typ != "function" {
+					return nil, nil, fmt.Errorf("unsupported openai tool type %q", typ)
+				}
+				fn, ok := tool["function"].(map[string]any)
+				if !ok {
+					return nil, nil, fmt.Errorf("unsupported openai tool declaration")
+				}
+				name, _ = fn["name"].(string)
+			} else {
+				name, _ = tool["name"].(string)
+			}
+			if name == "" {
+				return nil, nil, fmt.Errorf("tool declaration is missing a name")
+			}
+			sources = append(sources, name)
+			declared = append(declared, name)
+		}
+	}
+
+	// 2. History in messages[]
+	if msgsValue, exists := root["messages"]; exists && msgsValue != nil {
+		if msgs, ok := msgsValue.([]any); ok {
+			for _, m := range msgs {
+				msg, ok := m.(map[string]any)
+				if !ok {
+					continue
+				}
+				if format == "openai" {
+					if calls, ok := msg["tool_calls"].([]any); ok {
+						for _, c := range calls {
+							if call, ok := c.(map[string]any); ok {
+								if fn, ok := call["function"].(map[string]any); ok {
+									if name, ok := fn["name"].(string); ok && name != "" {
+										sources = append(sources, name)
+									}
+								}
+							}
+						}
+					}
+					if role, ok := msg["role"].(string); ok && role == "tool" {
+						if name, ok := msg["name"].(string); ok && name != "" {
+							sources = append(sources, name)
+						}
+					}
+				} else if format == "anthropic" {
+					if contents, ok := msg["content"].([]any); ok {
+						for _, cnt := range contents {
+							if block, ok := cnt.(map[string]any); ok {
+								if t, ok := block["type"].(string); ok && t == "tool_use" {
+									if name, ok := block["name"].(string); ok && name != "" {
+										sources = append(sources, name)
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// 3. Named tool_choice
+	if tcValue, exists := root["tool_choice"]; exists && tcValue != nil {
+		if tc, ok := tcValue.(map[string]any); ok {
+			if format == "openai" {
+				if fn, ok := tc["function"].(map[string]any); ok {
+					if name, ok := fn["name"].(string); ok && name != "" {
+						sources = append(sources, name)
+					}
+				}
+			} else if format == "anthropic" {
+				if name, ok := tc["name"].(string); ok && name != "" {
+					sources = append(sources, name)
+				}
+			}
+		}
+	}
+
+	return sources, declared, nil
+}
+
+func collectRequestSourceIdentities(root map[string]any, format string) ([]string, error) {
+	sources, _, err := collectRequestSourceIdentitiesWithDeclared(root, format)
+	return sources, err
+}
+
+func inspectAndValidateProtectedTools(rootMap map[string]any, format string, mergedCloak map[string]string) ([]protectedDeclInfo, error) {
+	names, err := collectRequestSourceIdentities(rootMap, format)
+	if err != nil {
+		return nil, err
+	}
+	if len(names) == 0 {
 		return nil, nil
 	}
+
+	seenNames := make(map[string]bool, len(names))
+	var uniqueNames []string
+	for _, name := range names {
+		if !seenNames[name] {
+			seenNames[name] = true
+			uniqueNames = append(uniqueNames, name)
+		}
+	}
+
 	var decls []protectedDeclInfo
-	for _, tRaw := range toolsRaw {
-		tMap, ok := tRaw.(map[string]any)
-		if !ok {
-			continue
-		}
-		var name string
-		if format == "openai" {
-			if fn, ok := tMap["function"].(map[string]any); ok {
-				name, _ = fn["name"].(string)
-			}
-		} else if format == "anthropic" {
-			name, _ = tMap["name"].(string)
-		}
-		if name == "" {
-			continue
-		}
+	for _, name := range uniqueNames {
 		prefix, base, resolvedBase := resolveOMPSourceIdentity(name)
-		targetBase, isMapped := canonicalOMPSafeMappingSet[resolvedBase]
+		targetBase, isMapped := mergedCloak[resolvedBase]
 		var finalBase string
-		var transformed bool
 		if isMapped {
 			finalBase = targetBase
-			transformed = true
 		} else {
-			finalBase = base
-			transformed = false
+			finalBase = fallbackAliasForSource(base)
 		}
 		decls = append(decls, protectedDeclInfo{
 			originalFullName: name,
 			prefix:           prefix,
 			base:             base,
 			finalBase:        finalBase,
-			transformed:      transformed,
+			transformed:      true,
 		})
 	}
 
@@ -442,16 +540,7 @@ func inspectAndValidateProtectedTools(rootMap map[string]any, format string) ([]
 	}
 	for fb, group := range byFinalBase {
 		if len(group) > 1 {
-			hasTransformed := false
-			for _, d := range group {
-				if d.transformed {
-					hasTransformed = true
-					break
-				}
-			}
-			if hasTransformed {
-				return nil, fmt.Errorf("declaration collision for final base identity %q", fb)
-			}
+			return nil, fmt.Errorf("declaration collision for final base identity %q", fb)
 		}
 	}
 	return decls, nil
@@ -570,11 +659,13 @@ func cloakProtectedToolNames(rootMap map[string]any, cloakTable map[string]strin
 	return changed
 }
 
-func validateProtectedPostTransform(rootMap map[string]any, sourceFormat string) bool {
+func validateProtectedPostTransform(rootMap map[string]any, sourceFormat string, uncloakedSources map[string]bool) bool {
 	hasUncloakedSource := func(name string) bool {
-		_, _, resolvedBase := resolveOMPSourceIdentity(name)
-		_, exists := canonicalOMPSafeMappingSet[resolvedBase]
-		return exists
+		if uncloakedSources[name] {
+			return true
+		}
+		_, base, resolvedBase := resolveOMPSourceIdentity(name)
+		return uncloakedSources[base] || uncloakedSources[resolvedBase]
 	}
 
 	if toolsRaw, ok := rootMap["tools"].([]any); ok {
@@ -880,30 +971,63 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 	}
 
 	effective := activeFilterConfig().ToolMappings["oh_my_pi"]
-	if len(effective) != len(canonicalOMPSafeMappingSet) {
-		debugLog("handleProtectedAGY: effective mapping count mismatch: %d != %d", len(effective), len(canonicalOMPSafeMappingSet))
+	if len(effective) < len(canonicalOMPSafeMappingSet) {
+		debugLog("handleProtectedAGY: effective mapping count below canonical minimum: %d < %d", len(effective), len(canonicalOMPSafeMappingSet))
 		return protected503Response(resp)
 	}
 	for orig, target := range canonicalOMPSafeMappingSet {
 		if effective[orig] != target {
-			debugLog("handleProtectedAGY: effective mapping mismatch for %q: got %q, want %q", orig, effective[orig], target)
+			debugLog("handleProtectedAGY: canonical mapping mismatch for %q: got %q, want %q", orig, effective[orig], target)
 			return protected503Response(resp)
 		}
 	}
 
-	decls, collisionErr := inspectAndValidateProtectedTools(rootMap, format)
+	// Build the merged cloak table: start from shared aliases, overlay operator config,
+	// and ensure canonical nine are immutable.
+	mergedCloak := make(map[string]string, len(canonicalOMPSafeMappingSet)+len(ompSharedAliases)+len(effective))
+	for k, v := range ompSharedAliases {
+		mergedCloak[k] = v
+	}
+	for k, v := range effective {
+		if v == "" {
+			debugLog("handleProtectedAGY: empty mapping target for %q", k)
+			return protected503Response(resp)
+		}
+		mergedCloak[k] = v
+	}
+	for k, v := range canonicalOMPSafeMappingSet {
+		mergedCloak[k] = v
+	}
+
+	decls, collisionErr := inspectAndValidateProtectedTools(rootMap, format, mergedCloak)
 	if collisionErr != nil {
 		debugLog("handleProtectedAGY: declaration collision: %v", collisionErr)
 		return protected503Response(resp)
 	}
 
-	activeReverse := make(map[string]string)
+	// Build the extended cloak table: start from merged (canonical + shared + config),
+	// then add deterministic fallback aliases for unknown declarations.
+	extendedCloak := make(map[string]string, len(mergedCloak)+len(decls))
+	for k, v := range mergedCloak {
+		extendedCloak[k] = v
+	}
 	for _, d := range decls {
-		if d.transformed {
-			transformedFullName := d.prefix + d.finalBase
-			activeReverse[transformedFullName] = d.originalFullName
+		extendedCloak[d.base] = d.finalBase
+		if strings.HasPrefix(d.base, "_") {
+			candidate := strings.TrimPrefix(d.base, "_")
+			if _, exists := extendedCloak[candidate]; !exists {
+				extendedCloak[candidate] = d.finalBase
+			}
 		}
 	}
+
+	activeReverse := make(map[string]string, len(decls))
+	for _, d := range decls {
+		target := d.finalBase
+		transformedFullName := d.prefix + target
+		activeReverse[transformedFullName] = d.originalFullName
+	}
+
 	var protectedCachedUncloak *cachedUncloakPattern
 	if len(activeReverse) > 0 {
 		targets := make([]string, 0, len(activeReverse))
@@ -922,11 +1046,28 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		}
 	}
 
-	cloakProtectedToolNames(rootMap, canonicalOMPSafeMappingSet, format)
+	cloakProtectedToolNames(rootMap, extendedCloak, format)
 	rewriteProtectedBrand(rootMap, format)
 	sanitizeProtectedSystemConventions(rootMap)
 
-	if !validateProtectedPostTransform(rootMap, format) {
+	uncloakedSources := make(map[string]bool)
+	for k := range canonicalOMPSafeMappingSet {
+		uncloakedSources[k] = true
+	}
+	for k := range ompSharedAliases {
+		uncloakedSources[k] = true
+	}
+	for k := range effective {
+		uncloakedSources[k] = true
+	}
+	for _, d := range decls {
+		uncloakedSources[d.originalFullName] = true
+		uncloakedSources[d.base] = true
+		_, _, res := resolveOMPSourceIdentity(d.base)
+		uncloakedSources[res] = true
+	}
+
+	if !validateProtectedPostTransform(rootMap, format, uncloakedSources) {
 		debugLog("handleProtectedAGY: post-transform validation failed")
 		return protected503Response(resp)
 	}
@@ -1014,6 +1155,108 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		forcedClient = uaClient
 		debugLog("handleRequestInterceptBefore: UA evidence client=%q", uaClient)
 	}
+
+	// Resolve the effective client. When forcedClient is set and has a table,
+	// use it directly; otherwise fall back to body-based detection.
+	effectiveClient := forcedClient
+	if effectiveClient != "" && len(effectiveCloakTable(effectiveClient)) == 0 {
+		effectiveClient = ""
+	}
+	if effectiveClient == "" {
+		var reqRootAny any
+		if err := safeUnmarshal(req.Body, &reqRootAny); err == nil {
+			if rootMap, ok := reqRootAny.(map[string]any); ok {
+				toolNames := extractToolNames(rootMap, format)
+				effectiveClient = detectClient(toolNames)
+			}
+		}
+	}
+
+	// Alias-plan path: clients that declare a variable tool surface route
+	// through the request-scoped alias plan machinery. This gives them
+	// fail-closed admission, deterministic fallback aliases for unknown/MCP
+	// declarations, and exact per-request reversal. Missing correlation is
+	// rejected (parent #32 fail-closed requirement) rather than falling back
+	// to the legacy partial-cloak path.
+	if effectiveClient != "" && clientUsesAliasPlan(effectiveClient) {
+		if req.RequestID == "" {
+			debugLog("handleRequestInterceptBefore: alias plan client=%s with missing RequestID -> 503", effectiveClient)
+			return toolCloak503Response(resp)
+		}
+		preferred := sharedAliasesFor(effectiveClient)
+		plan, rejection := admitRequestAliasPlanOrReject(&req, resp, effectiveClient, preferred)
+		if rejection != nil {
+			debugLog("handleRequestInterceptBefore: alias plan rejected client=%s", effectiveClient)
+			return rejection
+		}
+		if plan != nil {
+			// The plan's forward map is the sole cloak authority for this
+			// request: it contains static + shared + fallback mappings for
+			// every declared tool. Parse once, cloak tools, rewrite brand,
+			// marshal once.
+			var planRoot any
+			if err := safeUnmarshal(req.Body, &planRoot); err != nil {
+				debugLog("handleRequestInterceptBefore: alias plan body parse failed: %v", err)
+				return toolCloak503Response(resp)
+			}
+			rootMap, ok := planRoot.(map[string]any)
+			if !ok {
+				debugLog("handleRequestInterceptBefore: alias plan body is not an object")
+				return toolCloak503Response(resp)
+			}
+
+			changed := false
+			if len(plan.forward) > 0 {
+				toolCloaked := cloakToolNames(rootMap, plan.forward, format)
+				changed = changed || toolCloaked
+			}
+
+			// Brand rewriting (same steps as rewriteRequestBodyWithClient).
+			cfg := activeFilterConfig()
+			mappings := effectiveMappings(cfg)
+			rewritten, sysChanged := rewriteSystemFields(rootMap, mappings)
+			rootMap = rewritten.(map[string]any)
+			changed = changed || sysChanged
+
+			// Build a temporary cachedCloakPatterns from the plan's declared forward
+			// table for text-level tool-name replacement in descriptions and
+			// system messages. Only tools declared in the current tools[] surface
+			// have replacement authority in prose/system fields.
+			planCloakCache := &cachedCloakPatterns{
+				cloakTable: plan.declaredForward,
+				identRe:    buildCloakIdentRe(plan.declaredForward),
+				ambigRe:    buildCloakAmbiguousRe(plan.declaredForward),
+			}
+
+			descChanged := rewriteToolDescriptions(rootMap, mappings, planCloakCache, format)
+			changed = changed || descChanged
+
+			sysMsgChanged := rewriteSystemMessages(rootMap, mappings, planCloakCache)
+			changed = changed || sysMsgChanged
+
+			if sysVal, ok := rootMap["system"]; ok {
+				next, sysToolChanged := replaceToolNamesInValue(sysVal, planCloakCache)
+				if sysToolChanged {
+					rootMap["system"] = next
+					changed = true
+				}
+			}
+
+			debugLog("handleRequestInterceptBefore: alias plan rewritten=%t client=%s", changed, effectiveClient)
+			if !changed {
+				return mustEnvelope(resp)
+			}
+			raw, err := safeMarshal(rootMap)
+			if err != nil {
+				debugLog("handleRequestInterceptBefore: alias plan marshal failed: %v", err)
+				return toolCloak503Response(resp)
+			}
+			resp.Body = raw
+			return mustEnvelope(resp)
+		}
+	}
+
+	// Legacy path: clients without alias-plan support.
 	body, rewritten, client := rewriteRequestBodyWithClient(req.Body, format, forcedClient)
 	debugLog("handleRequestInterceptBefore: rewritten=%t client=%s Body=%s", rewritten, client, string(body))
 	if req.RequestID != "" {
@@ -1210,20 +1453,20 @@ func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]stri
 	cloakedClient := detectCloakedClient(toolNames)
 	debugLog("buildUncloakTable: cloakedClient=%s", cloakedClient)
 	if cloakedClient != "" {
-		return effectiveUncloakTable(cloakedClient), cloakedClient
+		return scopeUncloakTableToDeclaredNames(effectiveUncloakTable(cloakedClient), cloakedClient, toolNames), cloakedClient
 	}
 
 	return nil, ""
 }
 
 // requestsRequestScopedReverse reports whether a client's reverse table must be
-// narrowed to the names the current request actually declared. Codex is the
-// only such client: its tool surface is mode-dependent, so a shell-mode request
-// that declared "exec_command" would otherwise receive the code-mode "exec" back
-// in place of an upstream run_command target -- a tool name that client never
-// declared.
+// narrowed to the names the current request actually declared. Codex and
+// Claude Code require this: their tool surfaces include mode-dependent
+// declarations or shared/fallback aliases (wp_*), so a request that declared
+// one tool would otherwise receive an unearned target back in place of an
+// upstream target -- a tool name that client never declared.
 func requestsRequestScopedReverse(client string) bool {
-	return client == "codex"
+	return client == "codex" || client == "claude_code"
 }
 
 // scopeUncloakTableToDeclaredNames drops every reverse pair whose names the
@@ -1676,13 +1919,12 @@ func (m *streamSessionManager) reverseBrandSSE(sess *streamSession, sseBytes []b
 	if sess == nil || sess.client != "oh_my_pi" {
 		return nil, false
 	}
-	isDone := bytes.Contains(sseBytes, []byte("data: [DONE]")) || bytes.Contains(sseBytes, []byte("data:[DONE]"))
+	isDone := sseContainsOpenAIDone(sseBytes)
 	events := splitSSEEventsForBrand(sseBytes)
 	var out bytes.Buffer
 	changedOverall := false
 	for _, ev := range events {
-		trimmed := bytes.TrimSpace(ev)
-		isDoneEvent := bytes.HasPrefix(trimmed, []byte("data: [DONE]")) || bytes.HasPrefix(trimmed, []byte("data:[DONE]")) || (bytes.Contains(trimmed, []byte("[DONE]")) && bytes.HasPrefix(trimmed, []byte("data:")))
+		isDoneEvent := sseContainsOpenAIDone(ev)
 		if isDoneEvent {
 			if isDone {
 				flushEvents := m.generateBrandFlushEvents(sess, format)
@@ -2102,6 +2344,47 @@ func sseContainsAnthropicMessageStop(sse []byte) bool {
 	return false
 }
 
+// sseOpenAIDoneIndex returns the byte offset of the start of the `data: [DONE]`
+// line in an SSE stream chunk, or -1 if no structural [DONE] frame is present.
+// It verifies that [DONE] is the exact payload of an actual SSE data field,
+// rather than a substring inside JSON content or tool-call arguments.
+func sseOpenAIDoneIndex(sse []byte) int {
+	if !bytes.Contains(sse, []byte("[DONE]")) {
+		return -1
+	}
+	data := sse
+	offset := 0
+	for offset < len(sse) {
+		lineStart := offset
+		idx := bytes.IndexByte(data, '\n')
+		var line []byte
+		if idx >= 0 {
+			line = data[:idx]
+			data = data[idx+1:]
+			offset += idx + 1
+		} else {
+			line = data
+			offset += len(data)
+			data = nil
+		}
+		lineNoCR := bytes.TrimRight(line, "\r")
+		trimmed := bytes.TrimSpace(lineNoCR)
+		if bytes.HasPrefix(trimmed, []byte("data:")) {
+			payload := bytes.TrimSpace(trimmed[5:])
+			if bytes.Equal(payload, []byte("[DONE]")) {
+				return lineStart
+			}
+		}
+	}
+	return -1
+}
+
+// sseContainsOpenAIDone reports whether the SSE chunk contains an exact
+// OpenAI `data: [DONE]` frame.
+func sseContainsOpenAIDone(sse []byte) bool {
+	return sseOpenAIDoneIndex(sse) >= 0
+}
+
 // generateBrandFlushEventsFiltered emits pending carries filtered to only the
 // given lane keys (nil means all), draining each flushed lane. Preserves the
 // deterministic lane ordering of orderedBrandFlushes.
@@ -2506,14 +2789,15 @@ type requestAliasPair struct {
 }
 
 type requestAliasPlan struct {
-	client        string
-	sourceFormat  string
-	pairs         []requestAliasPair
-	forward       map[string]string
-	reverse       map[string]string
-	cachedUncloak *cachedUncloakPattern
-	expected      int
-	disposition   atomic.Int32
+	client          string
+	sourceFormat    string
+	pairs           []requestAliasPair
+	forward         map[string]string
+	declaredForward map[string]string
+	reverse         map[string]string
+	cachedUncloak   *cachedUncloakPattern
+	expected        int
+	disposition     atomic.Int32
 }
 
 func (p *requestAliasPlan) getDisposition() streamDisposition {
@@ -2566,7 +2850,7 @@ func buildRequestAliasUncloakPattern(reverse map[string]string) (*cachedUncloakP
 	return &cachedUncloakPattern{re: re, lookup: lookup, exactOnly: true}, nil
 }
 
-func buildRequestAliasPlan(client string, sourceIdentities []string, preferred map[string]string) (*requestAliasPlan, error) {
+func buildRequestAliasPlan(client string, sourceIdentities []string, preferred map[string]string, declared ...[]string) (*requestAliasPlan, error) {
 	client = normalizeClientKey(client)
 	if client == "" {
 		return nil, fmt.Errorf("client identity is required")
@@ -2585,31 +2869,82 @@ func buildRequestAliasPlan(client string, sourceIdentities []string, preferred m
 	}
 	sort.Strings(sources)
 
+	declaredSet := make(map[string]bool)
+	if len(declared) > 0 {
+		for _, d := range declared[0] {
+			declaredSet[d] = true
+			_, dBase := splitToolNamespace(d)
+			declaredSet[dBase] = true
+		}
+	}
+
 	plan := &requestAliasPlan{
-		client:  client,
-		pairs:   make([]requestAliasPair, 0, len(sources)),
-		forward: make(map[string]string, len(sources)),
-		reverse: make(map[string]string, len(sources)),
+		client:          client,
+		pairs:           make([]requestAliasPair, 0, len(sources)),
+		forward:         make(map[string]string, len(sources)),
+		declaredForward: make(map[string]string, len(declaredSet)),
+		reverse:         make(map[string]string, len(sources)),
 	}
 	ownerByTarget := make(map[string]string, len(sources))
+	ownerByFinalBase := make(map[string]string, len(sources))
+	knownTargets := make(map[string]bool, len(preferred)*2)
+	for _, t := range preferred {
+		_, tBase := splitToolNamespace(t)
+		knownTargets[tBase] = true
+		knownTargets[t] = true
+	}
+
 	for _, source := range sources {
+		prefix, base := splitToolNamespace(source)
 		target, overridden := preferred[source]
+		if !overridden {
+			if targetBase, baseOverridden := preferred[base]; baseOverridden {
+				if prefix != "" {
+					target = prefix + targetBase
+				} else {
+					target = targetBase
+				}
+				overridden = true
+			} else if knownTargets[base] {
+				// Source declares a native target identity (e.g. view_file or default_api:view_file).
+				if prefix != "" {
+					target = prefix + base
+				} else {
+					target = base
+				}
+				overridden = true
+			}
+		}
 		if overridden {
 			if target == "" {
 				return nil, fmt.Errorf("empty alias target for %q", source)
 			}
 		} else {
-			target = fallbackAliasForSource(source)
+			target = fallbackAliasForSource(base)
 		}
-		if owner, exists := ownerByTarget[target]; exists && owner != source {
-			return nil, fmt.Errorf("alias collision: %q and %q resolve to %q", owner, source, target)
+
+		_, finalBase := splitToolNamespace(target)
+		ownerTarget, targetConflict := ownerByTarget[target]
+		ownerBase, baseConflict := ownerByFinalBase[finalBase]
+		hasCollision := (targetConflict && ownerTarget != source) || (baseConflict && ownerBase != source)
+
+		if hasCollision {
+			if targetConflict && ownerTarget != source {
+				return nil, fmt.Errorf("alias collision: %q and %q resolve to %q", ownerTarget, source, target)
+			}
+			return nil, fmt.Errorf("alias collision: %q and %q resolve to same final base %q", ownerBase, source, finalBase)
 		}
 		ownerByTarget[target] = source
+		ownerByFinalBase[finalBase] = source
+
 		changed := source != target
 		plan.pairs = append(plan.pairs, requestAliasPair{
 			SourceIdentity: source, UpstreamIdentity: target, Changed: changed,
 		})
 		plan.forward[source] = target
+		if declaredSet[source] || declaredSet[base] {
+			plan.declaredForward[source] = target
+		}
 		if changed {
 			plan.reverse[target] = source
 		}
@@ -2664,59 +2999,27 @@ func (m *requestAliasPlanManager) delete(requestID string) {
 	m.mu.Unlock()
 }
 
-func requestAliasSourceIdentities(body []byte, sourceFormat string) ([]string, error) {
+func requestAliasSourceIdentities(body []byte, sourceFormat string) ([]string, []string, error) {
 	format := normalizeSourceFormat(sourceFormat)
 	if format != "openai" && format != "anthropic" {
-		return nil, fmt.Errorf("unsupported source format %q", sourceFormat)
+		return nil, nil, fmt.Errorf("unsupported source format %q", sourceFormat)
 	}
 	root, ok := decodeStrictProtectedJSON(body)
 	if !ok {
-		return nil, fmt.Errorf("request body must be one strict JSON object")
+		return nil, nil, fmt.Errorf("request body must be one strict JSON object")
 	}
-	toolsValue, exists := root["tools"]
-	if !exists {
-		return nil, nil
-	}
-	tools, ok := toolsValue.([]any)
-	if !ok {
-		return nil, fmt.Errorf("unsupported tools representation")
-	}
-	sources := make([]string, 0, len(tools))
-	for _, raw := range tools {
-		tool, ok := raw.(map[string]any)
-		if !ok {
-			return nil, fmt.Errorf("unsupported tool declaration")
-		}
-		var name string
-		if format == "openai" {
-			if typ, hasType := tool["type"].(string); hasType && typ != "" && typ != "function" {
-				return nil, fmt.Errorf("unsupported openai tool type %q", typ)
-			}
-			fn, ok := tool["function"].(map[string]any)
-			if !ok {
-				return nil, fmt.Errorf("unsupported openai tool declaration")
-			}
-			name, _ = fn["name"].(string)
-		} else {
-			name, _ = tool["name"].(string)
-		}
-		if name == "" {
-			return nil, fmt.Errorf("tool declaration is missing a name")
-		}
-		sources = append(sources, name)
-	}
-	return sources, nil
+	return collectRequestSourceIdentitiesWithDeclared(root, format)
 }
 
 func admitRequestAliasPlan(req *pluginapi.RequestInterceptRequest, client string, preferred map[string]string) (*requestAliasPlan, error) {
 	if req == nil || req.RequestID == "" {
 		return nil, fmt.Errorf("request correlation is required")
 	}
-	sources, err := requestAliasSourceIdentities(req.Body, req.SourceFormat)
+	sources, declared, err := requestAliasSourceIdentities(req.Body, req.SourceFormat)
 	if err != nil {
 		return nil, err
 	}
-	plan, err := buildRequestAliasPlan(client, sources, preferred)
+	plan, err := buildRequestAliasPlan(client, sources, preferred, declared)
 	if err != nil {
 		return nil, err
 	}
@@ -2730,9 +3033,6 @@ func admitRequestAliasPlan(req *pluginapi.RequestInterceptRequest, client string
 }
 
 func admitRequestAliasPlanOrReject(req *pluginapi.RequestInterceptRequest, resp pluginapi.RequestInterceptResponse, client string, preferred map[string]string) (*requestAliasPlan, []byte) {
-	// Issue #35 is an expand-only step. This admission seam is intentionally
-	// not called by handleRequestInterceptBefore yet; later migration tickets
-	// opt eligible clients into it without changing today's legacy request path.
 	plan, err := admitRequestAliasPlan(req, client, preferred)
 	if err == nil {
 		return plan, nil
@@ -2743,6 +3043,54 @@ func admitRequestAliasPlanOrReject(req *pluginapi.RequestInterceptRequest, resp 
 	}
 	debugLog("request alias admission rejected RequestID=%q client=%q: %v", requestID, client, err)
 	return nil, toolCloak503Response(resp)
+}
+
+// sharedAliasesFor returns the merged preferred alias map for a client: the
+// static cloak table targets plus the client's shared/neutral aliases. The
+// result is used by admitRequestAliasPlan as the "preferred" map, so declared
+// tools that have a static table entry get their proven target, and those in
+// the shared alias map get their wp_ alias. Undeclared tools fall through to
+// fallbackAliasForSource (deterministic wp_ext_<hash>).
+func sharedAliasesFor(client string) map[string]string {
+	cfg := activeFilterConfig()
+	cloakTable := cfg.ToolMappings[client]
+	var shared map[string]string
+	switch client {
+	case "claude_code":
+		shared = claudeCodeSharedAliases
+	case "codex":
+		shared = codexSharedAliases
+	case "oh_my_pi":
+		shared = ompSharedAliases
+	default:
+		if cloakTable == nil {
+			return nil
+		}
+		return cloakTable
+	}
+	merged := make(map[string]string, len(cloakTable)+len(shared))
+	for k, v := range shared {
+		merged[k] = v
+	}
+	for k, v := range cloakTable {
+		merged[k] = v
+	}
+	if client == "oh_my_pi" {
+		for k, v := range canonicalOMPSafeMappingSet {
+			merged[k] = v
+		}
+	}
+	return merged
+}
+
+// clientUsesAliasPlan reports whether a client should use the request-scoped
+// alias plan machinery for full declaration cloaking. Clients on this list
+// route through admitRequestAliasPlanOrReject instead of the legacy
+// rewriteRequestBodyWithClient path, giving them fail-closed admission,
+// per-request reversal, and deterministic fallback aliases for unknown
+// declarations.
+func clientUsesAliasPlan(client string) bool {
+	return client == "claude_code" || client == "codex"
 }
 
 type explicitOMPRouteState struct {
@@ -2816,12 +3164,6 @@ func (m *explicitOMPLifecycleManager) deleteRoute(requestID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.routes, requestID)
-}
-
-func (m *explicitOMPLifecycleManager) reset() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.routes = make(map[string]*explicitOMPRouteState)
 }
 
 func newStreamSessionManager() *streamSessionManager {
@@ -3145,7 +3487,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			}
 		}
 		overallChanged := changed || brandChanged
-		isDone := bytes.Contains(completeEvents, []byte("data: [DONE]")) || bytes.Contains(modified, []byte("data: [DONE]"))
+		isDone := sseContainsOpenAIDone(completeEvents) || sseContainsOpenAIDone(modified)
 		isAnthropicEnd := format == "anthropic" && (sseContainsAnthropicMessageStop(completeEvents) || sseContainsAnthropicMessageStop(modified))
 		if isDone || isAnthropicEnd {
 			if isDone && sess.client == "oh_my_pi" {
@@ -3155,7 +3497,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 				// already written before the [DONE] frame) is a no-op here — no
 				// double emission.
 				if flush := m.generateBrandFlushEvents(sess, format); len(flush) > 0 {
-					doneIdx := bytes.Index(modified, []byte("data: [DONE]"))
+					doneIdx := sseOpenAIDoneIndex(modified)
 					var tmp bytes.Buffer
 					if doneIdx >= 0 {
 						tmp.Write(modified[:doneIdx])
@@ -3279,13 +3621,10 @@ func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkI
 	return m.ensureSession(key, client, cached, n)
 }
 
-// splitSSEEvents splits combined bytes into complete SSE events and an
-// incomplete trailing tail. Complete events are those terminated by "\n\n".
-// The returned completeEvents includes the terminating "\n\n" sequences.
-func splitSSEEvents(data []byte) (completeEvents []byte, incompleteTail []byte) {
-	return splitSSEEventsWithNewBytes(data, len(data))
-}
-
+// splitSSEEventsWithNewBytes splits combined bytes into complete SSE events
+// and an incomplete trailing tail. Complete events are those terminated by
+// "\n\n" (or "\r\n\r\n") and include the terminating delimiter; only the newly
+// arrived newLen bytes plus up to 3 preceding bytes need rescanning.
 func splitSSEEventsWithNewBytes(data []byte, newLen int) (completeEvents []byte, incompleteTail []byte) {
 	n := len(data)
 	if n == 0 {
@@ -3513,10 +3852,17 @@ type rewriteMapping struct {
 
 var defaultCloakTables = map[string]map[string]string{
 	"claude_code": {
+		// Tier-1: Core file/shell tools — proven one-to-one AGY role names.
 		"Bash": "run_command", "Edit": "replace_file_content", "Read": "view_file",
-		"Write": "write_to_file", "Grep": "grep_search", "Glob": "list_dir",
+		"Write": "write_to_file", "Grep": "grep_search",
+		"Glob": "find_by_name", // Issue #36: was list_dir — AGY list_dir lists one dir, Glob is a pattern matcher.
+		// Tier-1: Subagent/interaction — proven AGY role names.
 		"Agent": "invoke_subagent", "AskUserQuestion": "ask_question",
-		"ToolSearch": "search_web", "Skill": "call_mcp_tool", "Workflow": "schedule",
+		// Tier-1: Web tools — proven AGY role names (one-to-one, no schema conflict).
+		"WebSearch": "search_web", "WebFetch": "read_url_content",
+		// Tier-2 tools (ListAgents, SendMessage, TaskStop, ListMcpResourcesTool,
+		// ReadMcpResourceTool, etc.) are in claudeCodeSharedAliases with approved
+		// parent #32 vocabulary — they have no proven one-to-one AGY role.
 	},
 	"codex": {
 		// Code mode is the default for every routed provider here, so this table
@@ -3544,17 +3890,15 @@ var defaultCloakTables = map[string]map[string]string{
 		// restores a name only where it appears as a tool name, so cloaking prose
 		// would hand the client a helper it never declared.
 		//
-		// "exec" is the sole entry point and therefore owns run_command. A
-		// shell-mode session declares exec_command instead; it is absent because
-		// one target cannot carry two sources in the inverted reverse map, and
-		// this table serves the mode every routed provider on this workstation
-		// runs.
-		"exec":                         "run_command",
-		"web_search":                   "search_web",
-		"request_user_input":           "ask_question",
-		"collaboration__spawn_agent":   "invoke_subagent",
-		"collaboration__followup_task": "manage_task",
-		"collaboration__list_agents":   "manage_subagents",
+		// "exec" is the code-mode entry point and owns run_command in this static
+		// table. A shell-mode session declares exec_command instead, which maps to
+		// run_command via codexSharedAliases; it is kept out of defaultCloakTables
+		// so defaultUncloakTables stays injective at init(), and is admitted per-request
+		// through the alias plan machinery without collision.
+		"exec":                       "run_command",
+		"web_search":                 "search_web",
+		"request_user_input":         "ask_question",
+		"collaboration__spawn_agent": "invoke_subagent",
 	},
 	"oh_my_pi": {
 		"read":       "view_file",
@@ -3624,14 +3968,12 @@ var ompSourceIdentityInventory = map[string]bool{
 // score a real code-mode request one hit short of minToolNameHits whenever it
 // declares exec plus namespace children and nothing else.
 //
-// Names generic enough to belong to any harness ("wait", "sleep",
-// "send_message") are deliberately absent, and this inventory may exceed the
-// rename table because detection and renaming are separate concerns -- the same
-// way ompSourceIdentityInventory exceeds the OMP Safe Mapping Set. Every source
-// the rename table carries is listed here as well, so this set describes the
-// whole Codex declaration surface rather than only the names detection needs:
-// detectClient counts the runtime rename table alongside it, so a source listed
-// in only one of the two still contributes one hit.
+// Names generic enough to belong to any harness ("wait", "clock__sleep",
+// "send_message") are deliberately absent from this inventory: client detection
+// must stay independent of cloakability. Even though tools like "wait" and
+// "clock__sleep" are cloaked via codexSharedAliases when a request is attributed
+// to Codex, their presence in an unattributed request must never serve as
+// evidence that the client is Codex.
 var codexSourceIdentityInventory = map[string]bool{
 	"exec":                           true,
 	"exec_command":                   true,
@@ -3654,6 +3996,88 @@ var codexSourceIdentityInventory = map[string]bool{
 	"collaboration__send_message":    true,
 }
 
+// claudeCodeSharedAliases is the preferred alias map for Claude Code tools that
+// have no proven one-to-one AGY role (Tier-2 per parent #32). These wp_ aliases
+// are used by admitRequestAliasPlan when CC is admitted through the alias-plan
+// path, giving each CC-specific tool a stable upstream identity without claiming
+// a real AGY tool name. Names are the exact parent #32 vocabulary.
+var claudeCodeSharedAliases = map[string]string{
+	// Discovery / workflow.
+	"ToolSearch": "wp_find_tools",
+	"Skill":      "wp_invoke_skill",
+	"Workflow":   "wp_run_workflow",
+	// Subagent control — unproven semantic match to AGY targets.
+	"ListAgents":  "wp_list_workers",
+	"SendMessage": "wp_send_message",
+	"TaskStop":    "wp_cancel_task",
+	// Scheduling / planning / worktree.
+	"ScheduleWakeup": "wp_set_wakeup",
+	"CronCreate":     "wp_create_schedule",
+	"CronDelete":     "wp_delete_schedule",
+	"CronList":       "wp_list_schedules",
+	"EnterPlanMode":  "wp_begin_planning",
+	"ExitPlanMode":   "wp_finish_planning",
+	"EnterWorktree":  "wp_open_worktree",
+	"ExitWorktree":   "wp_close_worktree",
+	// Notebook / reporting.
+	"NotebookEdit":   "wp_edit_notebook",
+	"ReportFindings": "wp_submit_report",
+	// Deferred / MCP resource tools — Tier-2 (no proven one-to-one AGY role).
+	"DeferredToolPlaceholder": "wp_resolve_tool",
+	"WaitForMcpServers":       "wp_wait_integrations",
+	"ListMcpResourcesTool":    "wp_list_resources",
+	"ReadMcpResourceTool":     "wp_read_resource",
+	"ReadMcpResourceDirTool":  "wp_list_resource_dir",
+}
+
+// codexSharedAliases is the preferred alias map for Codex tools that have no
+// proven one-to-one AGY role, or whose previous mappings were unproven semantic
+// matches. Issue #38 moves collaboration__followup_task and
+// collaboration__list_agents here (previously mapped to manage_task and
+// manage_subagents respectively — those AGY tools have different semantics).
+var codexSharedAliases = map[string]string{
+	// Previously intentional pass-through, now cloaked to shared aliases.
+	"wait":                           "wp_wait",
+	"request_user_input_async":       "wp_request_user_input_async",
+	"clock__sleep":                   "wp_clock_sleep",
+	"collaboration__wait_agent":      "wp_collaboration_wait_agent",
+	"collaboration__interrupt_agent": "wp_collaboration_interrupt_agent",
+	"collaboration__send_message":    "wp_send_message",
+	// Moved from unproven semantic mappings in defaultCloakTables.
+	"collaboration__followup_task": "wp_collaboration_followup_task",
+	"collaboration__list_agents":   "wp_list_workers",
+	// Shell-mode tools that need cloaking. exec_command is the shell-mode
+	// entry point (proven semantic match to run_command, same as exec in
+	// code mode). Kept here rather than in defaultCloakTables to avoid a
+	// non-injective inverse map at init(); each request must declare or use
+	// only one entry point; distinct sources sharing run_command in a single
+	// request reject admission.
+	"exec_command": "run_command",
+	"apply_patch":  "wp_apply_patch",
+	"write_stdin":  "wp_write_stdin",
+	"view_image":   "wp_view_image",
+}
+
+// ompSharedAliases is the preferred alias map for OMP tools beyond the
+// canonical nine. Issue #37: the effective table can exceed nine; these tools
+// were formerly intentional pass-through but now get cloaked to shared aliases
+// on ProtectedAGY routes through the alias plan machinery. Unknown declarations
+// (e.g. custom operator tools) fall through to fallbackAliasForSource.
+var ompSharedAliases = map[string]string{
+	// Standard pass-through tools.
+	"todo": "wp_todo", "hub": "wp_hub", "eval": "wp_eval",
+	// Vibe Mode.
+	"vibe_spawn": "wp_vibe_spawn", "vibe_send": "wp_vibe_send",
+	"vibe_wait": "wp_vibe_wait", "vibe_kill": "wp_vibe_kill", "vibe_list": "wp_vibe_list",
+	// Autoresearch Mode.
+	"init_experiment": "wp_init_experiment", "run_experiment": "wp_run_experiment",
+	"log_experiment": "wp_log_experiment", "update_notes": "wp_update_notes",
+	// Memory & skill (no AGY equivalent).
+	"learn": "wp_learn", "manage_skill": "wp_manage_skill",
+	// Semantic search (cannot map to grep_search: declaration collision).
+	"find": "wp_find",
+}
+
 // ompCloakedTargetIdentityInventory contains the nine canonical AGY-facing
 // target tool names from the Safe Mapping Set.
 // These target identities are corroboration/static evidence only and
@@ -3668,29 +4092,6 @@ var ompCloakedTargetIdentityInventory = map[string]bool{
 	"invoke_subagent":      true,
 	"ask_question":         true,
 	"search_web":           true,
-}
-
-// corroborateCloakedTargetOMP verifies whether observed tool names match the
-// canonical OMP cloaked-target inventory (>= 3 hits and >= 80% coverage).
-// As required by Issue #26, this is corroboration/validation evidence ONLY
-// and MUST NOT be used as standalone OMP attribution.
-func corroborateCloakedTargetOMP(toolNames []string) bool {
-	if len(toolNames) < 3 {
-		return false
-	}
-	observedSet := make(map[string]bool, len(toolNames))
-	for _, n := range toolNames {
-		_, base := splitToolNamespace(n)
-		observedSet[base] = true
-	}
-	totalObserved := len(observedSet)
-	hits := 0
-	for target := range ompCloakedTargetIdentityInventory {
-		if observedSet[target] {
-			hits++
-		}
-	}
-	return hits >= 3 && hits*minCloakTargetHitDen >= totalObserved*minCloakTargetHitNum
 }
 
 // clientDistinctiveTools lists harness-specific source tool names whose
@@ -3908,6 +4309,17 @@ func parseFilterConfigYAML(raw []byte) (filterConfig, error) {
 				cfg.ToolMappings[client][orig] = target
 			}
 		}
+		for client, mappings := range parsedMappings {
+			if client == "oh_my_pi" {
+				if err := validateOMPConfigMappings(cfg.ToolMappings[client]); err != nil {
+					return filterConfig{}, fmt.Errorf("tool_mappings oh_my_pi: %w", err)
+				}
+			} else if clientUsesAliasPlan(client) {
+				if err := validateAliasPlanConfigMappings(client, mappings); err != nil {
+					return filterConfig{}, fmt.Errorf("tool_mappings %s: %w", client, err)
+				}
+			}
+		}
 	}
 	if value, exists := values["model_prefixes"]; exists {
 		prefixes, err := parseModelPrefixes(value)
@@ -4073,24 +4485,13 @@ func normalizeExplicitClientToken(token string) string {
 	}
 }
 
-// resolveExplicitClient reads the plugin-owned X-Cloak-Client header from the
-// inbound request headers. It returns the normalized client key, every stored
-// header key spelling that matches the owned header case-insensitively, whether
-// the header was present at all, and whether the value resolves to a currently
-// usable (non-empty) ToolMappings entry. All matching key spellings are returned
-// so the interceptor can clear every variant; the client value is derived from
-// the lexicographically first spelling for deterministic selection.
-func resolveExplicitClient(headers http.Header) (client string, matchedKeys []string, present, valid bool) {
-	m := parseExplicitClientMarker(headers)
-	return m.client, m.matchedKeys, m.present, m.valid
-}
-
 // resolveUserAgentClient returns a client derived from conservative
 // User-Agent evidence. Only prefixes listed in userAgentEvidence may match,
 // comparison is case-insensitive, and the match requires a usable active
 // ToolMappings entry so entries like opencode/ stay inert until a table
 // exists. The UA value is taken from the lexicographically first
-// User-Agent key spelling for determinism, mirroring resolveExplicitClient.
+// User-Agent key spelling for determinism, mirroring the explicit client
+// marker resolution.
 func resolveUserAgentClient(headers http.Header) (string, bool) {
 	if headers == nil {
 		return "", false
@@ -4124,6 +4525,141 @@ func resolveUserAgentClient(headers http.Header) (string, bool) {
 	return "", false
 }
 
+// validateOMPConfigMappings validates Oh My Pi tool mappings at configuration time.
+// It enforces that canonical nine mappings are immutable, valid noncanonical custom
+// mappings are honored, and invalid, non-injective, or forbidden target names fail
+// visibly at configuration/reconfigure time.
+func validateOMPConfigMappings(mappings map[string]string) error {
+	ownerByTarget := make(map[string]string, len(mappings)+len(canonicalOMPSafeMappingSet)+len(ompSharedAliases))
+	ownerByFinalBase := make(map[string]string, len(mappings)+len(canonicalOMPSafeMappingSet)+len(ompSharedAliases))
+
+	// Pre-populate canonical nine targets
+	for orig, target := range canonicalOMPSafeMappingSet {
+		ownerByTarget[target] = orig
+		_, base := splitToolNamespace(target)
+		ownerByFinalBase[base] = orig
+	}
+
+	// Pre-populate shared alias targets (ompSharedAliases)
+	for orig, target := range ompSharedAliases {
+		ownerByTarget[target] = orig
+		_, base := splitToolNamespace(target)
+		ownerByFinalBase[base] = orig
+	}
+
+	for orig, target := range mappings {
+		origTrimmed := strings.TrimSpace(orig)
+		targetTrimmed := strings.TrimSpace(target)
+		if origTrimmed == "" {
+			return fmt.Errorf("empty mapping source")
+		}
+		if targetTrimmed == "" {
+			return fmt.Errorf("empty mapping target for %q", orig)
+		}
+		if strings.ContainsAny(target, " \t\r\n") {
+			return fmt.Errorf("forbidden target naming %q for %q: contains whitespace", target, orig)
+		}
+		if strings.HasPrefix(target, "_") || strings.HasPrefix(target, ":") {
+			return fmt.Errorf("forbidden target naming %q for %q: leading underscore or colon is reserved", target, orig)
+		}
+
+		// Canonical nine immutability check
+		if canonicalTarget, isCanonical := canonicalOMPSafeMappingSet[orig]; isCanonical {
+			if target != canonicalTarget {
+				return fmt.Errorf("canonical OMP mapping %q is immutable (cannot remap to %q)", orig, target)
+			}
+			continue
+		}
+
+		// Non-canonical mapping: cannot map to a canonical target or collide with another mapping
+		if canonicalOwner, exists := ownerByTarget[target]; exists && canonicalOwner != orig {
+			return fmt.Errorf("non-injective target naming: %q cannot map to already-assigned target %q (owned by %q)", orig, target, canonicalOwner)
+		}
+		_, finalBase := splitToolNamespace(target)
+		if canonicalOwner, exists := ownerByFinalBase[finalBase]; exists && canonicalOwner != orig {
+			return fmt.Errorf("non-injective target naming: %q cannot map to target %q with base %q (owned by %q)", orig, target, finalBase, canonicalOwner)
+		}
+		ownerByTarget[target] = orig
+		ownerByFinalBase[finalBase] = orig
+	}
+	return nil
+}
+
+// validateAliasPlanConfigMappings validates tool mappings for alias-plan clients (claude_code, codex)
+// at configuration time, enforcing identical target naming rules (whitespace, empty, leading underscore/colon)
+// and injectivity against the client's reserved tables and within custom mappings.
+func validateAliasPlanConfigMappings(client string, mappings map[string]string) error {
+	client = normalizeClientKey(client)
+	ownerByTarget := make(map[string]string)
+	ownerByFinalBase := make(map[string]string)
+
+	baseline := make(map[string]string)
+	if staticTier1, ok := defaultCloakTables[client]; ok {
+		for orig, target := range staticTier1 {
+			baseline[orig] = target
+		}
+	}
+	var shared map[string]string
+	switch client {
+	case "claude_code":
+		shared = claudeCodeSharedAliases
+	case "codex":
+		shared = codexSharedAliases
+	}
+	if shared != nil {
+		for orig, target := range shared {
+			if client == "codex" && orig == "exec_command" && target == "run_command" {
+				continue
+			}
+			baseline[orig] = target
+		}
+	}
+
+	for bOrig, bTarget := range baseline {
+		if _, remapped := mappings[bOrig]; remapped {
+			continue
+		}
+		ownerByTarget[bTarget] = bOrig
+		_, base := splitToolNamespace(bTarget)
+		ownerByFinalBase[base] = bOrig
+	}
+
+	keys := make([]string, 0, len(mappings))
+	for k := range mappings {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, orig := range keys {
+		target := mappings[orig]
+		origTrimmed := strings.TrimSpace(orig)
+		targetTrimmed := strings.TrimSpace(target)
+		if origTrimmed == "" {
+			return fmt.Errorf("empty mapping source")
+		}
+		if targetTrimmed == "" {
+			return fmt.Errorf("empty mapping target for %q", orig)
+		}
+		if strings.ContainsAny(target, " \t\r\n") {
+			return fmt.Errorf("forbidden target naming %q for %q: contains whitespace", target, orig)
+		}
+		if strings.HasPrefix(target, "_") || strings.HasPrefix(target, ":") {
+			return fmt.Errorf("forbidden target naming %q for %q: leading underscore or colon is reserved", target, orig)
+		}
+
+		if owner, exists := ownerByTarget[target]; exists && owner != orig {
+			return fmt.Errorf("non-injective target naming: %q cannot map to already-assigned target %q (owned by %q)", orig, target, owner)
+		}
+		_, finalBase := splitToolNamespace(target)
+		if owner, exists := ownerByFinalBase[finalBase]; exists && owner != orig {
+			return fmt.Errorf("non-injective target naming: %q cannot map to target %q with base %q (owned by %q)", orig, target, finalBase, owner)
+		}
+		ownerByTarget[target] = orig
+		ownerByFinalBase[finalBase] = orig
+	}
+	return nil
+}
+
 func parseToolMappings(value any) (map[string]map[string]string, error) {
 	typed, ok := value.(map[string]any)
 	if !ok {
@@ -4139,11 +4675,19 @@ func parseToolMappings(value any) (map[string]map[string]string, error) {
 		// client (e.g. "Claude_Code" and "claude_code") combine deterministically.
 		normalized := normalizeClientKey(client)
 		if result[normalized] == nil {
-			result[normalized] = clientMap
-			continue
+			result[normalized] = make(map[string]string, len(clientMap))
 		}
 		for orig, target := range clientMap {
 			result[normalized][orig] = target
+		}
+		if normalized == "oh_my_pi" {
+			if err := validateOMPConfigMappings(result[normalized]); err != nil {
+				return nil, fmt.Errorf("client %q: %w", client, err)
+			}
+		} else if clientUsesAliasPlan(normalized) {
+			if err := validateAliasPlanConfigMappings(normalized, result[normalized]); err != nil {
+				return nil, fmt.Errorf("client %q: %w", client, err)
+			}
 		}
 	}
 	return result, nil
@@ -5100,59 +5644,6 @@ func replaceToolNamesInValue(value any, cached *cachedCloakPatterns) (any, bool)
 		return value, false
 	}
 }
-
-func walkJSON(value any, visit func(path []string, value any) bool) {
-	var walk func(path []string, current any) bool
-	walk = func(path []string, current any) bool {
-		if !visit(path, current) {
-			return false
-		}
-		switch typed := current.(type) {
-		case map[string]any:
-			for key, child := range typed {
-				if !walk(appendPath(path, key), child) {
-					return false
-				}
-			}
-		case []any:
-			for index, child := range typed {
-				if !walk(appendPath(path, fmt.Sprintf("%d", index)), child) {
-					return false
-				}
-			}
-		}
-		return true
-	}
-	walk(nil, value)
-}
-
-func appendPath(path []string, item string) []string {
-	next := make([]string, len(path), len(path)+1)
-	copy(next, path)
-	return append(next, item)
-}
-
-func collectText(value any) string {
-	var parts []string
-	var collect func(any)
-	collect = func(current any) {
-		switch typed := current.(type) {
-		case string:
-			parts = append(parts, typed)
-		case map[string]any:
-			for _, child := range typed {
-				collect(child)
-			}
-		case []any:
-			for _, child := range typed {
-				collect(child)
-			}
-		}
-	}
-	collect(value)
-	return strings.Join(parts, "\n")
-}
-
 func extractToolNames(body map[string]any, sourceFormat string) []string {
 	var names []string
 
@@ -5431,7 +5922,7 @@ func detectCloakedClientWithSignal(toolNames []string, ompAttributed bool) strin
 	}
 
 	// Multiple qualifying clients: rank by target-hit ratio over observed, breaking exact
-	// ties deterministically by absolute hit count and finally by client id,
+	// ties deterministically by absolute hit count, full-table coverage, and finally by client id,
 	// so repeated detections against identical input agree.
 	sort.Slice(matches, func(i, j int) bool {
 		a, b := matches[i], matches[j]
@@ -5440,6 +5931,9 @@ func detectCloakedClientWithSignal(toolNames []string, ompAttributed bool) strin
 		}
 		if a.hits != b.hits {
 			return a.hits > b.hits
+		}
+		if a.atFullCoverage() != b.atFullCoverage() {
+			return a.atFullCoverage()
 		}
 		return a.client < b.client
 	})
@@ -5451,7 +5945,10 @@ func detectCloakedClientWithSignal(toolNames []string, ompAttributed bool) strin
 	if top.hits > runnerUp.hits {
 		return top.client
 	}
-	// Full-coverage tie
+	if top.atFullCoverage() != runnerUp.atFullCoverage() {
+		return top.client
+	}
+	// Full-coverage tie: both at full coverage → native Antigravity superset.
 	if top.atFullCoverage() && runnerUp.atFullCoverage() {
 		return ""
 	}

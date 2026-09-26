@@ -7,7 +7,7 @@ the installed binary's upstream behavior. Historical results at the end are
 reference evidence, not a substitute for checking today's runtime.
 
 For full real-client coverage of all nine OMP mappings, transport variants, and
-intentional pass-through tools, use the separate
+extended shared/fallback alias tools, use the separate
 [OMP full tool-cloak checklist](verification-checklist-omp.md) after preparation
 here. The single-tool probe below is not full nine-tool acceptance.
 
@@ -25,6 +25,8 @@ $TargetCommit = (git rev-parse HEAD).Trim()
 git status --short
 go test ./...
 if ($LASTEXITCODE) { throw 'Go tests failed' }
+go test -race -run TestRequestAliasPlanConcurrentIsolation ./...
+if ($LASTEXITCODE) { throw 'Alias-plan concurrent isolation race test failed' }
 go test ./.github/scripts
 if ($LASTEXITCODE) { throw 'Packaging tests failed' }
 go vet ./...

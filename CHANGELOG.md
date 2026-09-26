@@ -6,6 +6,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 
 ## [Unreleased]
 
+### Changed
+- Pruned obsolete internal seams and test-only utilities from core production source: removed `resolveExplicitClient`, `(*explicitOMPLifecycleManager).reset`, legacy `splitSSEEvents` wrapper, and `corroborateCloakedTargetOMP` (Issue #42).
+- Relocated test-only JSON exploration utilities (`walkJSON`, `appendPath`, `collectText`) to `json_test_helpers_test.go` (Issue #42).
+- Consolidated duplicate round-trip streaming tests and client-specific uniqueness tests into canonical integration and table initialization suites, merging `session_cleanup_test.go` into `filter_test.go` (Issue #42).
+
+## [0.6.0] - 2026-09-25
+
+### Added
+- Generalized request-scoped alias plan architecture for dynamic-surface clients (Claude Code, OpenAI Codex) alongside extended alias handling for Oh My Pi, with fail-closed correlation (`tool_cloak_required` for alias-plan clients, `omp_cloak_required` for Protected OMP), collision detection, and deterministic reversible fallback aliases (`wp_ext_<hash>`) for dynamic/MCP tool declarations (Issue #32).
+- Full declaration-level cloaking for Claude Code (`claude_code`): core tools map to AGY role names (`Glob -> find_by_name`, `WebFetch -> read_url_content`), Tier-2 tools map to stable shared aliases (`wp_*`), and deferred tools/placeholders are handled across normal protocol identity positions (`tools[]`, `tool_calls`/`tool_use`, `tool_choice`) (Issue #36, Issue #32).
+- Extended OMP tool coverage beyond the canonical nine on Protected routes via shared aliases (`wp_*`) and deterministic fallback aliases (`wp_ext_<hash>`), while preserving `xd://` virtual device transport and protocol integrity (implementation complete, live default-profile acceptance pending) (Issue #37, Issue #32).
+- Protected OMP config-time validation rejecting mutable canonical nine, non-injective targets, and invalid target naming in `tool_mappings` during initialization and reconfigure (Issue #37, Issue #32).
+- Full declaration-level cloaking for OpenAI Codex (`codex`) across code mode and shell mode (`exec_command -> run_command`, `apply_patch -> wp_apply_patch`, `write_stdin -> wp_write_stdin`, `view_image -> wp_view_image`) with request-scoped reversal preventing cross-mode collision (Issue #38, Issue #32).
+- Namespace collision gate failing closed when distinct source identities or namespace variants resolve to the same final target or base identity (Issue #32).
+- Missing RequestID or duplicate RequestID rejection with HTTP 503 `tool_cloak_required` for alias-plan clients (Issue #32).
+
+### Changed
+- Aligned Codex collaboration tools (`collaboration__send_message -> wp_send_message`, `collaboration__list_agents -> wp_list_workers`, `collaboration__followup_task -> wp_collaboration_followup_task`) to cross-client shared vocabulary to avoid premature speculative AGY mapping (Issue #38, Issue #32).
+- Added full-coverage tie-breaker in `detectCloakedClientWithSignal` so clients with 100% table match are not misattributed to partial superset tables under identical ratio and hit counts (Issue #36).
+
 ## [0.5.2] - 2026-09-12
 
 ### Added
@@ -137,7 +157,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 - Initial plugin implementation.
 - Added repository metadata, MIT license, and release build workflow.
 
-[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/monet88/antigravity-cloak/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/monet88/antigravity-cloak/compare/v0.5.1...v0.5.2
 [0.5.0]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.5.0
 [0.4.4]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.4

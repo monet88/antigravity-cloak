@@ -89,18 +89,18 @@ Casing MUST match what the client actually sends, because uncloak restores the
 exact key string back to the client and tool names are case-sensitive.
 
 Supported clients:
-- `claude_code` (PascalCase: `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `ToolSearch`, `Skill`, `Workflow`)
-- `codex` (snake_case: `exec`, `web_search`, `request_user_input`, `collaboration__spawn_agent`, `collaboration__followup_task`, `collaboration__list_agents`.) Code mode is the default for every routed provider, and over opencodex's `openai-chat` adapter such a session declares exactly those names, with namespaced children flattened to `<namespace>__<child>`. Only names in a tool-name position are listed: helpers that exist solely as prose inside the `exec` description (`apply_patch`, `exec_command`, `write_stdin`, `view_image`, `tool_search`, the goal and MCP-resource tools) stay pass-through, because the reverse path restores a name only where it appears as a tool name. `exec` is the sole entry point and therefore owns `run_command`; a shell-mode session declares `exec_command` instead, which is absent because one target cannot carry two sources. Intentional pass-through: `wait`, `request_user_input_async`, `clock__sleep`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message`. `shell_command` is a `shell_type` catalog label, not a tool name.
-- `oh_my_pi` (9-tool Safe Mapping Set: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Intentional pass-through: `todo`, `hub`, `eval`, `vibe_*`, and Autoresearch tools.)
+- `claude_code` (PascalCase: Core tools `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `WebSearch`, `WebFetch` map to proven Antigravity equivalents. Tier-2 subagent control, planning, and MCP-resource tools cloak to shared aliases `wp_*`, with unknown/MCP tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
+- `codex` (snake_case: `exec`, `exec_command`, `web_search`, `request_user_input`, `collaboration__spawn_agent`. In `defaultCloakTables["codex"]`, only code-mode entry point `exec` and direct AGY role targets are kept so `defaultUncloakTables` remains injective at `init()`. Shell-mode `exec_command -> run_command`, helpers (`apply_patch`, `write_stdin`, `view_image`), and collaboration tools cloak to shared aliases `wp_*` via `codexSharedAliases` in the request-scoped alias plan. Dynamic `mcp__*` and unknown tools receive deterministic fallback aliases `wp_ext_<hash>`. Response and stream reversal restores exact original source names without cross-mode collision.)
+- `oh_my_pi` (9-tool Safe Mapping Set: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Extended tools `todo`, `hub`, `eval`, `vibe_*`, and Autoresearch tools cloak to shared aliases `wp_*`, with unknown tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
 > Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 > Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
 > Which tool names a given Codex model actually sends, and the recommended mapping for the shell-mode surface, are recorded in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**.
-> Where the Claude Code table diverges from OMP (wrong targets, missing tools, absent identity/protection), and the ranked fix options, are recorded in **[the Claude Code gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md)**.
+> Historical gap analysis and ranked fix options prior to Issues #32/#36 are recorded in **[the Claude Code gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md)**.
 
 ### MCP tools behavior
 - **Oh My Pi (`oh_my_pi`)** mounts MCP servers under the virtual-device protocol (`xd://mcp__<server>_<tool>`) and invokes them through its standard `read`/`write` tools. Those core tools are already cloaked to `view_file`/`write_to_file`, so OMP MCP traffic is protected without a separate top-level mapping.
 - **Do not convert OMP virtual-device MCP calls into `call_mcp_tool`.** That would require additional payload/schema transformation and risks breaking streaming semantics.
-- **Top-level `mcp__*` tools** from clients that expose them directly remain pass-through traffic. For Codex this is structural, not policy: a code-mode session does not declare them (`supports_search_tool: true` defers them, and the captured wire had no `mcp__*` among the declared names), AGY's bridge `call_mcp_tool` is one target for an open-ended family, and AGY identifies an MCP tool as a `(ServerName, ToolName)` pair carrying the server's own published name — `resolve-library-id` under `~/.gemini/antigravity-cli/mcp/` against `mcp__context7__resolve_library_id` on this wire. Masking one would need identity transformation plus argument rewriting; a rename cannot express it and the reverse could not undo it. See [the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md#why-mcp-stays-pass-through).
+- **Top-level `mcp__*` tools** from clients using alias plans (Claude Code, Codex) or Protected OMP are admitted with deterministic reversible fallback aliases (`wp_ext_<hash>`), cloaking their identity upstream and restoring exact source names on return without schema rewriting.
 ### Oh My Pi Routing & Lifecycle (Issue #25, #26, #27, #28)
 1. **ProtectedAGY Precedence**: Explicit OMP marker (`X-Cloak-Client: oh_my_pi` / `omp` / `oh-my-pi`) on `agy/*` routes bypasses generic `model_prefixes` and enforces fail-closed protection. The request must pass strict single-document JSON admission, declaration collision validation (comparing final base identities), and canonical validation. Any admission failure terminates with an exact HTTP 503 JSON error (`omp_cloak_required`) before upstream execution.
 2. **Request-Scoped Active Reverse**: Only canonical pairs whose source tool was actually declared and transformed in that request become active in the reverse map. Inactive canonical targets and native AGY target-only traffic are never reverse-cloaked.
@@ -118,6 +118,12 @@ Supported clients:
    words get shredded inside the huge Claude Code system prompt. Only underscore
    names or multi-word camelCase (AskUserQuestion, ToolSearch) are
    "unambiguous" (replace everywhere).
+
+### Request-Scoped Alias Plans & Fail-Closed 503 (Parent #32, Issue #36, #38)
+1. **Universal Alias Plans**: Clients with dynamic tool surfaces (`claude_code`, `codex`) route through request-scoped alias plans (`clientUsesAliasPlan`). Core tools map to proven AGY role targets, secondary/unmapped tools map to stable shared aliases (`wp_*`), and dynamic/MCP tools receive deterministic fallback aliases (`wp_ext_<hash>`). (Protected OMP routes through its dedicated `explicitOMPLifecycleManager` protected route state rather than `clientUsesAliasPlan`, maintaining its own active reverse authority and canonical/custom validation).
+2. **Fail-Closed Correlation**: Requests from alias-plan clients require correlation via host `RequestID`. Missing `RequestID` or duplicate `RequestID` terminates immediately with HTTP 503 JSON `tool_cloak_required` (`{"error":{"code":"tool_cloak_required","message":"Request could not be safely cloaked."}}`) before upstream dispatch.
+3. **Collision Detection**: Collision validation checks both final target names and namespace-stripped base identities. If distinct source identities or namespace variants (`functions:foo` vs `default_api:foo`, or `functions:Read` vs `default_api:Read`) resolve to the same final target or base, admission fails closed with HTTP 503 `tool_cloak_required`.
+4. **Exact Reversal & Fallback**: Request-scoped reversal (`requestsRequestScopedReverse`) scopes reverse uncloaking strictly to tools declared and transformed in that request. Dynamic `wp_ext_<hash>` fallback aliases are restored to their exact original source names on response and stream paths without schema alteration.
 
 ## Debug logging
 
@@ -138,6 +144,9 @@ Supported clients:
 
 Key debug lines to grep:
 - handleRequestInterceptBefore: ... rewritten=%t - request-side cloak applied.
+- handleRequestInterceptBefore: alias plan rewritten=%t client=%s - alias plan forward cloak applied.
+- handleRequestInterceptBefore: alias plan client=%s with missing RequestID -> 503 - missing correlation rejected with HTTP 503 tool_cloak_required.
+- request alias admission rejected RequestID=%q client=%q: %v - alias plan collision, duplicate RequestID, or parse error rejected with HTTP 503 tool_cloak_required.
 - buildUncloakTable: toolNames=%v client=%s and cloakedClient=%s - detection.
   client= / cloakedClient=claude_code means detection worked; empty means it did
   not (e.g. sourceFormat or casing bug).
@@ -172,8 +181,8 @@ release zips + checksums.txt; version comes from the v* git tag.
 
 ## Local Docker deploy and OMP live acceptance
 
-For per-tool acceptance of all nine OMP canonical mappings and optional
-pass-through tools, use [the OMP checklist](docs/verification-checklist-omp.md).
+For per-tool acceptance of all nine OMP canonical mappings and extended alias
+tools, use [the OMP checklist](docs/verification-checklist-omp.md).
 Record real OMP execution and continuation; raw HTTP simulations alone do not
 establish client compatibility.
 

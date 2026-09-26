@@ -17,8 +17,10 @@ Every result below starts **NOT RUN**. Record PASS, FAIL, BLOCKED, or NOT RUN
 with evidence. A prompt requesting a tool, a declaration rewrite, an HTTP 200,
 or a model claiming success is insufficient. Full canonical acceptance requires
 all nine tools to execute successfully on the pinned binary. An unavailable
-canonical tool is BLOCKED, not PASS. Optional pass-through tools may be N/A
-only with a recorded inventory/configuration reason.
+canonical tool is BLOCKED, not PASS. Unexposed extended tools may be N/A
+only with a recorded inventory/configuration reason; any exposed or declared
+extended tool must be cloaked to its assigned alias and restored downstream
+rather than skipped as pass-through.
 
 ## 1. Prepare and pin the run
 
@@ -124,7 +126,7 @@ Special setup and checks:
   using an already configured provider, then restore it. Search via bash, a
   browser, or an MCP virtual device does not pass OMP-09.
 
-## 4. Transport variants and intentional pass-through
+## 4. Transport variants and extended alias tools
 
 These are additional compatibility checks; the nine canonical rows alone do
 not prove every virtual device or optional tool works.
@@ -136,13 +138,14 @@ not prove every virtual device or optional tool works.
 | EXT-03 / NOT RUN | `read` virtual device | Inspect a registered `xd://` device through `view_file -> read`; URI and device result survive unchanged. |
 | EXT-04 / NOT RUN | `write` virtual device | Dispatch a benign operation using the device's actual schema via `write_to_file -> write`; verify real execution. |
 | EXT-05 / NOT RUN | OMP MCP device | Exercise an available read-only `xd://mcp__<server>_<tool>` through native read/write; no conversion to `call_mcp_tool`, no URI/argument corruption. |
-| EXT-06 / NOT RUN | Top-level `mcp__*` | If actually exposed, declaration/call/result names pass through unchanged. Record N/A if this client exposes MCP only through devices. |
+| EXT-06 / NOT RUN | Top-level `mcp__*` / optional tools | If exposed, declaration is cloaked upstream via shared `wp_*` or fallback `wp_ext_<hash>` alias and restored exactly on response/stream chunks. Record N/A if this client exposes MCP only through devices. |
 
 For each **exposed** optional tool below, add an individual result row. Verify
-its name is unchanged upstream and downstream, use a benign fixture operation
-supported by the actual schema, and capture execution/continuation. Distinguish
-declaration-only verification from executed-tool verification. Do not stop or
-modify unrelated agents/experiments to manufacture coverage.
+its name is cloaked upstream to its assigned shared/fallback alias and restored
+downstream, use a benign fixture operation supported by the actual schema, and
+capture execution/continuation. Distinguish declaration-only verification from
+executed-tool verification. Do not stop or modify unrelated agents/experiments
+to manufacture coverage.
 
 - [ ] `todo`, `hub`, `eval`.
 - [ ] `vibe_spawn`, `vibe_send`, `vibe_wait`, `vibe_kill`, `vibe_list`.
