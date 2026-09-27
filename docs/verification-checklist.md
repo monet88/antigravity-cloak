@@ -94,10 +94,15 @@ the image digest. Do not assume a future floating image remains compatible.
 
 ```powershell
 $BuildImage = 'golang:1.26.0-bookworm'
-$Version = '0.5.1' # Must match pluginVersion at TargetCommit.
 $SourceMain = git show "${TargetCommit}:main.go"
-if ($LASTEXITCODE -or !($SourceMain -match ('pluginVersion\s*=\s*"' + [regex]::Escape($Version) + '"'))) {
-    throw 'Version does not match pinned source'
+if ($LASTEXITCODE) { throw 'Could not read main.go from pinned source' }
+$SourceMainText = $SourceMain -join "`n"
+$VersionMatch = [regex]::Match($SourceMainText, 'pluginVersion\s*=\s*"([^"]+)"')
+if (!$VersionMatch.Success) { throw 'Could not resolve pluginVersion from pinned source' }
+$Version = $VersionMatch.Groups[1].Value
+$Registry = (git show "${TargetCommit}:registry.json" | ConvertFrom-Json)
+if ($LASTEXITCODE -or $Registry.plugins[0].version -ne $Version) {
+    throw 'registry.json version does not match pinned pluginVersion'
 }
 docker pull $BuildImage
 if ($LASTEXITCODE) { throw 'Build image pull failed' }
@@ -385,7 +390,7 @@ and are not committed.
   (gateway glibc 2.36).
 - Installed as `plugins/linux/amd64/antigravity-cloak-v0.6.0.so`; the host
   registered `version=0.6.0` from that path. `pluginVersion`, `registry.json`
-  and the `[0.6.0]` changelog section agree; no `v0.6.0` tag exists yet.
+  and the candidate 0.6.0 changelog section agree; no `v0.6.0` tag exists yet.
 - Gateway: `cli-proxy-api` (CLIProxyAPI `v7.3.19`, image
   `sha256:d8fb8d2d7a847696332d8abf66bd907b129174fa626d84fd1c95e587d620010a`);
   config mount `.ref/CLIProxyAPI/config.local.yaml`, plugin mount

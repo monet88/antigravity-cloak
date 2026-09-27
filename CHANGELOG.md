@@ -40,7 +40,7 @@ source `4e946ac` (SHA256
   checks land, Issue #40 is not complete and nothing in this section is
   release-ready.
 
-## [0.6.0] - 2026-09-25
+## Candidate 0.6.0 (unreleased) - 2026-09-25
 
 ### Added
 - Generalized request-scoped alias plan architecture for dynamic-surface clients (Claude Code, OpenAI Codex) alongside extended alias handling for Oh My Pi, with fail-closed correlation (`tool_cloak_required` for alias-plan clients, `omp_cloak_required` for Protected OMP), collision detection, and deterministic reversible fallback aliases (`wp_ext_<hash>`) for dynamic/MCP tool declarations (Issue #32).
@@ -186,8 +186,7 @@ source `4e946ac` (SHA256
 - Initial plugin implementation.
 - Added repository metadata, MIT license, and release build workflow.
 
-[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/monet88/antigravity-cloak/compare/v0.5.2...v0.6.0
+[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.5.2...HEAD
 [0.5.2]: https://github.com/monet88/antigravity-cloak/compare/v0.5.1...v0.5.2
 [0.5.0]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.5.0
 [0.4.4]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.4

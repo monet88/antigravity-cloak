@@ -44,20 +44,20 @@ Tools beyond the canonical Safe Mapping Set are cloaked on Protected routes via 
 
 ##### 2. Claude Code (`claude_code`)
 
-**Status legend:** ✅ live and correct · 🔄 request-scoped shared alias (`wp_*`) · 🔀 deterministic fallback (`wp_ext_<hash>`).
+**Status legend:** `DECL` = observed and mapped in the 2026-09-27 live Claude Code request; downstream restoration/execution/continuation still pending · `TEST` = mapping covered by fixtures/protocol tests but not observed in that live declaration set · `SHARED` = request-scoped shared alias (`wp_*`) · `FALLBACK` = deterministic fallback (`wp_ext_<hash>`).
 
 | CC Tool | Antigravity Target | Status | Classification / Note |
 | :--- | :--- | :--- | :--- |
-| `Read` | `view_file` | ✅ | Direct semantic alias |
-| `Write` | `write_to_file` | ✅ | Direct semantic alias |
-| `Edit` | `replace_file_content` | ✅ | Direct semantic alias |
-| `Bash` | `run_command` | ✅ | Direct semantic alias |
-| `Grep` | `grep_search` | ✅ | Direct semantic alias |
-| `Glob` | `find_by_name` | ✅ | Direct semantic alias (pattern-matching file finder) |
-| `Agent` | `invoke_subagent` | ✅ | Direct semantic alias |
-| `AskUserQuestion` | `ask_question` | ✅ | Direct semantic alias |
-| `WebSearch` | `search_web` | ✅ | Direct semantic alias |
-| `WebFetch` | `read_url_content` | ✅ | Direct semantic alias |
+| `Read` | `view_file` | `DECL` | Direct semantic alias |
+| `Write` | `write_to_file` | `DECL` | Direct semantic alias |
+| `Edit` | `replace_file_content` | `DECL` | Direct semantic alias |
+| `Bash` | `run_command` | `DECL` | Direct semantic alias |
+| `Grep` | `grep_search` | `DECL` | Direct semantic alias |
+| `Glob` | `find_by_name` | `DECL` | Direct semantic alias (pattern-matching file finder) |
+| `Agent` | `invoke_subagent` | `DECL` | Direct semantic alias |
+| `AskUserQuestion` | `ask_question` | `TEST` | Direct semantic alias; not present in the 20-tool live declaration set |
+| `WebSearch` | `search_web` | `TEST` | Direct semantic alias; not present in the 20-tool live declaration set |
+| `WebFetch` | `read_url_content` | `DECL` | Direct semantic alias |
 
 **Tier-2 Shared Aliases & Tier-3 Fallback Aliases** (parent #32 / issue #36):
 Tools without a 1:1 AGY equivalent receive stable shared aliases (`wp_*`) via `claudeCodeSharedAliases`:
@@ -72,7 +72,7 @@ Tools without a 1:1 AGY equivalent receive stable shared aliases (`wp_*`) via `c
 - No `ProtectedAGY` admission for `X-Cloak-Client: claude_code` on `agy/*` — the header resolves identity only, so no fail-closed 503 (fail-closed 503 applies to missing/duplicate RequestID or alias-plan collision).
 - Brand restoration is one-directional: `Claude Code -> Antigravity` on the request path only; assistant-visible `Antigravity` is not restored for CC as `Antigravity -> omp` is for OMP.
 
-⚠️ **Wire validation:** CC core mappings and alias plans are verified against recorded Anthropic message fixtures and protocol test suites.
+**Wire validation:** Claude Code `2.1.283` live request declarations verified all 20 observed mappings with zero source-name leakage upstream. Downstream restoration, native execution, and continuation remain unattested because the live completion attempts returned upstream HTTP 429; fixtures and protocol tests cover those mechanics until the deferred manual live session is completed.
 
 ##### 3. OpenAI Codex (`codex`)
 
