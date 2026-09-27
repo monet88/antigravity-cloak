@@ -1336,17 +1336,6 @@ func handleResponseIntercept(request []byte) []byte {
 			debugLog("handleResponseIntercept: alias-plan client=%q with missing authority RequestID=%s -> pass-through", sess.client, req.RequestID)
 			return mustEnvelope(pluginapi.ResponseInterceptResponse{})
 		}
-		if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
-			debugLog("handleResponseIntercept: alias-plan explicit marker=%q with missing authority RequestID=%s -> pass-through", marker.client, req.RequestID)
-			return mustEnvelope(pluginapi.ResponseInterceptResponse{})
-		}
-		src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
-		if len(src) > 0 {
-			if _, c := buildUncloakTable(src, format); clientUsesAliasPlan(c) {
-				debugLog("handleResponseIntercept: alias-plan client=%q with missing authority RequestID=%s -> pass-through", c, req.RequestID)
-				return mustEnvelope(pluginapi.ResponseInterceptResponse{})
-			}
-		}
 	}
 
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
@@ -1355,7 +1344,7 @@ func handleResponseIntercept(request []byte) []byte {
 	}
 
 	if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
-		debugLog("handleResponseIntercept: alias-plan explicit marker=%q without RequestID -> pass-through", marker.client)
+		debugLog("handleResponseIntercept: alias-plan explicit marker=%q without pinned authority -> pass-through", marker.client)
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
 	var client string
@@ -1460,17 +1449,6 @@ func handleStreamChunkIntercept(request []byte) []byte {
 			debugLog("handleStreamChunkIntercept: alias-plan client=%q with missing authority RequestID=%s -> pass-through", sess.client, req.RequestID)
 			return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 		}
-		if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
-			debugLog("handleStreamChunkIntercept: alias-plan explicit marker=%q with missing authority RequestID=%s -> pass-through", marker.client, req.RequestID)
-			return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
-		}
-		src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
-		if len(src) > 0 {
-			if _, c := buildUncloakTable(src, format); clientUsesAliasPlan(c) {
-				debugLog("handleStreamChunkIntercept: alias-plan client=%q with missing authority RequestID=%s -> pass-through", c, req.RequestID)
-				return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
-			}
-		}
 	}
 
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
@@ -1479,7 +1457,7 @@ func handleStreamChunkIntercept(request []byte) []byte {
 	}
 
 	if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
-		debugLog("handleStreamChunkIntercept: alias-plan explicit marker=%q without RequestID -> pass-through", marker.client)
+		debugLog("handleStreamChunkIntercept: alias-plan explicit marker=%q without pinned authority -> pass-through", marker.client)
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 	}
 	resp := globalStreamManager.processChunk(&req, format)
@@ -1496,18 +1474,25 @@ func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]stri
 	// Try detecting from original (uncloaked) tool names first
 	client := detectClient(toolNames)
 	debugLog("buildUncloakTable: toolNames=%v client=%s", toolNames, client)
-	if client != "" {
-		return scopeUncloakTableToDeclaredNames(effectiveUncloakTable(client), client, toolNames), client
+	if client == "" {
+		// Request body may already be cloaked — detect from cloak targets
+		client = detectCloakedClient(toolNames)
+		debugLog("buildUncloakTable: cloakedClient=%s", client)
 	}
-
-	// Request body may already be cloaked — detect from cloak targets
-	cloakedClient := detectCloakedClient(toolNames)
-	debugLog("buildUncloakTable: cloakedClient=%s", cloakedClient)
-	if cloakedClient != "" {
-		return scopeUncloakTableToDeclaredNames(effectiveUncloakTable(cloakedClient), cloakedClient, toolNames), cloakedClient
+	if client == "" {
+		return nil, ""
 	}
-
-	return nil, ""
+	if clientUsesAliasPlan(client) {
+		// Claude Code and Codex cloak through a request-scoped alias plan: their
+		// surface is mode-dependent and the exact forward mapping is minted per
+		// request. A body alone — whether it still carries source names or only
+		// cloak TARGETS — cannot prove that mapping, so it is NOT reverse
+		// authority here (Issue #39). Without pinned request authority the caller
+		// must pass through instead of guessing a static reverse.
+		debugLog("buildUncloakTable: alias-plan client=%q withheld without pinned authority", client)
+		return nil, ""
+	}
+	return scopeUncloakTableToDeclaredNames(effectiveUncloakTable(client), client, toolNames), client
 }
 
 // requestsRequestScopedReverse reports whether a client's reverse table must be

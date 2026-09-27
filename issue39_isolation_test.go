@@ -1,12 +1,13 @@
 package main
 
 import (
-	"encoding/json"
+	"bytes"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -553,38 +554,41 @@ func TestIssue39_LifecycleCleanupIdempotenceAndLeaks(t *testing.T) {
 }
 
 // TestIssue39_NoDynamicIdentityGuessingInStaticFallbacks asserts that legacy static
-// reverse fallbacks (buildUncloakTable, scopeUncloakTableToDeclaredNames) never uncloak
-// or invent dynamic identities (wp_*, wp_ext_*) when given executed or cloaked bodies.
+// reverse falls back to a table and then, when a target-side body is narrowed against
+// the names that body declares, the narrowing drops every dynamic identity (wp_*,
+// wp_ext_*). Those aliases are minted per request by the alias plan, so a body cannot
+// prove the client declared any of them; only static AGY targets survive.
 func TestIssue39_NoDynamicIdentityGuessingInStaticFallbacks(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
-	// A cloaked body carrying shared aliases and fallback aliases
-	cloakedBody := []byte(`{
-		"tools": [
-			{"type": "function", "function": {"name": "run_command"}},
-			{"type": "function", "function": {"name": "wp_send_message"}},
-			{"type": "function", "function": {"name": "wp_list_workers"}},
-			{"type": "function", "function": {"name": "wp_ext_1234567890abcdef"}}
-		]
-	}`)
+	table := map[string]string{
+		"run_command":             "Bash",
+		"wp_send_message":         "SendMessage",
+		"wp_ext_0123456789abcdef": "mcp__custom_tool",
+	}
+	declared := []string{"run_command", "wp_send_message", "wp_ext_0123456789abcdef"}
 
-	table, client := buildUncloakTable(cloakedBody, "openai")
-	// If it detected codex or claude_code based on run_command:
-	if table != nil {
-		// table MUST NOT contain any wp_ or wp_ext_ mappings
-		for target, src := range table {
-			if strings.HasPrefix(target, "wp_") || strings.HasPrefix(target, "wp_ext_") {
-				t.Fatalf("static uncloak table guessed dynamic identity: %q -> %q", target, src)
-			}
+	scoped := scopeUncloakTableToDeclaredNames(table, "claude_code", declared)
+	if scoped == nil {
+		t.Fatal("expected non-nil scoped table for a declared target-side body")
+	}
+	if scoped["run_command"] != "Bash" {
+		t.Fatalf("declared static target must survive narrowing, got %v", scoped)
+	}
+	for target := range scoped {
+		if strings.HasPrefix(target, "wp_") {
+			t.Fatalf("legacy static reverse reconstructed dynamic identity: %q", target)
 		}
 	}
-	_ = client
 }
+
 // TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets proves that
 // when an alias-plan client (Claude Code, Codex) has no pinned alias-plan authority
-// (for example after request.complete cleanup, or missing plan), neither AGY-role targets
-// (run_command) nor wp_* shared aliases are reversed on either response or stream paths.
-// Both paths must pass through unmutated rather than guess or fall back to static tables.
+// (for example after request.complete cleanup, missing plan, or completely absent RequestID/marker),
+// neither AGY-role targets (run_command) nor wp_* shared aliases are reversed on either
+// response or stream paths. Both paths must pass through unmutated rather than guess or
+// fall back to static tables, even when executed bodies contain full static target sets
+// (view_file, write_to_file, run_command).
 func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("model_prefixes: [agy/]")))
@@ -708,74 +712,265 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		}
 	}
 
-	// 3. Correlated request with missing plan (never admitted) carrying executed body
+	// 3. Correlated request with missing plan carrying executed body with full static AGY targets
 	{
 		const unadmittedID = "unadmitted-cc-03"
-		executedBody := []byte(`{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"wp_send_message"}}]}`)
-		respBody := []byte(`{"content":[{"type":"tool_use","id":"t1","name":"run_command","input":{}},{"type":"tool_use","id":"t2","name":"wp_send_message","input":{}}]}`)
+		executedBody := []byte(`{"tools":[{"type":"function","function":{"name":"view_file"}},{"type":"function","function":{"name":"write_to_file"}},{"type":"function","function":{"name":"run_command"}}]}`)
+		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`)
 
-		var req pluginapi.ResponseInterceptRequest
-		req.RequestID = unadmittedID
-		req.Model = "agy/claude-model"
-		req.SourceFormat = "anthropic"
-		req.RequestBody = executedBody
-		req.Body = respBody
-
-		payload, _ := json.Marshal(req)
-		rawResp, codeResp := handlePluginCall(pluginabi.MethodResponseInterceptAfter, payload)
+		respPayload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, unadmittedID, "openai", "agy/claude-model", respBody, executedBody, nil)
+		rawResp, codeResp := handlePluginCall(pluginabi.MethodResponseInterceptAfter, respPayload)
 		if codeResp != 0 {
 			t.Fatalf("response intercept failed: %d", codeResp)
 		}
-		decodedResp := string(decodeEnvelopeBody(t, rawResp))
-		if strings.Contains(decodedResp, `"Bash"`) || strings.Contains(decodedResp, `"SendMessage"`) {
-			t.Fatalf("unadmitted CC request reversed targets without authority: %s", decodedResp)
+		decodedResp := decodeEnvelopeBody(t, rawResp)
+		if decodedResp != nil && !bytes.Equal(decodedResp, respBody) {
+			t.Fatalf("unadmitted CC request reversed targets without authority: %s", string(decodedResp))
+		}
+
+		// Stream chunk for unadmitted CC request
+		chunkBody := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
+		streamPayload := makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, unadmittedID, "openai", "agy/claude-model", 0, chunkBody, executedBody, nil)
+		rawChunk, codeChunk := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, streamPayload)
+		if codeChunk != 0 {
+			t.Fatalf("stream chunk failed: %d", codeChunk)
+		}
+		decodedChunk := decodeEnvelopeBody(t, rawChunk)
+		if decodedChunk != nil && !bytes.Equal(decodedChunk, chunkBody) {
+			t.Fatalf("unadmitted CC stream chunk reversed targets without authority: %s", string(decodedChunk))
 		}
 	}
 
-	// 4. Explicit marker without RequestID
+	// 4. Missing authority entirely: NO RequestID, NO marker, NO UA, with executed Claude/Codex body
+	{
+		executedBody := []byte(`{"tools":[{"type":"function","function":{"name":"view_file"}},{"type":"function","function":{"name":"write_to_file"}},{"type":"function","function":{"name":"run_command"}}]}`)
+		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`)
+
+		respPayload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "", "openai", "agy/model", respBody, executedBody, nil)
+		rawResp, codeResp := handlePluginCall(pluginabi.MethodResponseInterceptAfter, respPayload)
+		if codeResp != 0 {
+			t.Fatalf("response intercept failed: %d", codeResp)
+		}
+		decodedResp := decodeEnvelopeBody(t, rawResp)
+		if decodedResp != nil && !bytes.Equal(decodedResp, respBody) {
+			t.Fatalf("no-authority response guessed claude_code and reversed run_command to Bash: %s", string(decodedResp))
+		}
+
+		// Stream chunk with no RequestID, no marker, no UA, executed body
+		chunkBody := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
+		streamPayload := makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, "", "openai", "agy/model", 0, chunkBody, executedBody, nil)
+		rawChunk, codeChunk := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, streamPayload)
+		if codeChunk != 0 {
+			t.Fatalf("stream chunk failed: %d", codeChunk)
+		}
+		decodedChunk := decodeEnvelopeBody(t, rawChunk)
+		if decodedChunk != nil && !bytes.Equal(decodedChunk, chunkBody) {
+			t.Fatalf("no-authority stream chunk guessed claude_code and reversed run_command to Bash: %s", string(decodedChunk))
+		}
+	}
+
+	// 4b. Missing authority entirely on same-protocol (anthropic) Claude Code executed body
+	// with three targets (run_command, search_web, ask_question): NO RequestID, NO marker, NO UA.
+	{
+		executedBody := []byte(`{"tools":[{"name":"run_command","description":""},{"name":"search_web","description":""},{"name":"ask_question","description":""}]}`)
+		respBody := []byte(`{"content":[{"type":"tool_use","id":"tu_1","name":"run_command","input":{"command":"ls"}}]}`)
+
+		respPayload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "", "anthropic", "agy/claude-test", respBody, executedBody, nil)
+		rawResp, codeResp := handlePluginCall(pluginabi.MethodResponseInterceptAfter, respPayload)
+		if codeResp != 0 {
+			t.Fatalf("same-protocol no-authority response intercept failed: %d", codeResp)
+		}
+		decodedResp := decodeEnvelopeBody(t, rawResp)
+		if decodedResp != nil && !bytes.Equal(decodedResp, respBody) {
+			t.Fatalf("same-protocol no-authority response guessed claude_code and reversed run_command to Bash: %s", string(decodedResp))
+		}
+
+		// Stream chunk on same-protocol (anthropic) with no RequestID, no marker, no UA, three-target executed body
+		chunkBody := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"run_command\"}}\n\n")
+		streamPayload := makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, "", "anthropic", "agy/claude-test", 0, chunkBody, executedBody, nil)
+		rawChunk, codeChunk := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, streamPayload)
+		if codeChunk != 0 {
+			t.Fatalf("same-protocol no-authority stream chunk failed: %d", codeChunk)
+		}
+		decodedChunk := decodeEnvelopeBody(t, rawChunk)
+		if decodedChunk != nil && !bytes.Equal(decodedChunk, chunkBody) {
+			t.Fatalf("same-protocol no-authority stream chunk guessed claude_code and reversed run_command to Bash: %s", string(decodedChunk))
+		}
+	}
+
+	// 4c. Raw SOURCE bodies (Bash/Read/Edit, exec/web_search/request_user_input)
+	// are alias-plan clients too: the body alone cannot prove the per-request
+	// forward mapping, so they are withheld for the same reason and pass through
+	// on both the response and the stream path. See
+	// TestIssue39_UncorrelatedAliasPlanBodiesPassThroughOnResponseAndStream.
+
+	// 5. Explicit marker without RequestID
 	{
 		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"wp_send_message","arguments":"{}"}}]}}]}`)
 		headers := http.Header{"X-Cloak-Client": []string{"codex"}}
 		rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter, makeIntegrationResponseInterceptPayloadWithHeaders(t, "", "openai", "agy/codex", respBody, headers))
-		decodedResp := string(decodeEnvelopeBody(t, rawResp))
-		if strings.Contains(decodedResp, `"exec"`) || strings.Contains(decodedResp, `"collaboration__send_message"`) {
-			t.Fatalf("explicit marker without RequestID reversed targets without authority: %s", decodedResp)
+		decodedResp := decodeEnvelopeBody(t, rawResp)
+		if decodedResp != nil && !bytes.Equal(decodedResp, respBody) {
+			t.Fatalf("explicit marker without RequestID reversed targets without authority: %s", string(decodedResp))
 		}
+
+		// Stream chunk with explicit marker without RequestID
+		chunkBody := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
+		streamPayload := makeIntegrationStreamChunkPayloadWithHeaders(t, "", "openai", "agy/codex", 0, chunkBody, headers)
+		rawChunk, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, streamPayload)
+		decodedChunk := decodeEnvelopeBody(t, rawChunk)
+		if decodedChunk != nil && !bytes.Equal(decodedChunk, chunkBody) {
+			t.Fatalf("explicit marker without RequestID stream reversed targets without authority: %s", string(decodedChunk))
+		}
+	}
+}
+
+// TestIssue39_UncorrelatedAliasPlanBodiesPassThroughOnResponseAndStream pins the
+// Issue #39 rule for clients whose reverse requires pinned request authority:
+// with no RequestID, no explicit marker, no verified User-Agent and no alias plan,
+// a body declaring the client's own source names (Bash/Read/Edit, exec/...) is
+// still not reverse authority. The executed body downstream carries the AGY
+// targets, and a static guess would hand a natively declared AGY name (or a wp_*
+// alias) back as a name the client never declared. Both the response and the
+// stream path must return the exact bytes they were handed.
+func TestIssue39_UncorrelatedAliasPlanBodiesPassThroughOnResponseAndStream(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+
+	for _, tc := range []struct {
+		name         string
+		sourceFormat string
+		reqBody      string
+		respBody     string
+		chunkBody    string
+	}{
+		{
+			name:         "claude_code",
+			sourceFormat: "anthropic",
+			reqBody:      `{"tools":[{"name":"Bash"},{"name":"Read"},{"name":"Edit"}],"messages":[]}`,
+			respBody:     `{"content":[{"type":"tool_use","id":"tu_1","name":"run_command","input":{"command":"ls"}}]}`,
+			chunkBody:    "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"run_command\"}}\n\n",
+		},
+		{
+			name:         "codex",
+			sourceFormat: "openai",
+			reqBody:      `{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"web_search"}},{"type":"function","function":{"name":"request_user_input"}}],"messages":[]}`,
+			respBody:     `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`,
+			chunkBody:    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reqBody := []byte(tc.reqBody)
+
+			respPayload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "", tc.sourceFormat, "agy/test-model", []byte(tc.respBody), reqBody, nil)
+			rawResp, code := handlePluginCall(pluginabi.MethodResponseInterceptAfter, respPayload)
+			if code != 0 {
+				t.Fatalf("response intercept failed: %d", code)
+			}
+			if got := decodeEnvelopeBody(t, rawResp); got != nil && !bytes.Equal(got, []byte(tc.respBody)) {
+				t.Fatalf("response was not passed through byte-identically:\n got %s\nwant %s", got, tc.respBody)
+			}
+
+			streamPayload := makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, "", tc.sourceFormat, "agy/test-model", 0, []byte(tc.chunkBody), reqBody, nil)
+			rawChunk, codeChunk := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, streamPayload)
+			if codeChunk != 0 {
+				t.Fatalf("stream chunk intercept failed: %d", codeChunk)
+			}
+			if got := decodeEnvelopeBody(t, rawChunk); got != nil && !bytes.Equal(got, []byte(tc.chunkBody)) {
+				t.Fatalf("stream chunk was not passed through byte-identically:\n got %s\nwant %s", got, tc.chunkBody)
+			}
+		})
 	}
 }
 
 // TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended proves that legitimate
 // legacy fallback behavior continues to function for non-alias-plan clients (Oh My Pi)
-// across UA evidence and body detection, while protected routes retain exact authority.
+// across surviving stream sessions, UA evidence, and body detection, even when executed
+// request bodies contain full sets of static AGY targets (view_file, write_to_file, run_command),
+// while protected routes retain exact authority.
 func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	model := "agy/gemini-3.7-flash"
+	executedBodyWithStaticTargets := []byte(`{
+		"tools": [
+			{"type": "function", "function": {"name": "view_file"}},
+			{"type": "function", "function": {"name": "write_to_file"}},
+			{"type": "function", "function": {"name": "run_command"}}
+		]
+	}`)
 
-	// 1. Oh My Pi with surviving UA evidence recovers view_file -> read on response
+	// Probe a: Surviving legacy OMP stream session, response with executed RequestBody: view_file -> read
+	{
+		const reqID = "probe-a-omp-session-resp"
+		origOMPBody := []byte(`{"tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"write"}},{"type":"function","function":{"name":"bash"}}]}`)
+		globalStreamManager.resetSession("req:"+reqID, "oh_my_pi", requestScopedUncloakPattern("oh_my_pi", origOMPBody, "openai"), 1)
+
+		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+		payload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, reqID, "openai", model, respBody, executedBodyWithStaticTargets, nil)
+		rawResp, code := handlePluginCall(pluginabi.MethodResponseInterceptAfter, payload)
+		if code != 0 {
+			t.Fatalf("Probe a: response intercept failed: %d", code)
+		}
+		out := string(decodeEnvelopeBody(t, rawResp))
+		expectedResp := `{"choices":[{"message":{"tool_calls":[{"function":{"arguments":"{}","name":"read"}}]}}]}`
+		if out != expectedResp {
+			t.Fatalf("Probe a: surviving legacy OMP session response got %q, want %q", out, expectedResp)
+		}
+		globalStreamManager.deleteSession("req:" + reqID)
+	}
+
+	// Probe b: Surviving legacy OMP stream session, stream with executed RequestBody: run_command -> bash
+	{
+		const reqID = "probe-b-omp-session-stream"
+		origOMPBody := []byte(`{"tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"write"}},{"type":"function","function":{"name":"bash"}}]}`)
+		globalStreamManager.resetSession("req:"+reqID, "oh_my_pi", requestScopedUncloakPattern("oh_my_pi", origOMPBody, "openai"), 1)
+
+		chunkBody := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
+		payload := makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, reqID, "openai", model, 0, chunkBody, executedBodyWithStaticTargets, nil)
+		rawChunk, code := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, payload)
+		if code != 0 {
+			t.Fatalf("Probe b: stream chunk intercept failed: %d", code)
+		}
+		chunkOut := string(decodeEnvelopeBody(t, rawChunk))
+		expectedChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"bash\"}}]}}]}\n\n"
+		if chunkOut != expectedChunk {
+			t.Fatalf("Probe b: surviving legacy OMP session stream got %q, want %q", chunkOut, expectedChunk)
+		}
+		globalStreamManager.deleteSession("req:" + reqID)
+	}
+
+	// Probe c: User-Agent: omp/... response with executed RequestBody: view_file -> read
 	{
 		reqHeaders := http.Header{"User-Agent": []string{"omp/1.2.3"}}
 		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
-		rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
-			makeIntegrationResponseInterceptPayloadWithHeaders(t, "legit-legacy-ua-resp", "openai", model, respBody, reqHeaders))
+		rawResp, code := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
+			makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "probe-c-ua-resp", "openai", model, respBody, executedBodyWithStaticTargets, reqHeaders))
+		if code != 0 {
+			t.Fatalf("Probe c: response intercept failed: %d", code)
+		}
 		out := string(decodeEnvelopeBody(t, rawResp))
-		if !strings.Contains(out, `"name":"read"`) {
-			t.Fatalf("legitimate OMP UA response fallback failed: %s", out)
+		expectedResp := `{"choices":[{"message":{"tool_calls":[{"function":{"arguments":"{}","name":"read"}}]}}]}`
+		if out != expectedResp {
+			t.Fatalf("Probe c: OMP UA response fallback got %q, want %q", out, expectedResp)
 		}
 	}
 
-	// 2. Oh My Pi with surviving UA evidence recovers run_command -> bash on stream
+	// Probe d: User-Agent: omp/... stream with executed RequestBody: run_command -> bash
 	{
 		streamHeaders := http.Header{"User-Agent": []string{"omp/9.0"}}
-		chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`)
-		rawChunk, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk,
-			makeIntegrationStreamChunkPayloadWithHeaders(t, "legit-legacy-ua-stream", "openai", model, 0, chunkBody, streamHeaders))
+		chunkBody := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
+		rawChunk, code := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk,
+			makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, "probe-d-ua-stream", "openai", model, 0, chunkBody, executedBodyWithStaticTargets, streamHeaders))
+		if code != 0 {
+			t.Fatalf("Probe d: stream chunk intercept failed: %d", code)
+		}
 		chunkOut := string(decodeEnvelopeBody(t, rawChunk))
-		if !strings.Contains(chunkOut, `"name":"bash"`) {
-			t.Fatalf("legitimate OMP UA stream fallback failed: %s", chunkOut)
+		expectedChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"bash\"}}]}}]}\n\n"
+		if chunkOut != expectedChunk {
+			t.Fatalf("Probe d: OMP UA stream fallback got %q, want %q", chunkOut, expectedChunk)
 		}
 	}
 
-	// 3. Oh My Pi body detection from uncloaked tools (read, write, bash) uncloaks view_file -> read
+	// 5. Oh My Pi body detection from uncloaked tools (read, write, bash) uncloaks view_file -> read
 	{
 		origBody := `{
 			"tools": [
@@ -794,7 +989,7 @@ func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 		}
 	}
 
-	// 4. Protected OMP with pinned route still uncloaks canonical and extended pairs
+	// 6. Protected OMP with pinned route still uncloaks canonical and extended pairs
 	{
 		const reqID = "legit-protected-omp-01"
 		reqBody := []byte(`{

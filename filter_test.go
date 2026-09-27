@@ -711,9 +711,10 @@ func TestSystemMessageReplacesToolNames(t *testing.T) {
 }
 
 func TestBuildUncloakTableWithCloakedRequest(t *testing.T) {
-	// Regression test for Bug #1: when request body has already been cloaked,
-	// buildUncloakTable should still find the correct uncloak table via
-	// detectCloakedClient instead of misidentifying as Antigravity.
+	// An already-cloaked body proves only which cloak TARGETS the upstream saw; it cannot
+	// prove which client declared them. Full-declaration clients (Claude Code, Codex) get
+	// their reverse exclusively from pinned request authority, so the executed-target guess
+	// is withheld (Issue #39) rather than misidentifying the traffic as Antigravity.
 	cloakedReqBody := `{
 		"tools":[
 			{"type":"function","function":{"name":"run_command"}},
@@ -730,25 +731,20 @@ func TestBuildUncloakTableWithCloakedRequest(t *testing.T) {
 		"messages":[]
 	}`
 	uncloakTable, client := buildUncloakTable([]byte(cloakedReqBody), "openai")
-	if uncloakTable == nil {
-		t.Fatal("expected non-nil uncloak table for cloaked Claude Code request")
+	if uncloakTable != nil {
+		t.Fatalf("executed-target inference must be withheld without pinned authority, got %v", uncloakTable)
 	}
-	if client == "" {
-		t.Fatal("expected non-empty client name")
-	}
-	if uncloakTable["run_command"] != "Bash" {
-		t.Fatalf("expected run_command → Bash, got %q", uncloakTable["run_command"])
-	}
-	if uncloakTable["invoke_subagent"] != "Agent" {
-		t.Fatalf("expected invoke_subagent → Agent, got %q", uncloakTable["invoke_subagent"])
+	if client != "" {
+		t.Fatalf("executed-target inference must not attribute a client, got %q", client)
 	}
 }
 
-func TestCodexCodeModeCloakRoundTrip(t *testing.T) {
+func TestCodexCodeModeCloakRewriteAndWithheldReverse(t *testing.T) {
 	// A code-mode Codex session declares one freeform "exec" entry point plus
 	// the collaboration children, which opencodex flattens to "<ns>__<child>"
 	// for the chat-completions function-tool format. The request side renames
-	// them to AGY names and the reverse must restore those exact spellings.
+	// them to AGY names; the reverse is minted per request by the alias plan and
+	// is deliberately withheld here because this body alone is not authority.
 	body := []byte(`{
 			"tools":[
 				{"type":"function","function":{"name":"exec"}},
@@ -780,12 +776,13 @@ func TestCodexCodeModeCloakRoundTrip(t *testing.T) {
 		}
 	}
 
+	// buildUncloakTable is NOT reverse authority for an alias-plan client: the body
+	// cannot prove the per-request forward mapping, so the reverse is withheld and
+	// callers without pinned authority pass through (Issue #39). The pinned reverse
+	// is covered by the correlated round-trip tests.
 	uncloakTable, uncloakClient := buildUncloakTable(body, "openai")
-	if uncloakClient != "codex" {
-		t.Fatalf("buildUncloakTable client = %q, want codex", uncloakClient)
-	}
-	if uncloakTable["run_command"] != "exec" || uncloakTable["invoke_subagent"] != "collaboration__spawn_agent" {
-		t.Fatalf("uncloak table = %v, want run_command->exec and invoke_subagent->collaboration__spawn_agent", uncloakTable)
+	if uncloakClient != "" || uncloakTable != nil {
+		t.Fatalf("buildUncloakTable must not guess codex reverse without pinned authority, got client=%q table=%v", uncloakClient, uncloakTable)
 	}
 }
 
@@ -1031,12 +1028,10 @@ func TestStreamChunkReassemblesSplitToolName(t *testing.T) {
 	mgr := newStreamSessionManager()
 	const reqID = "split-chunk-reassembly"
 	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`
-	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
-		RequestID:       reqID,
-		SourceFormat:    "openai",
-		OriginalRequest: []byte(reqBody),
-		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
-	}, "openai")
+	// The reverse must come from pinned request authority: the request-side alias
+	// plan pattern is cached on the stream session (a body alone cannot prove the
+	// per-request mapping, Issue #39).
+	mgr.resetSession("req:"+reqID, "claude_code", requestScopedUncloakPattern("claude_code", []byte(reqBody), "openai"), 1)
 
 	// Chunk 1: incomplete event — tool name cut at "run_c"
 	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
@@ -1092,11 +1087,12 @@ func TestSessionKeyFallsBackToBodyHash(t *testing.T) {
 // executed payload after request.intercept_before rewrote it.
 const cloakedCodexRequest = `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"search_web"}},{"type":"function","function":{"name":"ask_question"}},{"type":"function","function":{"name":"invoke_subagent"}}],"messages":[]}`
 
-func TestStreamFallbackUncloaksAlreadyCloakedCodexStream(t *testing.T) {
-	// Schema < 3 repeats the request body on every payload chunk, and that body
-	// is already cloaked by the time the stream interceptor sees it. Detection
-	// therefore reads cloak TARGETS, and the reverse must still resolve from
-	// them instead of narrowing the table down to nothing.
+func TestStreamFallbackDoesNotGuessFromAlreadyCloakedCodexStream(t *testing.T) {
+	// Schema < 3 repeats the request body on every payload chunk, and that body is
+	// already cloaked by the time the stream interceptor sees it. There is no
+	// RequestID, no marker and no UA evidence, so the declared names are unknowable:
+	// cloak TARGETS are not pinned reverse authority (Issue #39) and the chunk must
+	// pass through unmutated instead of being statically reversed.
 	defer restoreDefaultFilterConfig(t)
 	mgr := newStreamSessionManager()
 	chunkBody := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
@@ -1109,11 +1105,8 @@ func TestStreamFallbackUncloaksAlreadyCloakedCodexStream(t *testing.T) {
 		Body:            []byte(chunkBody),
 	}, "openai")
 
-	if !strings.Contains(string(resp.Body), `"name":"exec"`) {
-		t.Fatalf("already-cloaked codex stream was not reversed: %q", string(resp.Body))
-	}
-	if strings.Contains(string(resp.Body), "run_command") {
-		t.Fatalf("cloaked name leaked downstream: %q", string(resp.Body))
+	if len(resp.Body) != 0 {
+		t.Fatalf("executed stream body without pinned authority must pass through unmutated, got %q", string(resp.Body))
 	}
 }
 
@@ -1918,13 +1911,20 @@ func TestStreamSessionManagerHeaderInitSchemaV4(t *testing.T) {
 	// only provided at ChunkIndex == StreamChunkHeaderInitIndex (-1).
 	// Subsequent payload chunks (ChunkIndex >= 0) have OriginalRequest/RequestBody = nil.
 	reqID := "stream-session-test-v4"
-	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
+	reqBodyText := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
+	reqBody := []byte(reqBodyText)
+	// Pinned request authority: the alias plan minted at request intercept is the
+	// only source of the reverse, so header-init must register the session from it
+	// (a body alone cannot prove the per-request mapping, Issue #39).
+	ccHeaders := http.Header{"X-Cloak-Client": []string{"claude_code"}}
+	handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", "agy/claude-model", reqBody, ccHeaders))
 
 	// Step 1: Header-init chunk (ChunkIndex == -1)
 	initReq := &pluginapi.StreamChunkInterceptRequest{
 		RequestID:       reqID,
 		SourceFormat:    "openai",
-		OriginalRequest: []byte(reqBody),
+		OriginalRequest: reqBody,
 		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
 	}
 	resp := mgr.processChunk(initReq, "openai")
@@ -1951,15 +1951,23 @@ func TestStreamSessionManagerHeaderInitSchemaV4(t *testing.T) {
 
 func TestStreamSessionManagerIsolatesByRequestID(t *testing.T) {
 	mgr := newStreamSessionManager()
-	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`
+	reqBody := []byte(`{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}}],"messages":[]}`)
 	reqIDA := "stream-session-iso-A"
 	reqIDB := "stream-session-iso-B"
+
+	// Pinned request authority for both streams: each alias plan carries its own
+	// reverse, and header-init must register the session from it (Issue #39).
+	ccHeaders := http.Header{"X-Cloak-Client": []string{"claude_code"}}
+	for _, id := range []string{reqIDA, reqIDB} {
+		handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+			makeIntegrationRequestInterceptPayloadWithHeaders(t, id, "openai", "agy/claude-model", reqBody, ccHeaders))
+	}
 
 	// Init session A
 	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:       reqIDA,
 		SourceFormat:    "openai",
-		OriginalRequest: []byte(reqBody),
+		OriginalRequest: reqBody,
 		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
 	}, "openai")
 
@@ -1967,7 +1975,7 @@ func TestStreamSessionManagerIsolatesByRequestID(t *testing.T) {
 	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID:       reqIDB,
 		SourceFormat:    "openai",
-		OriginalRequest: []byte(reqBody),
+		OriginalRequest: reqBody,
 		ChunkIndex:      pluginapi.StreamChunkHeaderInitIndex,
 	}, "openai")
 
