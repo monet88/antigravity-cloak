@@ -104,6 +104,11 @@ $Registry = (git show "${TargetCommit}:registry.json" | ConvertFrom-Json)
 if ($LASTEXITCODE -or $Registry.plugins[0].version -ne $Version) {
     throw 'registry.json version does not match pinned pluginVersion'
 }
+if (git tag --list "v$Version") {
+    if ((git rev-parse "v$Version^{commit}") -ne (git rev-parse "${TargetCommit}^{commit}")) {
+        throw "Pinned commit is not the commit tagged v$Version"
+    }
+}
 docker pull $BuildImage
 if ($LASTEXITCODE) { throw 'Build image pull failed' }
 docker image inspect $BuildImage --format '{{index .RepoDigests 0}}'
@@ -377,9 +382,11 @@ and are not committed.
 
 ### Pinned run
 
-- Source revision: `4e946acddea8a387efcb5fafd4635cf4b98bd6c3` (`main`), branch
-  `feat/issue-40-three-client-acceptance`; worktree clean, so the artifact
-  contains exactly the reviewed tree.
+- Source revision: `4e946acddea8a387efcb5fafd4635cf4b98bd6c3` (tip of `main` at
+  capture time); worktree clean, so the artifact contains exactly that commit.
+  The acceptance work ran on branch `feat/issue-40-three-client-acceptance`,
+  whose two follow-up commits after `4e946ac` are documentation-only
+  (`git diff --stat 4e946ac..<branch>` touches no code).
 - Build image: `golang:1.26.0-bookworm`,
   digest `sha256:2a0ba12e116687098780d3ce700f9ce3cb340783779646aafbabed748fa6677c`.
 - Artifact: `dist/antigravity-cloak.so`, SHA256

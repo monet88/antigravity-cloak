@@ -44,7 +44,7 @@ Tools beyond the canonical Safe Mapping Set are cloaked on Protected routes via 
 
 ##### 2. Claude Code (`claude_code`)
 
-**Status legend:** `DECL` = observed and mapped in the 2026-09-27 live Claude Code request; downstream restoration/execution/continuation still pending · `TEST` = mapping covered by fixtures/protocol tests but not observed in that live declaration set · `SHARED` = request-scoped shared alias (`wp_*`) · `FALLBACK` = deterministic fallback (`wp_ext_<hash>`).
+**Status legend:** `DECL` = observed and mapped in the 2026-09-27 live Claude Code request; downstream restoration/execution/continuation still pending · `TEST` = mapping covered by fixtures/protocol tests but not observed in that live declaration set. Tier-2 shared aliases (`wp_*`) and Tier-3 fallback aliases (`wp_ext_<hash>`) are listed below rather than as table statuses.
 
 | CC Tool | Antigravity Target | Status | Classification / Note |
 | :--- | :--- | :--- | :--- |

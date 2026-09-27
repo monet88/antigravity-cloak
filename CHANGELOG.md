@@ -11,6 +11,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 - Relocated test-only JSON exploration utilities (`walkJSON`, `appendPath`, `collectText`) to `json_test_helpers_test.go` (Issue #42).
 - Consolidated duplicate round-trip streaming tests and client-specific uniqueness tests into canonical integration and table initialization suites, merging `session_cleanup_test.go` into `filter_test.go` (Issue #42).
 
+## Candidate 0.6.0 (unreleased) - 2026-09-25
+
 ### Verification (2026-09-27)
 
 Not a release: no `v0.6.0` tag exists and none is proposed here. These results
@@ -39,8 +41,6 @@ source `4e946ac` (SHA256
   as **manual verification pending/deferred by the user**; until those manual
   checks land, Issue #40 is not complete and nothing in this section is
   release-ready.
-
-## Candidate 0.6.0 (unreleased) - 2026-09-25
 
 ### Added
 - Generalized request-scoped alias plan architecture for dynamic-surface clients (Claude Code, OpenAI Codex) alongside extended alias handling for Oh My Pi, with fail-closed correlation (`tool_cloak_required` for alias-plan clients, `omp_cloak_required` for Protected OMP), collision detection, and deterministic reversible fallback aliases (`wp_ext_<hash>`) for dynamic/MCP tool declarations (Issue #32).
