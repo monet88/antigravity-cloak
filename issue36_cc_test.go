@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
@@ -604,13 +605,15 @@ func TestDetectCloakedClient_AtFullCoverage_UnequalTableSizes(t *testing.T) {
 	}
 }
 
-func TestCC_AlreadyCloakedBody_ReverseLeavesNativeTargetAlone(t *testing.T) {
+func TestCC_AlreadyCloakedBody_WithoutAuthority_PassesThrough(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`model_prefixes: [agy]`)))
 
-	// An executed/already-cloaked request body where only run_command (and search_web, ask_question)
-	// are present, so cloakedClient is detected as claude_code.
-	// view_file was NOT in the cloaked request body.
+	// An executed/already-cloaked request body where only run_command (and search_web,
+	// ask_question) are present, so cloak-TARGET detection would guess claude_code.
+	// There is no RequestID, no alias plan, no marker and no UA evidence, so the client
+	// cannot be attributed. Executed targets are not pinned reverse authority (Issue #39):
+	// the response must pass through unmutated instead of being statically reversed.
 	cloakedReqBody := []byte(`{
 		"tools": [
 			{"name": "run_command", "description": ""},
@@ -642,18 +645,9 @@ func TestCC_AlreadyCloakedBody_ReverseLeavesNativeTargetAlone(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("response.intercept_after code=%d", code)
 	}
-	respDecoded := string(decodeEnvelopeBody(t, rawResp))
-
-	// run_command must reverse to Bash because run_command was declared in the cloaked body.
-	if !strings.Contains(respDecoded, `"name":"Bash"`) && !strings.Contains(respDecoded, `"name": "Bash"`) {
-		t.Fatalf("run_command was not uncloaked to Bash: %s", respDecoded)
-	}
-	// view_file was NOT declared in the cloaked body, so it MUST NOT become Read!
-	if strings.Contains(respDecoded, `"Read"`) {
-		t.Fatalf("native target view_file was improperly uncloaked to Read: %s", respDecoded)
-	}
-	if !strings.Contains(respDecoded, `"view_file"`) {
-		t.Fatalf("native target view_file was altered or dropped: %s", respDecoded)
+	decoded := decodeEnvelopeBody(t, rawResp)
+	if decoded != nil && !bytes.Equal(decoded, respBody) {
+		t.Fatalf("executed body without pinned authority must pass through unmutated: %s", string(decoded))
 	}
 }
 
