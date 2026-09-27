@@ -1087,7 +1087,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		brandRestorationEnabled: true,
 		expected:                expectedChoiceCount,
 	})
-
+	globalStreamManager.resetSession("req:"+req.RequestID, "oh_my_pi", protectedCachedUncloak, expectedChoiceCount)
 	return mustEnvelope(resp)
 }
 
@@ -1327,10 +1327,35 @@ func handleResponseIntercept(request []byte) []byte {
 			}
 			return mustEnvelope(pluginapi.ResponseInterceptResponse{})
 		}
+		// RequestID is present, but neither route nor alias plan exists.
+		// For alias-plan clients (Claude Code, Codex), full-declaration restoration
+		// requires pinned request authority. If authority is missing (e.g. after
+		// request.complete cleanup or missing plan), it MUST pass through rather
+		// than guess or reverse static AGY targets (Issue #39).
+		if sess := globalStreamManager.getSession("req:" + req.RequestID); sess != nil && clientUsesAliasPlan(sess.client) {
+			debugLog("handleResponseIntercept: alias-plan client=%q with missing authority RequestID=%s -> pass-through", sess.client, req.RequestID)
+			return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+		}
+		if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
+			debugLog("handleResponseIntercept: alias-plan explicit marker=%q with missing authority RequestID=%s -> pass-through", marker.client, req.RequestID)
+			return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+		}
+		src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
+		if len(src) > 0 {
+			if _, c := buildUncloakTable(src, format); clientUsesAliasPlan(c) {
+				debugLog("handleResponseIntercept: alias-plan client=%q with missing authority RequestID=%s -> pass-through", c, req.RequestID)
+				return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+			}
+		}
 	}
 
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleResponseIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
+		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+	}
+
+	if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
+		debugLog("handleResponseIntercept: alias-plan explicit marker=%q without RequestID -> pass-through", marker.client)
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
 	var client string
@@ -1339,17 +1364,19 @@ func handleResponseIntercept(request []byte) []byte {
 	if req.RequestID != "" {
 		if sess := globalStreamManager.getSession("req:" + req.RequestID); sess != nil && sess.client != "" {
 			correlated = true
-			if sess.client != negativeClientResolution {
-				client = sess.client
-				// Reuse the reverse the request interceptor derived from the RAW
-				// client body. The executed body below no longer carries source
-				// names, so re-deriving the table from it cannot tell an AGY
-				// target the client declared natively from one the cloak created.
-				if sess.cached != nil && len(sess.cached.lookup) > 0 {
-					uncloakTable = sess.cached.lookup
-				} else {
-					uncloakTable = requestScopedUncloakTable(sess.client, detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
-				}
+			if sess.client == negativeClientResolution {
+				debugLog("handleResponseIntercept: negative client resolution authoritative for RequestID=%s", req.RequestID)
+				return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+			}
+			client = sess.client
+			// Reuse the reverse the request interceptor derived from the RAW
+			// client body. The executed body below no longer carries source
+			// names, so re-deriving the table from it cannot tell an AGY
+			// target the client declared natively from one the cloak created.
+			if sess.cached != nil && len(sess.cached.lookup) > 0 {
+				uncloakTable = sess.cached.lookup
+			} else {
+				uncloakTable = requestScopedUncloakTable(sess.client, detectionRequestBody(req.OriginalRequest, req.RequestBody), format)
 			}
 		}
 	}
@@ -1424,6 +1451,26 @@ func handleStreamChunkIntercept(request []byte) []byte {
 			resp := globalStreamManager.processChunk(&req, plan.sourceFormat)
 			return mustEnvelope(resp)
 		}
+		// RequestID is present, but neither route nor alias plan exists.
+		// For alias-plan clients (Claude Code, Codex), full-declaration restoration
+		// requires pinned request authority. If authority is missing (e.g. after
+		// request.complete cleanup or missing plan), it MUST pass through rather
+		// than guess or reverse static AGY targets (Issue #39).
+		if sess := globalStreamManager.getSession("req:" + req.RequestID); sess != nil && clientUsesAliasPlan(sess.client) {
+			debugLog("handleStreamChunkIntercept: alias-plan client=%q with missing authority RequestID=%s -> pass-through", sess.client, req.RequestID)
+			return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+		}
+		if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
+			debugLog("handleStreamChunkIntercept: alias-plan explicit marker=%q with missing authority RequestID=%s -> pass-through", marker.client, req.RequestID)
+			return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+		}
+		src := detectionRequestBody(req.OriginalRequest, req.RequestBody)
+		if len(src) > 0 {
+			if _, c := buildUncloakTable(src, format); clientUsesAliasPlan(c) {
+				debugLog("handleStreamChunkIntercept: alias-plan client=%q with missing authority RequestID=%s -> pass-through", c, req.RequestID)
+				return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+			}
+		}
 	}
 
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
@@ -1431,9 +1478,14 @@ func handleStreamChunkIntercept(request []byte) []byte {
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 	}
 
+	if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
+		debugLog("handleStreamChunkIntercept: alias-plan explicit marker=%q without RequestID -> pass-through", marker.client)
+		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+	}
 	resp := globalStreamManager.processChunk(&req, format)
 	return mustEnvelope(resp)
 }
+
 func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]string, string) {
 	var reqRoot map[string]any
 	if err := safeUnmarshal(requestBody, &reqRoot); err != nil {
@@ -1441,7 +1493,6 @@ func buildUncloakTable(requestBody []byte, sourceFormat string) (map[string]stri
 		return nil, ""
 	}
 	toolNames := extractToolNames(reqRoot, sourceFormat)
-
 	// Try detecting from original (uncloaked) tool names first
 	client := detectClient(toolNames)
 	debugLog("buildUncloakTable: toolNames=%v client=%s", toolNames, client)
@@ -1510,6 +1561,10 @@ func scopeUncloakTableToDeclaredNames(table map[string]string, client string, de
 	}
 	scoped := make(map[string]string, len(table))
 	for target, src := range table {
+		if strings.HasPrefix(target, "wp_") {
+			// Dynamic identities are NEVER reconstructed by legacy static reverse fallbacks
+			continue
+		}
 		if declaredSet[src] || (!declaredIsSource && declaredSet[target]) {
 			scoped[target] = src
 		}
