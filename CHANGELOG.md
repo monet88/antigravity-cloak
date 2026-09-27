@@ -11,12 +11,48 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 - Relocated test-only JSON exploration utilities (`walkJSON`, `appendPath`, `collectText`) to `json_test_helpers_test.go` (Issue #42).
 - Consolidated duplicate round-trip streaming tests and client-specific uniqueness tests into canonical integration and table initialization suites, merging `session_cleanup_test.go` into `filter_test.go` (Issue #42).
 
-## [0.6.0] - 2026-09-25
+## Candidate 0.6.0 (unreleased) - 2026-09-25
+
+`0.6.0` is untagged: on release restore the bracketed heading, re-add its
+compare link, and repoint `[Unreleased]` at `v0.6.0`.
+
+### Verification (2026-09-27)
+
+Not a release: no `v0.6.0` tag exists and none is proposed here. These results
+describe a candidate linux/amd64 `-buildmode=c-shared` artifact built from
+source `4e946ac` (SHA256
+`a9b4e88833784e14063e25b0716bedbdebe91a615386394e0bd6ca4153ca013b`,
+`vcs.modified=false`) and loaded as plugin version `0.6.0` on CLIProxyAPI
+`v7.3.19`.
+
+- Oh My Pi `18.3.4` live acceptance against that artifact: **7 of the 9 bare
+  canonical tools** (`read`, `write`, `edit`, `bash`, `grep`, `glob`, `task`)
+  executed end-to-end under their bare spelling
+  (declaration -> upstream alias -> exact restore -> native execution ->
+  continuation). The remaining two, `ask` and `web_search`, plus shared
+  aliases, deterministic fallback aliases and `xd://` device dispatch, are
+  recorded as **escaped-wire** coverage: those cases ran as `_ask` /
+  `_web_search` over `anthropic-messages` and are not counted as bare
+  acceptance. Per-case evidence:
+  [OMP checklist](docs/verification-checklist-omp.md#verified-results---2026-09-27-plugin-v060).
+- Live rejection checks: a conflicting marker and a declaration collision on
+  `agy/` both return HTTP 503 `omp_cloak_required` with no upstream attempt,
+  and an explicit OMP marker on a non-`agy/` route mutates nothing.
+- Claude Code `2.1.283` and OpenAI Codex `codex-cli 0.157.1` (via
+  `opencodex 2.67.0`) also ran against the same artifact. Codex passed in both
+  `exec` (code mode) and `exec_command` (shell mode) with exact restoration,
+  real execution and continuation, including direct top-level
+  `mcp__fastctx__*` declarations restored from `wp_ext_<hash>` fallbacks.
+  Claude Code mapping was verified at declaration level (20/20, no source
+  leakage) while its upstream completion returned HTTP 429. Both are recorded
+  as **manual verification pending/deferred by the user**; until those manual
+  checks land, Issue #40 is not complete and nothing in this section is
+  release-ready.
 
 ### Added
 - Generalized request-scoped alias plan architecture for dynamic-surface clients (Claude Code, OpenAI Codex) alongside extended alias handling for Oh My Pi, with fail-closed correlation (`tool_cloak_required` for alias-plan clients, `omp_cloak_required` for Protected OMP), collision detection, and deterministic reversible fallback aliases (`wp_ext_<hash>`) for dynamic/MCP tool declarations (Issue #32).
 - Full declaration-level cloaking for Claude Code (`claude_code`): core tools map to AGY role names (`Glob -> find_by_name`, `WebFetch -> read_url_content`), Tier-2 tools map to stable shared aliases (`wp_*`), and deferred tools/placeholders are handled across normal protocol identity positions (`tools[]`, `tool_calls`/`tool_use`, `tool_choice`) (Issue #36, Issue #32).
-- Extended OMP tool coverage beyond the canonical nine on Protected routes via shared aliases (`wp_*`) and deterministic fallback aliases (`wp_ext_<hash>`), while preserving `xd://` virtual device transport and protocol integrity (implementation complete, live default-profile acceptance pending) (Issue #37, Issue #32).
+- Extended OMP tool coverage beyond the canonical nine on Protected routes via shared aliases (`wp_*`) and deterministic fallback aliases (`wp_ext_<hash>`), while preserving `xd://` virtual device transport and protocol integrity (default-profile smoke verified 2026-09-27; full three-client acceptance tracked under Unreleased) (Issue #37, Issue #32).
 - Protected OMP config-time validation rejecting mutable canonical nine, non-injective targets, and invalid target naming in `tool_mappings` during initialization and reconfigure (Issue #37, Issue #32).
 - Full declaration-level cloaking for OpenAI Codex (`codex`) across code mode and shell mode (`exec_command -> run_command`, `apply_patch -> wp_apply_patch`, `write_stdin -> wp_write_stdin`, `view_image -> wp_view_image`) with request-scoped reversal preventing cross-mode collision (Issue #38, Issue #32).
 - Namespace collision gate failing closed when distinct source identities or namespace variants resolve to the same final target or base identity (Issue #32).
@@ -157,8 +193,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 - Initial plugin implementation.
 - Added repository metadata, MIT license, and release build workflow.
 
-[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.6.0...HEAD
-[0.6.0]: https://github.com/monet88/antigravity-cloak/compare/v0.5.2...v0.6.0
+[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.5.2...HEAD
 [0.5.2]: https://github.com/monet88/antigravity-cloak/compare/v0.5.1...v0.5.2
 [0.5.0]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.5.0
 [0.4.4]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.4.4

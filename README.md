@@ -87,8 +87,14 @@ Remove-Item plugins/windows/amd64/antigravity-cloak.h
 
 ## Verification & Docs
 
-- **[Two-Way Verification Checklist](docs/verification-checklist.md)**: End-to-end verification checklist and trigger commands across all 12 core tools and debug log validation.
-- **[Feature Spec](docs/specs/oh-my-pi-cloaking-spec.md)**: Technical design, 30 user stories, and architecture decisions.
+- **[Live acceptance record (2026-09-27)](docs/verification-checklist.md#live-acceptance-record---2026-09-27)**: pinned source revision, candidate artifact SHA256 and per-client results. Oh My Pi passed every criterion its installed client exposes (7/9 canonical tools bare; `ask`, `web_search` and the transport/alias variants over the escaped wire); Claude Code and OpenAI Codex are recorded as manual verification pending/deferred, so this is not a release claim.
+- **[Deployment and live verification runbook](docs/verification-checklist.md)**: clean build, install, controlled debug capture, correlation and cleanup.
+- **[OMP full tool-cloak checklist](docs/verification-checklist-omp.md)**: nine canonical mappings, transport variants and extended alias tools, with the current per-case verdicts.
+- **[Client identity headers](docs/client-identity-headers.md)**: configuring `X-Cloak-Client` for Claude Code, Codex (direct and via opencodex) and Oh My Pi.
+- **[Domain context](CONTEXT.md)**: glossary, per-client mapping tables and the activation/lifecycle contract.
+- **[Architecture decisions](docs/adr/)**: stream sessions, client classification, upstream sanitization, and Codex wire-position cloaking.
+- **[Client surface references](docs/research/)**: dated Antigravity, Codex and Claude Code tool surfaces.
+- **[Feature spec](docs/specs/oh-my-pi-cloaking-spec.md)**: technical design, user stories, and architecture decisions.
 
 ---
 

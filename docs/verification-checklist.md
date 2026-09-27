@@ -94,10 +94,17 @@ the image digest. Do not assume a future floating image remains compatible.
 
 ```powershell
 $BuildImage = 'golang:1.26.0-bookworm'
-$Version = '0.5.1' # Must match pluginVersion at TargetCommit.
 $SourceMain = git show "${TargetCommit}:main.go"
-if ($LASTEXITCODE -or !($SourceMain -match ('pluginVersion\s*=\s*"' + [regex]::Escape($Version) + '"'))) {
-    throw 'Version does not match pinned source'
+if ($LASTEXITCODE) { throw 'Could not read main.go from pinned source' }
+$VersionMatch = [regex]::Match(($SourceMain -join "`n"), 'pluginVersion\s*=\s*"([^"]+)"')
+if (!$VersionMatch.Success) { throw 'Could not resolve pluginVersion from pinned source' }
+$Version = $VersionMatch.Groups[1].Value
+$RegistryText = git show "${TargetCommit}:registry.json"
+if ($LASTEXITCODE) { throw 'Could not read registry.json from pinned source' }
+$Registry = $RegistryText | ConvertFrom-Json
+$RegistryEntry = @($Registry.plugins | Where-Object { $_.id -eq 'antigravity-cloak' })
+if ($RegistryEntry.Count -ne 1 -or $RegistryEntry[0].version -ne $Version) {
+    throw 'registry.json version does not match pinned pluginVersion'
 }
 docker pull $BuildImage
 if ($LASTEXITCODE) { throw 'Build image pull failed' }
@@ -355,6 +362,166 @@ Restore the prior plugin pin/config settings, remove temporary logging settings,
 and recreate with the same explicit Compose mounts and image. Verify the old
 version/path is registered and the gateway is healthy. Report the failed new
 deployment separately; never label a rollback as new-version acceptance.
+
+## Live acceptance record - 2026-09-27
+
+Real-client acceptance for Oh My Pi, Claude Code and OpenAI Codex against the
+request-scoped alias-plan build, run on this workstation against the local
+gateway.
+
+**Status.** Oh My Pi passed every criterion the installed client (`18.3.4`)
+actually exposes: seven of the nine canonical tools under their bare spelling,
+and `ask`, `web_search` plus the escaped-canonical, shared-alias,
+deterministic-fallback and `xd://` variants over the `anthropic-messages` wire.
+Bare `ask` and bare `web_search` remain unexercised. Claude Code and OpenAI
+Codex ran against the same artifact but are **manual verification
+pending/deferred by the user**: Issue #40 is therefore not complete, and nothing
+in this record is a release claim (no `v0.6.0` tag exists). Raw captures stay in
+the local evidence area under `.git/` (gitignored) and are not committed.
+
+### Pinned run
+
+- Source revision: `4e946acddea8a387efcb5fafd4635cf4b98bd6c3` (tip of `main` at
+  capture time); worktree clean, so the artifact contains exactly that commit.
+  The acceptance work ran on branch `feat/issue-40-three-client-acceptance`,
+  whose follow-up commits after `4e946ac` are documentation-only
+  (`git diff --stat 4e946ac..<branch>` touches no code).
+- Build image: `golang:1.26.0-bookworm`,
+  digest `sha256:2a0ba12e116687098780d3ce700f9ce3cb340783779646aafbabed748fa6677c`.
+- Artifact: `dist/antigravity-cloak.so`, SHA256
+  `a9b4e88833784e14063e25b0716bedbdebe91a615386394e0bd6ca4153ca013b`,
+  5,234,840 bytes. `go version -m` reports `go1.26.0`, `CGO_ENABLED=1`,
+  `GOOS=linux`, `GOARCH=amd64`, `vcs.revision=4e946ac…`, `vcs.modified=false`;
+  `readelf` reports ELF64 shared object, x86-64, GLIBC requirement ≤ 2.34
+  (gateway glibc 2.36).
+- Installed as `plugins/linux/amd64/antigravity-cloak-v0.6.0.so`; the host
+  registered `version=0.6.0` from that path. `pluginVersion`, `registry.json`
+  and the candidate 0.6.0 changelog section agree; no `v0.6.0` tag exists yet.
+- Gateway: `cli-proxy-api` (CLIProxyAPI `v7.3.19`, image
+  `sha256:d8fb8d2d7a847696332d8abf66bd907b129174fa626d84fd1c95e587d620010a`);
+  config mount `.ref/CLIProxyAPI/config.local.yaml`, plugin mount
+  `.ref/CLIProxyAPI/plugins`, both preserved across the acceptance window.
+- Controlled capture: `CPA_FILTER_DEBUG=1` plus `request-log: true` for the
+  first window, and `request-log: true` alone (plugin debug empty) for the
+  escaped-canonical window. Both were reverted afterwards, the container
+  restarted, the plugin debug log truncated to 0 bytes, `CPA_FILTER_DEBUG` left
+  empty, and an authenticated `GET /v1/models` returned 200 after cleanup with
+  `plugin registered … version=0.6.0` in the host log.
+- Request-body size isolation: probe bodies of 409 B, 150 KB and 1.1 MB to
+  `agy/gemini-3.7-flash-high` all returned HTTP 200, so the Claude Code 429s
+  below are not explained by body size.
+
+### Per-client results
+
+| Client | Transport | Result |
+| :--- | :--- | :--- |
+| Oh My Pi `18.3.4` (`cloak-live`, `openai-completions`, bare canonical) | `POST /v1/chat/completions` → local `127.0.0.1:8317` | `read`, `write`, `edit`, `bash`, `grep`, `glob` executed end-to-end with continuation; `task` spawned a subagent that read the fixture (one subagent `read` errored) |
+| Oh My Pi `18.3.4` (`cloak-live`, `anthropic-messages`, escaped canonical) | `POST /v1/messages` → local `127.0.0.1:8317` | PASS (escaped wire) for `_read`, `_bash`, `_ask`, `_web_search`, shared alias (`_todo → wp_todo`), deterministic fallbacks and `xd://` device dispatch; every case restored exactly, executed natively and continued. Bare `ask` and bare `web_search` are NOT RUN |
+| Oh My Pi `18.3.4` (default profile, unchanged, remote endpoint) | the default profile's own remote gateway URL (discovered from that profile, not pinned here) | PASS for `read`; validates the default-profile path and the remote deployment, not this local artifact |
+| Claude Code `2.1.283` | `POST /v1/messages` → local `127.0.0.1:8317`, model `agy/gemini-3.7-flash-high` | Declaration/mapping PASS (20/20, zero source leakage); execution/continuation BLOCKED by upstream HTTP 429 — **manual verification pending** |
+| OpenAI Codex `codex-cli 0.157.1` via `opencodex 2.67.0` | `POST /v1/chat/completions` → local `127.0.0.1:8317` | PASS in both declaration modes (`exec` code mode, `exec_command` shell mode) with exact restoration, real execution and continuation — **manual repetition deferred** |
+
+Selected correlated evidence (ingress declaration set → upstream set → client
+set), read from the gateway request logs by section and parsed as JSON/SSE:
+
+- OMP `bash`: ingress `bash, edit, eval, find, glob, grep, read, task, todo, wait,
+  web_search, write` → upstream `find_by_name, grep_search, invoke_subagent,
+  replace_file_content, run_command, search_web, view_file, wp_eval,
+  wp_ext_061bef0f1c6ccd0b4819958bcb73eba6, wp_find, wp_todo, write_to_file` →
+  client `bash`. OMP executed `printf OMP_BASH_OK`, then continued.
+- OMP `todo`/`find`: `todo → wp_todo`, `find → wp_find` upstream, restored to
+  `todo`/`find` client-side; both executed against the fixture.
+- OMP wrapper sanitization on the same request: ingress system text
+  `<system-conventions>` ×2 → upstream 0, `<conventions>` 1 → 3.
+- OMP escaped canonical (`OMP-ESC-01`, `POST /v1/messages`): ingress
+  `tools[].name="_read"` and `"_bash"` → upstream `functionDeclarations`
+  `view_file`/`run_command` with no `_read` present → upstream response
+  `functionCall {"name":"view_file",…,"id":"call_2243389"}` → downstream SSE
+  `content_block_start … "name":"_read" … "type":"tool_use"` → the client
+  executed `read {path: esc-note.txt}` (content `ESCAPE_FIXTURE_LINE`) and then
+  `bash {"command":"echo ESCAPE-OK"}`. The continuation request carried `_read`
+  and `_bash` in its history, upstream carried `view_file`/`run_command`, and the
+  model produced the final summary (exit 0).
+- OMP shared alias plus deterministic fallbacks (`OMP-ESC-02`): ingress `_todo`,
+  `_find`, `_wait` → upstream `wp_todo`,
+  `wp_ext_8bfa04d75e222553a5dc712e5ec3671e`,
+  `wp_ext_416dac4969d214f84545c92795d9a734` → downstream restored to `_todo`,
+  `_find`, `_wait` verbatim. Both hashes reproduce `fallbackAliasForSource`
+  (`sha256("request-alias-v1\x00" + source)[:16]`) for `_find` and `_wait`. The
+  client executed `todo` (init + done), `find` and `wait` without error.
+- OMP `xd://` device dispatch (`OMP-ESC-03`): ingress carried `_read` with
+  `path: xd://todo`; upstream carried `view_file` with the same
+  `path: xd://todo` byte-identical, and the downstream SSE delta restored the
+  tool name while leaving the URI intact. The client dispatched the read to the
+  `xd://todo` device and returned its output.
+- OMP `ask` (`OMP-ESC-05`, real TUI session driven over a pty): ingress `_ask` →
+  upstream `ask_question` → upstream `functionCall {"name":"ask_question",…,
+  "id":"call_2727813"}` → downstream `content_block_start … "name":"_ask" …` →
+  the TUI rendered the Ask overlay and the operator selected "Green". The
+  continuation request carried
+  `functionResponse {"name":"ask_question","response":{"result":{"text":"User
+  selected: Green"}}}` upstream while the client history kept `_ask`.
+- OMP `web_search` (`OMP-ESC-04`): ingress `_web_search` → upstream
+  `search_web` → upstream `functionCall {"name":"search_web",…}` → downstream
+  `content_block_start … "name":"_web_search" …` → the client executed
+  `web_search` and returned live results, then continued.
+- Claude Code: ingress `Agent, Bash, CronCreate, CronDelete, CronList, Edit,
+  EnterWorktree, ExitWorktree, Glob, Grep, ListAgents, NotebookEdit, Read,
+  ReportFindings, ScheduleWakeup, SendMessage, TaskStop, WebFetch, Workflow,
+  Write` → upstream `invoke_subagent, run_command, wp_create_schedule,
+  wp_delete_schedule, wp_list_schedules, replace_file_content, wp_open_worktree,
+  wp_close_worktree, find_by_name, grep_search, wp_list_workers,
+  wp_edit_notebook, view_file, wp_submit_report, wp_set_wakeup,
+  wp_send_message, wp_cancel_task, read_url_content, wp_run_workflow,
+  write_to_file`. Every source name is absent upstream. The same 20-entry set
+  repeats across the retry attempts, so the rewrite is stable per request.
+- Codex code mode: ingress `exec, wait, request_user_input,
+  request_user_input_async, clock__sleep, web_search` plus eight
+  `mcp__fastctx__*` declarations → upstream `run_command, wp_wait, ask_question,
+  wp_request_user_input_async, wp_clock_sleep, search_web` plus eight
+  `wp_ext_<hash>` fallbacks; upstream response carried
+  `wp_ext_3d1c4299180f8340de28e92e17bd9290` and the client-facing response
+  carried the original `mcp__fastctx__run`.
+- Codex shell mode: `exec_command → run_command`, `apply_patch → wp_apply_patch`,
+  `write_stdin → wp_write_stdin`, `view_image → wp_view_image`,
+  `clock__sleep → wp_clock_sleep`, plus reference and goal tools receiving
+  `wp_ext_<hash>`; the streamed `run_command` was restored to `exec_command`.
+  The shell-mode trace executed `printf CODEX_SHELL_OK` and continued, and the
+  code-mode trace executed through `mcp__fastctx__run` and reported
+  `CODEX_CODE_OK`.
+
+### Protocol checks (local, no upstream dispatch required)
+
+| Case | Result |
+| :--- | :--- |
+| Conflicting marker `X-Cloak-Client: oh_my_pi, claude_code` on an `agy/` route | PASS: HTTP 503 `{"error":{"code":"omp_cloak_required","message":"Protected OMP request could not be safely cloaked."}}`, no upstream attempt |
+| Declaration collision (`read` plus a natively declared `view_file`) | PASS: HTTP 503 `omp_cloak_required` |
+| Explicit OMP marker on a non-`agy/` route | PASS: marker consumed, zero mutation — ingress `bash` equals upstream `bash` |
+
+### Deferred / blocked in this pass
+
+- Claude Code execution and continuation remain unattested: every attempt with
+  the installed client on `agy/gemini-3.7-flash-high` returned 429
+  `RESOURCE_EXHAUSTED` upstream, while the size probes above hit that same model
+  successfully, so request size is ruled out. The remaining cause is unattested
+  — per-route quota, concurrency and token cost were not separated. The
+  criterion is therefore BLOCKED and its final verification is **deferred to a
+  manual live session**.
+- OpenAI Codex passed both declaration modes with no blocker observed; its final
+  acceptance is nonetheless **deferred to manual repetition** by the operator.
+- OMP `ask` is only reachable from an interactive session. The installed client
+  registers the tool through `createIf`/`canPromptUser` and its `execute` throws
+  "Ask tool requires interactive mode" when the session has no UI, so headless
+  `-p` runs never declare it at all. Verified by driving the real TUI over a pty
+  (`OMP-ESC-05`), which is the supported path for this criterion.
+- OMP `web_search` needs a search provider: `providers.webSearchOrder` was `[]`
+  in the acceptance profile. It was enabled reversibly for one case (`- exa`,
+  key already present in the environment) and reverted afterwards.
+- OMP escaped canonical spellings are only produced on the `anthropic-messages`
+  wire: the client applies its builtin underscore escape inside the Anthropic
+  client module, so `--tools read` on `openai-completions` declares bare `read`.
+  The escaped run above therefore pins `api: anthropic-messages` in the
+  acceptance profile (reverted afterwards).
 
 ## Validated sanitization deployment - 2026-09-12
 
