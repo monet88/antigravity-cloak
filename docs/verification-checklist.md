@@ -96,18 +96,15 @@ the image digest. Do not assume a future floating image remains compatible.
 $BuildImage = 'golang:1.26.0-bookworm'
 $SourceMain = git show "${TargetCommit}:main.go"
 if ($LASTEXITCODE) { throw 'Could not read main.go from pinned source' }
-$SourceMainText = $SourceMain -join "`n"
-$VersionMatch = [regex]::Match($SourceMainText, 'pluginVersion\s*=\s*"([^"]+)"')
+$VersionMatch = [regex]::Match(($SourceMain -join "`n"), 'pluginVersion\s*=\s*"([^"]+)"')
 if (!$VersionMatch.Success) { throw 'Could not resolve pluginVersion from pinned source' }
 $Version = $VersionMatch.Groups[1].Value
-$Registry = (git show "${TargetCommit}:registry.json" | ConvertFrom-Json)
-if ($LASTEXITCODE -or $Registry.plugins[0].version -ne $Version) {
+$RegistryText = git show "${TargetCommit}:registry.json"
+if ($LASTEXITCODE) { throw 'Could not read registry.json from pinned source' }
+$Registry = $RegistryText | ConvertFrom-Json
+$RegistryEntry = @($Registry.plugins | Where-Object { $_.id -eq 'antigravity-cloak' })
+if ($RegistryEntry.Count -ne 1 -or $RegistryEntry[0].version -ne $Version) {
     throw 'registry.json version does not match pinned pluginVersion'
-}
-if (git tag --list "v$Version") {
-    if ((git rev-parse "v$Version^{commit}") -ne (git rev-parse "${TargetCommit}^{commit}")) {
-        throw "Pinned commit is not the commit tagged v$Version"
-    }
 }
 docker pull $BuildImage
 if ($LASTEXITCODE) { throw 'Build image pull failed' }
@@ -372,20 +369,22 @@ Real-client acceptance for Oh My Pi, Claude Code and OpenAI Codex against the
 request-scoped alias-plan build, run on this workstation against the local
 gateway.
 
-**Status.** Oh My Pi is complete for every criterion the installed client
-(`18.3.4`) actually exposes, including escaped canonical spellings, `ask` and
-`web_search`. Claude Code and OpenAI Codex ran against the same artifact but are
-**manual verification pending/deferred by the user**: Issue #40 is therefore not
-complete, and nothing in this record is a release claim (no `v0.6.0` tag
-exists). Raw captures stay in the local evidence area under `.git/` (gitignored)
-and are not committed.
+**Status.** Oh My Pi passed every criterion the installed client (`18.3.4`)
+actually exposes: seven of the nine canonical tools under their bare spelling,
+and `ask`, `web_search` plus the escaped-canonical, shared-alias,
+deterministic-fallback and `xd://` variants over the `anthropic-messages` wire.
+Bare `ask` and bare `web_search` remain unexercised. Claude Code and OpenAI
+Codex ran against the same artifact but are **manual verification
+pending/deferred by the user**: Issue #40 is therefore not complete, and nothing
+in this record is a release claim (no `v0.6.0` tag exists). Raw captures stay in
+the local evidence area under `.git/` (gitignored) and are not committed.
 
 ### Pinned run
 
 - Source revision: `4e946acddea8a387efcb5fafd4635cf4b98bd6c3` (tip of `main` at
   capture time); worktree clean, so the artifact contains exactly that commit.
   The acceptance work ran on branch `feat/issue-40-three-client-acceptance`,
-  whose two follow-up commits after `4e946ac` are documentation-only
+  whose follow-up commits after `4e946ac` are documentation-only
   (`git diff --stat 4e946ac..<branch>` touches no code).
 - Build image: `golang:1.26.0-bookworm`,
   digest `sha256:2a0ba12e116687098780d3ce700f9ce3cb340783779646aafbabed748fa6677c`.
@@ -417,9 +416,9 @@ and are not committed.
 | Client | Transport | Result |
 | :--- | :--- | :--- |
 | Oh My Pi `18.3.4` (`cloak-live`, `openai-completions`, bare canonical) | `POST /v1/chat/completions` → local `127.0.0.1:8317` | `read`, `write`, `edit`, `bash`, `grep`, `glob` executed end-to-end with continuation; `task` spawned a subagent that read the fixture (one subagent `read` errored) |
-| Oh My Pi `18.3.4` (`cloak-live`, `anthropic-messages`, escaped canonical) | `POST /v1/messages` → local `127.0.0.1:8317` | PASS for escaped canonical (`_read`, `_bash`, `_ask`, `_web_search`), shared alias (`_todo → wp_todo`), deterministic fallbacks, `xd://` device dispatch, `ask` and `web_search`; every case restored exactly, executed natively and continued |
-| Oh My Pi `18.3.4` (default profile, unchanged, remote endpoint) | remote `https://cliproxy.monet.uno/v1` | PASS for `read`; validates the default-profile path and the remote deployment, not this local artifact |
-| Claude Code `2.1.283` | `POST /v1/messages` → local `127.0.0.1:8317` | Declaration/mapping PASS (20/20, zero source leakage); execution/continuation BLOCKED by upstream HTTP 429 — **manual verification pending** |
+| Oh My Pi `18.3.4` (`cloak-live`, `anthropic-messages`, escaped canonical) | `POST /v1/messages` → local `127.0.0.1:8317` | PASS (escaped wire) for `_read`, `_bash`, `_ask`, `_web_search`, shared alias (`_todo → wp_todo`), deterministic fallbacks and `xd://` device dispatch; every case restored exactly, executed natively and continued. Bare `ask` and bare `web_search` are NOT RUN |
+| Oh My Pi `18.3.4` (default profile, unchanged, remote endpoint) | the default profile's own remote gateway URL (discovered from that profile, not pinned here) | PASS for `read`; validates the default-profile path and the remote deployment, not this local artifact |
+| Claude Code `2.1.283` | `POST /v1/messages` → local `127.0.0.1:8317`, model `agy/gemini-3.7-flash-high` | Declaration/mapping PASS (20/20, zero source leakage); execution/continuation BLOCKED by upstream HTTP 429 — **manual verification pending** |
 | OpenAI Codex `codex-cli 0.157.1` via `opencodex 2.67.0` | `POST /v1/chat/completions` → local `127.0.0.1:8317` | PASS in both declaration modes (`exec` code mode, `exec_command` shell mode) with exact restoration, real execution and continuation — **manual repetition deferred** |
 
 Selected correlated evidence (ingress declaration set → upstream set → client
@@ -502,9 +501,12 @@ set), read from the gateway request logs by section and parsed as JSON/SSE:
 ### Deferred / blocked in this pass
 
 - Claude Code execution and continuation remain unattested: every attempt with
-  the installed client returned 429 `RESOURCE_EXHAUSTED` upstream while isolated
-  probes to the same model succeeded, so the criterion is BLOCKED and its final
-  verification is **deferred to a manual live session**.
+  the installed client on `agy/gemini-3.7-flash-high` returned 429
+  `RESOURCE_EXHAUSTED` upstream, while the size probes above hit that same model
+  successfully, so request size is ruled out. The remaining cause is unattested
+  — per-route quota, concurrency and token cost were not separated. The
+  criterion is therefore BLOCKED and its final verification is **deferred to a
+  manual live session**.
 - OpenAI Codex passed both declaration modes with no blocker observed; its final
   acceptance is nonetheless **deferred to manual repetition** by the operator.
 - OMP `ask` is only reachable from an interactive session. The installed client

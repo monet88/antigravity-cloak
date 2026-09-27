@@ -13,6 +13,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 
 ## Candidate 0.6.0 (unreleased) - 2026-09-25
 
+`0.6.0` is untagged: on release restore the bracketed heading, re-add its
+compare link, and repoint `[Unreleased]` at `v0.6.0`.
+
 ### Verification (2026-09-27)
 
 Not a release: no `v0.6.0` tag exists and none is proposed here. These results
@@ -22,11 +25,15 @@ source `4e946ac` (SHA256
 `vcs.modified=false`) and loaded as plugin version `0.6.0` on CLIProxyAPI
 `v7.3.19`.
 
-- Oh My Pi `18.3.4` live acceptance against that artifact: bare and escaped
-  canonical tools, shared aliases, deterministic fallback aliases, `xd://`
-  device dispatch, `ask` and `web_search` all executed end-to-end
+- Oh My Pi `18.3.4` live acceptance against that artifact: **7 of the 9 bare
+  canonical tools** (`read`, `write`, `edit`, `bash`, `grep`, `glob`, `task`)
+  executed end-to-end under their bare spelling
   (declaration -> upstream alias -> exact restore -> native execution ->
-  continuation). Per-case evidence:
+  continuation). The remaining two, `ask` and `web_search`, plus shared
+  aliases, deterministic fallback aliases and `xd://` device dispatch, are
+  recorded as **escaped-wire** coverage: those cases ran as `_ask` /
+  `_web_search` over `anthropic-messages` and are not counted as bare
+  acceptance. Per-case evidence:
   [OMP checklist](docs/verification-checklist-omp.md#verified-results---2026-09-27-plugin-v060).
 - Live rejection checks: a conflicting marker and a declaration collision on
   `agy/` both return HTTP 503 `omp_cloak_required` with no upstream attempt,

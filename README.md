@@ -87,7 +87,7 @@ Remove-Item plugins/windows/amd64/antigravity-cloak.h
 
 ## Verification & Docs
 
-- **[Live acceptance record (2026-09-27)](docs/verification-checklist.md#live-acceptance-record---2026-09-27)**: pinned source revision, candidate artifact SHA256 and per-client results. Oh My Pi is complete; Claude Code and OpenAI Codex are recorded as manual verification pending/deferred, so this is not a release claim.
+- **[Live acceptance record (2026-09-27)](docs/verification-checklist.md#live-acceptance-record---2026-09-27)**: pinned source revision, candidate artifact SHA256 and per-client results. Oh My Pi passed every criterion its installed client exposes (7/9 canonical tools bare; `ask`, `web_search` and the transport/alias variants over the escaped wire); Claude Code and OpenAI Codex are recorded as manual verification pending/deferred, so this is not a release claim.
 - **[Deployment and live verification runbook](docs/verification-checklist.md)**: clean build, install, controlled debug capture, correlation and cleanup.
 - **[OMP full tool-cloak checklist](docs/verification-checklist-omp.md)**: nine canonical mappings, transport variants and extended alias tools, with the current per-case verdicts.
 - **[Client identity headers](docs/client-identity-headers.md)**: configuring `X-Cloak-Client` for Claude Code, Codex (direct and via opencodex) and Oh My Pi.

@@ -11,20 +11,24 @@ before running this matrix, and its cleanup after every controlled debug batch.
 The recorded v0.5.1 run on 2026-09-12 proved tag sanitization and the
 `bash -> run_command -> bash` execution/continuation path. The historical
 2026-09-07 nine-tool run used a different plugin/OMP version. The current
-results are in [Verified results - 2026-09-27](#verified-results---2026-09-27-plugin-v060):
-all nine canonical tools executed end-to-end on v0.6.0, together with the
-escaped-canonical, shared-alias, deterministic-fallback and `xd://` device
-variants. Every case was produced by the real OMP client; where the client
-itself requires an environment this workstation does not have by default
-(`ask` needs an interactive session, `web_search` needs a provider), the case
-records the supported path that made it runnable.
+results are in [Verified results - 2026-09-27](#verified-results---2026-09-27-plugin-v060).
+Every case was produced by the real OMP client; where the client itself requires
+an environment this workstation does not have by default (`ask` needs an
+interactive session, `web_search` needs a provider), the case records the
+supported path that made it runnable.
 
-Every result below starts **NOT RUN**. Record PASS, FAIL, BLOCKED, or NOT RUN
-with evidence. A prompt requesting a tool, a declaration rewrite, an HTTP 200,
-or a model claiming success is insufficient. Full canonical acceptance requires
-all nine tools to execute successfully on the pinned binary. An unavailable
-canonical tool is BLOCKED, not PASS. Unexposed extended tools may be N/A
-only with a recorded inventory/configuration reason; any exposed or declared
+The rule below governs a fresh run of the matrix in section 3, not the dated
+record in the next section, which is fixed historical evidence and never reset.
+
+Every result in a fresh run starts **NOT RUN**. Record PASS, PASS (escaped
+wire), FAIL, BLOCKED, or NOT RUN with evidence. A prompt requesting a tool, a
+declaration rewrite, an HTTP 200, or a model claiming success is insufficient.
+Full canonical acceptance requires all nine tools to execute successfully on the
+pinned binary **under their bare spelling**; `PASS (escaped wire)` means the tool
+executed only through its `_`-prefixed spelling and is therefore not bare
+acceptance. An unavailable canonical tool is BLOCKED, not PASS.
+Unexposed extended tools may be N/A only with a recorded
+inventory/configuration reason; any exposed or declared
 extended tool must be cloaked to its assigned alias and restored downstream
 rather than skipped as pass-through.
 
@@ -48,10 +52,12 @@ under `.git/` and in the gateway request logs; nothing raw is committed.
 | OMP-05 `grep` | PASS | `grep` → `grep_search` → `grep`; matched `sample.txt` line 2 |
 | OMP-06 `glob` | PASS | `glob` → `find_by_name` → `glob`; matched the real fixture file |
 | OMP-07 `task` | PASS | `task` → `invoke_subagent` → `task`; child `ReadChild` completed (19.4 s) and the parent read `agent://ReadChild` → `{"content": "alpha\nbeta\n"}` |
-| OMP-08 `ask` | PASS | `_ask` → `ask_question` → `_ask`, executed from a real interactive TUI session (pty): the Ask overlay rendered, the operator selected "Green", and the continuation carried `ask_question` with `User selected: Green` upstream while the client history kept `_ask`. Headless `-p` runs cannot reach it — the client registers the tool through `createIf`/`canPromptUser`, and `execute` throws "Ask tool requires interactive mode" without a UI |
-| OMP-09 `web_search` | PASS | `_web_search` → `search_web` → `_web_search`; executed with `providers.webSearchOrder: [exa]` enabled reversibly in the acceptance profile (key already present in the environment), returned live results and continued |
+| OMP-08 `ask` | PASS (escaped wire) | Not exercised under the bare spelling. The only run that reached it used `_ask` → `ask_question` → `_ask` over `anthropic-messages` (OMP-ESC-05): the Ask overlay rendered in a real interactive TUI session (pty), the operator selected "Green", and the continuation carried `ask_question` with `User selected: Green` upstream while the client history kept `_ask`. Bare `ask` is NOT RUN: headless `-p` runs never declare it — the client registers the tool through `createIf`/`canPromptUser`, and `execute` throws "Ask tool requires interactive mode" without a UI |
+| OMP-09 `web_search` | PASS (escaped wire) | Not exercised under the bare spelling. The only run that reached it used `_web_search` → `search_web` → `_web_search` over `anthropic-messages` (OMP-ESC-04), with `providers.webSearchOrder: [exa]` enabled reversibly in the acceptance profile (key already present in the environment); it returned live results and continued. Bare `web_search` is NOT RUN |
 
-Canonical execution count: **9/9 executed end-to-end**.
+Canonical execution count: **7/9 bare-canonical executed end-to-end**
+(`read`, `write`, `edit`, `bash`, `grep`, `glob`, `task`). `ask` and
+`web_search` are recorded as escaped-wire only.
 
 Escaped-canonical wire (`api: anthropic-messages` in the acceptance profile,
 reverted afterwards; the client emits the `_`-escaped builtin spelling only
@@ -96,18 +102,19 @@ Protocol checks (local, decided before upstream dispatch):
 | Declaration collision (`read` plus a native `view_file`) | PASS: HTTP 503 `omp_cloak_required` |
 | Explicit OMP marker on a non-`agy/` route | PASS: zero mutation (`bash` ingress, `bash` upstream) |
 
-Default-profile smoke (profile unchanged, endpoint
-`https://cliproxy.monet.uno/v1`, model role unchanged): `read` on the fixture
-executed natively and returned `alpha\nbeta`. This exercises the default
-production path and the remote deployment — it is **not** evidence about the
-local artifact, since the default profile does not point at the local gateway.
+Default-profile smoke (profile unchanged, its own remote gateway endpoint and
+model role unchanged — discover both from the profile rather than pinning them
+here): `read` on the fixture executed natively and returned `alpha\nbeta`. This
+exercises the default production path and the remote deployment — it is **not**
+evidence about the local artifact, since the default profile does not point at
+the local gateway.
 
 Honest gaps in this pass:
 
 - `ask` is reachable only from an interactive session and `web_search` only with
-  a search provider. Both were run through those supported paths and both are
-  PASS; neither is reachable from a headless default-profile `-p` run, so the
-  headless smoke stays limited to tools the client exposes there.
+  a search provider; both were run through those supported paths. Neither is
+  reachable from a headless default-profile `-p` run, so the headless smoke
+  stays limited to tools the client exposes there.
 - Escaped canonical spellings require the `anthropic-messages` wire: on
   `openai-completions` the stock client declares bare `read`. The escaped run
   pinned `api: anthropic-messages` and the bare run pinned

@@ -196,16 +196,9 @@ the request side and remains open for execution:
 
 - The plugin resolved the client from the marker (`client=claude_code`) and
   logged `alias plan rewritten=true client=claude_code`.
-- All 20 declared tools were rewritten upstream with no source name surviving:
-  `Agent → invoke_subagent`, `Bash → run_command`, `Edit →
-  replace_file_content`, `Glob → find_by_name`, `Grep → grep_search`, `Read →
-  view_file`, `WebFetch → read_url_content`, `Write → write_to_file`, and
-  `CronCreate/CronDelete/CronList → wp_create_schedule/wp_delete_schedule/
-  wp_list_schedules`, `EnterWorktree/ExitWorktree →
-  wp_open_worktree/wp_close_worktree`, `ListAgents → wp_list_workers`,
-  `NotebookEdit → wp_edit_notebook`, `ReportFindings → wp_submit_report`,
-  `ScheduleWakeup → wp_set_wakeup`, `SendMessage → wp_send_message`,
-  `TaskStop → wp_cancel_task`, `Workflow → wp_run_workflow`.
+- All 20 declared tools were rewritten upstream with no source name surviving;
+  the per-name source → alias mapping is in the
+  [live acceptance record](../verification-checklist.md#live-acceptance-record---2026-09-27).
 - Downstream restoration, tool execution and continuation are still unattested
   for Claude Code: every attempt in this pass returned HTTP 429
   `RESOURCE_EXHAUSTED` upstream. Isolated probes against the same model with
