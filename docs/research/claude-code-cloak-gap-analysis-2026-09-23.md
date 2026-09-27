@@ -186,3 +186,33 @@ is a behaviour change that needs evidence and an ADR.
 - The `Agent` / `ListAgents` / `SendMessage` family ships as deferred tools in this
   Claude Code build, so a minimal session may declare a narrower tool set than the table
   assumes.
+
+## Live evidence added 2026-09-27 (plugin v0.6.0, source `4e946ac`)
+
+A real Claude Code `2.1.283` session was driven at the local gateway over
+`POST /v1/messages` with `X-Cloak-Client: claude_code` and an
+`agy/gemini-3.7-flash-high` model. The audit's "not verified" gap is closed for
+the request side and remains open for execution:
+
+- The plugin resolved the client from the marker (`client=claude_code`) and
+  logged `alias plan rewritten=true client=claude_code`.
+- All 20 declared tools were rewritten upstream with no source name surviving:
+  `Agent → invoke_subagent`, `Bash → run_command`, `Edit →
+  replace_file_content`, `Glob → find_by_name`, `Grep → grep_search`, `Read →
+  view_file`, `WebFetch → read_url_content`, `Write → write_to_file`, and
+  `CronCreate/CronDelete/CronList → wp_create_schedule/wp_delete_schedule/
+  wp_list_schedules`, `EnterWorktree/ExitWorktree →
+  wp_open_worktree/wp_close_worktree`, `ListAgents → wp_list_workers`,
+  `NotebookEdit → wp_edit_notebook`, `ReportFindings → wp_submit_report`,
+  `ScheduleWakeup → wp_set_wakeup`, `SendMessage → wp_send_message`,
+  `TaskStop → wp_cancel_task`, `Workflow → wp_run_workflow`.
+- Downstream restoration, tool execution and continuation are still unattested
+  for Claude Code: every attempt in this pass returned HTTP 429
+  `RESOURCE_EXHAUSTED` upstream. Isolated probes against the same model with
+  bodies up to 1.1 MB returned 200, so the block is not request size; the
+  Claude Code request shape or its credential path is what the upstream
+  rejects. Final verification is therefore **deferred to a joint manual live
+  session** (operator-driven), not closed by this pass.
+- This also settles the Group A questions for `Glob` (now `find_by_name`) and
+  confirms the Tier-2 aliases from the 2026-09-25 amendment on real client
+  declarations rather than on the documented surface.

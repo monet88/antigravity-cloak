@@ -10,8 +10,14 @@ before running this matrix, and its cleanup after every controlled debug batch.
 
 The recorded v0.5.1 run on 2026-09-12 proved tag sanitization and the
 `bash -> run_command -> bash` execution/continuation path. The historical
-2026-09-07 nine-tool run used a different plugin/OMP version. It does **not**
-establish full nine-tool acceptance for the current binary.
+2026-09-07 nine-tool run used a different plugin/OMP version. The current
+results are in [Verified results - 2026-09-27](#verified-results---2026-09-27-plugin-v060):
+all nine canonical tools executed end-to-end on v0.6.0, together with the
+escaped-canonical, shared-alias, deterministic-fallback and `xd://` device
+variants. Every case was produced by the real OMP client; where the client
+itself requires an environment this workstation does not have by default
+(`ask` needs an interactive session, `web_search` needs a provider), the case
+records the supported path that made it runnable.
 
 Every result below starts **NOT RUN**. Record PASS, FAIL, BLOCKED, or NOT RUN
 with evidence. A prompt requesting a tool, a declaration rewrite, an HTTP 200,
@@ -21,6 +27,96 @@ canonical tool is BLOCKED, not PASS. Unexposed extended tools may be N/A
 only with a recorded inventory/configuration reason; any exposed or declared
 extended tool must be cloaked to its assigned alias and restored downstream
 rather than skipped as pass-through.
+
+## Verified results - 2026-09-27 (plugin v0.6.0)
+
+Pinned run: source `4e946ac` (clean worktree), artifact SHA256
+`a9b4e88833784e14063e25b0716bedbdebe91a615386394e0bd6ca4153ca013b`
+(`vcs.revision=4e946ac`, `vcs.modified=false`, linux/amd64 CGO c-shared, GLIBC
+requirement ≤ 2.34), installed as `antigravity-cloak-v0.6.0.so`. Real OMP
+`18.3.4` on the isolated `cloak-live` profile
+(`http://127.0.0.1:8317/v1`, `X-Cloak-Client: oh_my_pi`), model
+`cpa/agy/gemini-3.8-flash`. Correlated evidence lives in the local evidence area
+under `.git/` and in the gateway request logs; nothing raw is committed.
+
+| ID | Status | Correlated result |
+| --- | --- | --- |
+| OMP-01 `read` | PASS | Ingress `read` → upstream `view_file` → client `read`; returned exactly `alpha`/`beta` |
+| OMP-02 `write` | PASS | `write` → `write_to_file` → `write`; created `written.txt` with `OMP_WRITE_OK`, read back |
+| OMP-03 `edit` | PASS | `edit` → `replace_file_content` → `edit`; OMP hashline patch applied (`1:before` → `1:after`) |
+| OMP-04 `bash` | PASS | `bash` → `run_command` → `bash`; `printf OMP_BASH_OK` executed, continuation followed |
+| OMP-05 `grep` | PASS | `grep` → `grep_search` → `grep`; matched `sample.txt` line 2 |
+| OMP-06 `glob` | PASS | `glob` → `find_by_name` → `glob`; matched the real fixture file |
+| OMP-07 `task` | PASS | `task` → `invoke_subagent` → `task`; child `ReadChild` completed (19.4 s) and the parent read `agent://ReadChild` → `{"content": "alpha\nbeta\n"}` |
+| OMP-08 `ask` | PASS | `_ask` → `ask_question` → `_ask`, executed from a real interactive TUI session (pty): the Ask overlay rendered, the operator selected "Green", and the continuation carried `ask_question` with `User selected: Green` upstream while the client history kept `_ask`. Headless `-p` runs cannot reach it — the client registers the tool through `createIf`/`canPromptUser`, and `execute` throws "Ask tool requires interactive mode" without a UI |
+| OMP-09 `web_search` | PASS | `_web_search` → `search_web` → `_web_search`; executed with `providers.webSearchOrder: [exa]` enabled reversibly in the acceptance profile (key already present in the environment), returned live results and continued |
+
+Canonical execution count: **9/9 executed end-to-end**.
+
+Escaped-canonical wire (`api: anthropic-messages` in the acceptance profile,
+reverted afterwards; the client emits the `_`-escaped builtin spelling only
+through its Anthropic client module):
+
+| ID | Status | Correlated result |
+| --- | --- | --- |
+| OMP-ESC-01 `_read`/`_bash` | PASS | ingress `_read`,`_bash` → upstream `view_file`,`run_command` → downstream `_read`,`_bash`; the client ran `read` on the fixture and `bash "echo ESCAPE-OK"`, then continued to a final summary (exit 0) |
+| OMP-ESC-02 shared + fallback | PASS | ingress `_todo`,`_find`,`_wait` → upstream `wp_todo`, `wp_ext_8bfa04d75e222553a5dc712e5ec3671e`, `wp_ext_416dac4969d214f84545c92795d9a734` → restored verbatim; both hashes recomputed from `fallbackAliasForSource`; `todo`, `find` and `wait` all executed |
+| OMP-ESC-03 `xd://` device | PASS | ingress `_read` with `path: xd://todo` → upstream `view_file` with the same `path: xd://todo` byte-identical → downstream restored with the URI intact; the client dispatched to the `xd://todo` device and returned its output |
+| OMP-ESC-04 `_web_search` | PASS | ingress `_web_search` → upstream `search_web` → restored; live results returned, continuation followed |
+| OMP-ESC-05 `_ask` | PASS | ingress `_ask` → upstream `ask_question` → restored; TUI answer flow as in OMP-08 |
+
+Transport and alias checks:
+
+| ID | Status | Result |
+| --- | --- | --- |
+| EXT-03 `read` virtual device (`xd://<top-level-tool>`) | PASS | The acceptance profile mounts no standalone device, and a bare `xd://bash` correctly resolves to "No such tool"; the client also dispatches active top-level tools, so `read` with `path: xd://todo` executed against the todo device with the URI intact (see OMP-ESC-03) |
+| EXT-04 `write` virtual device | PASS | `write` to `xd://bash` dispatched the real bash runner (`echo xd_write_dispatch_success`) with the `xd://` identifier intact through `write_to_file → write` |
+| Shared aliases | PASS | bare `todo → wp_todo` and `find → wp_find`, plus escaped `_todo → wp_todo`; all restored to the client spelling and executed |
+| Dynamic/fallback | PASS | bare `wait → wp_ext_061bef0f1c6ccd0b4819958bcb73eba6` and `yield → wp_ext_6000f482bcb616c9b358f46162f191f6`, plus escaped `_find → wp_ext_8bfa04d75e222553a5dc712e5ec3671e` and `_wait → wp_ext_416dac4969d214f84545c92795d9a734`; the alias is keyed on the source identity as sent, so the escaped spelling gets its own deterministic hash |
+
+One `agy/gemini-3.8-flash` request carried these 12 declarations and produced
+this upstream set, with no source name surviving upstream:
+
+```
+ingress : bash edit eval find glob grep read task todo wait web_search write
+upstream: find_by_name grep_search invoke_subagent replace_file_content
+          run_command search_web view_file wp_eval
+          wp_ext_061bef0f1c6ccd0b4819958bcb73eba6 wp_find wp_todo write_to_file
+```
+
+System-prompt sanitization was confirmed on the same request:
+`<system-conventions>` counts 2 → 0 and `<conventions>` 1 → 3 (ingress →
+upstream), decoded from JSON rather than by raw substring counting.
+
+Protocol checks (local, decided before upstream dispatch):
+
+| Case | Result |
+| --- | --- |
+| Conflicting marker `oh_my_pi, claude_code` on `agy/` | PASS: HTTP 503 `omp_cloak_required`, no upstream attempt |
+| Declaration collision (`read` plus a native `view_file`) | PASS: HTTP 503 `omp_cloak_required` |
+| Explicit OMP marker on a non-`agy/` route | PASS: zero mutation (`bash` ingress, `bash` upstream) |
+
+Default-profile smoke (profile unchanged, endpoint
+`https://cliproxy.monet.uno/v1`, model role unchanged): `read` on the fixture
+executed natively and returned `alpha\nbeta`. This exercises the default
+production path and the remote deployment — it is **not** evidence about the
+local artifact, since the default profile does not point at the local gateway.
+
+Honest gaps in this pass:
+
+- `ask` is reachable only from an interactive session and `web_search` only with
+  a search provider. Both were run through those supported paths and both are
+  PASS; neither is reachable from a headless default-profile `-p` run, so the
+  headless smoke stays limited to tools the client exposes there.
+- Escaped canonical spellings require the `anthropic-messages` wire: on
+  `openai-completions` the stock client declares bare `read`. The escaped run
+  pinned `api: anthropic-messages` and the bare run pinned
+  `openai-completions` in the acceptance profile; both were reverted afterwards.
+- Residual payload identifiers: OMP's own subagent payload retained the upstream
+  spelling inside prose (`... using view_file or appropriate tool`), because the
+  reverse rewrites tool-name positions and not free text inside tool arguments.
+  This is inherent to the rename mechanism and is not a claim of full harness
+  anonymity.
 
 ## 1. Prepare and pin the run
 
