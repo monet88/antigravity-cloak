@@ -755,19 +755,30 @@ func TestReviewFix_DeterministicMultiLaneFlushOrder(t *testing.T) {
 	}
 }
 
+// sseDataMaps decodes every JSON `data:` payload of an SSE body, skipping
+// `event:` lines and the terminal [DONE] frame.
+func sseDataMaps(t *testing.T, body []byte) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, ev := range strings.Split(string(body), "\n\n") {
+		payload := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ev), "data:"))
+		if !strings.HasPrefix(payload, "{") {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(payload), &m); err != nil {
+			t.Fatalf("unparseable SSE event %q: %v", ev, err)
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // flushLaneOrder extracts choice indexes of flush events preceding [DONE].
 func flushLaneOrder(t *testing.T, body []byte) []int {
 	t.Helper()
 	var order []int
-	for _, ev := range strings.Split(string(body), "\n\n") {
-		ev = strings.TrimSpace(ev)
-		if !strings.HasPrefix(ev, "data: {") {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(ev, "data: ")), &m); err != nil {
-			t.Fatalf("unparseable flush event %q: %v", ev, err)
-		}
+	for _, m := range sseDataMaps(t, body) {
 		choices, ok := m["choices"].([]any)
 		if !ok {
 			continue
@@ -1154,15 +1165,7 @@ func TestIssue21_AnthropicSSE_InterleavedLanesIsolatedAndDeterministic(t *testin
 func flushAnthropicLaneOrder(t *testing.T, body []byte) []int {
 	t.Helper()
 	var order []int
-	for _, ev := range strings.Split(string(body), "\n\n") {
-		ev = strings.TrimSpace(ev)
-		if !strings.HasPrefix(ev, "data: {") {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(ev, "data: ")), &m); err != nil {
-			continue
-		}
+	for _, m := range sseDataMaps(t, body) {
 		if m["type"] != "content_block_delta" {
 			continue
 		}

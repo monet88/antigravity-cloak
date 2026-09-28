@@ -2088,12 +2088,7 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 		}
 	}
 	if format == "anthropic" {
-		laneKey := "anthropic:0"
-		if v, ok := data["index"]; ok {
-			if n, ok := jsonIndexValue(v); ok {
-				laneKey = fmt.Sprintf("anthropic:%d", n)
-			}
-		}
+		laneKey := laneKeyWithIndex("anthropic", data)
 		apply(data, "text", laneKey)
 		if cb, ok := data["content_block"].(map[string]any); ok {
 			apply(cb, "text", laneKey)
@@ -2116,12 +2111,7 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 	// token held back for choice 0 was emitted through choice 1 and the two
 	// choices' text interleaved (choice 0 "A" + choice 1 "hello " came out as
 	// "" + "Ahello ").
-	rootLane := "openai:0"
-	if v, ok := data["index"]; ok {
-		if n, ok := jsonIndexValue(v); ok {
-			rootLane = fmt.Sprintf("openai:%d", n)
-		}
-	}
+	rootLane := laneKeyWithIndex("openai", data)
 	apply(data, "text", rootLane)
 	choices, _ := data["choices"].([]any)
 	for _, cRaw := range choices {
@@ -2145,16 +2135,13 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 
 // reverseFlushCloakedBrandLanes emits whatever a content block's lanes still
 // hold once the block is known to be complete. Each lane flushes as its own
-// event so the index survives, and its carry is resolved against the whole
-// reverse table: a token held open by a longer rule's lane ("Antigravity" held
-// by the "Antigravity-api" lane, waiting for a suffix that never arrived) still
-// has to come back as the shorter rule's replacement.
+// event so the index survives.
 func (m *streamSessionManager) reverseFlushCloakedBrandLanes(sess *streamSession, format, laneKey string, allBlocks bool) []byte {
 	prefix := laneKey + reverseBrandLaneSuffix
 	if allBlocks {
 		prefix = ""
 	}
-	table := reverseBrandMappingsFor(sess.client)
+	table := brandReverseTableFor(sess.client)
 	var out []byte
 	for _, key := range sortedCarryKeys(sess) {
 		if !strings.HasPrefix(key, prefix) {
@@ -2164,15 +2151,9 @@ func (m *streamSessionManager) reverseFlushCloakedBrandLanes(sess *streamSession
 		if lane == nil || lane.carry == "" {
 			continue
 		}
-		// The character before the carry never changes, so it bounds the first
-		// match of every rule the carry is run through.
-		prevIsWord := lane.lastIsWord
-		text := lane.carry
+		text := resolveCarry(lane.carry, lane.lastIsWord, table)
 		lane.carry = ""
 		lane.lastIsWord = false
-		for _, mm := range table {
-			text, _ = replaceInsensitiveWithPrev(text, prevIsWord, mm.Match, mm.Replacement)
-		}
 		if text == "" {
 			continue
 		}
@@ -2493,23 +2474,27 @@ func sortedCarryKeys(sess *streamSession) []string {
 	return keys
 }
 
+// resolveCarry runs one held carry through the whole reverse table in its
+// declared order, so a token held open by a longer rule ("Antigravity" held by
+// the "Antigravity-api" lane, waiting for a suffix that never arrived) still
+// comes back as the shorter rule's replacement. The character before the carry
+// never changes, so it bounds the first match of every rule.
+func resolveCarry(carry string, prevIsWord bool, table []rewriteMapping) string {
+	for _, mm := range table {
+		carry, _ = replaceInsensitiveWithPrev(carry, prevIsWord, mm.Match, mm.Replacement)
+	}
+	return carry
+}
+
 // orderedBrandFlushes resolves the final text of every held carry in
-// deterministic lane order (sortedCarryKeys), running each carry through the
-// session's whole resolution table in its declared order: a token held open by
-// a longer rule ("Antigravity" held by "Antigravity-api") still has to come back
-// as the shorter rule's replacement. This does not mutate lane state — callers
-// drain only once the flushed text is safely delivered.
+// deterministic lane order (sortedCarryKeys). This does not mutate lane state
+// — callers drain only once the flushed text is safely delivered.
 func orderedBrandFlushes(sess *streamSession, table []rewriteMapping) []brandFlush {
 	keys := sortedCarryKeys(sess)
 	flushes := make([]brandFlush, 0, len(keys))
 	for _, k := range keys {
 		lane := sess.brandCarries[k]
-		// The character before the carry never changes, so it bounds the first
-		// match of every rule the carry is run through.
-		text := lane.carry
-		for _, mm := range table {
-			text, _ = replaceInsensitiveWithPrev(text, lane.lastIsWord, mm.Match, mm.Replacement)
-		}
+		text := resolveCarry(lane.carry, lane.lastIsWord, table)
 		if text == "" {
 			continue
 		}
@@ -2750,6 +2735,15 @@ func openAIChoiceLaneKey(ch map[string]any) string {
 		return fmt.Sprintf("openai:%v", idxVal)
 	}
 	return "openai:0"
+}
+
+// laneKeyWithIndex derives a lane key from an event's own `index` field,
+// defaulting to lane 0 for the events that carry none.
+func laneKeyWithIndex(format string, data map[string]any) string {
+	if n, ok := jsonIndexValue(data["index"]); ok {
+		return fmt.Sprintf("%s:%d", format, n)
+	}
+	return format + ":0"
 }
 
 // requestChoiceCount reads the OpenAI "n" (choices per completion) from a
