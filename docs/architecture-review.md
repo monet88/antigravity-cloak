@@ -38,7 +38,7 @@ This document captures the architectural friction analysis and proposed **deepen
 ## 2. Deepening Candidates
 
 ### Candidate 1: Single-Pass `PayloadTranslator` Protocol Adapters
-* **Target Files/Lines**: `main.go:L1480-1820` (`rewriteRequestBodyWithClient`, `cloakToolNames`, `rewriteToolDescriptions`, `rewriteSystemMessages`, `rewriteSystemFields`, `uncloakJSONNode`, `extractToolNames`)
+* **Target Files/Lines**: `main.go:L1480-1820` (`rewriteRequestBodyWithClient`, `cloakToolNames`, `rewriteToolDescriptions`, `rewriteConversationContent`, `rewriteSystemFields`, `uncloakJSONNode`, `extractToolNames`)
 * **Recommendation Strength**: **Strong**
 
 #### Friction
@@ -47,7 +47,7 @@ In `rewriteRequestBodyWithClient`, a single request payload traverses the decode
 2. `extractToolNames` (recursive walk to locate tool declarations/invocations)
 3. `cloakToolNames` (walks `tools[]`, `messages[]`, `tool_choice`)
 4. `rewriteToolDescriptions` (walks `tools[]` to replace brands and tool references)
-5. `rewriteSystemMessages` (walks `messages[]` where `role == "system"`)
+5. `rewriteConversationContent` (walks `messages[]` where `role == "system"`)
 6. `replaceToolNamesInValue` (walks top-level `"system"`)
 
 Schema knowledge for `openai` and `anthropic` formats is duplicated and fragmented across 6 separate functions. Adding support for new message block types or parameter structures requires modifying multiple functions across 600 lines.
