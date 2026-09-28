@@ -253,7 +253,7 @@ not an optimization to hide inside performance changes.
    change before introducing sharding.
 4. **Long system-text rewrite scans, then Anthropic repeated event decoding.**
    Both are real CPU/allocation targets. Use rewriteProtectedBrandText/
-   replaceToolNamesInText and reverseBrandSingleSSEEvent/terminal classification
+   replaceToolNamesInText and rewriteSSEEventData/terminal classification
    respectively. Preserve brand alias terminal outputs, custom mapping priority,
    literal paths, tool-reference boundaries, tool arguments, lane isolation,
    and native message_stop/content_block_stop semantics. The system-heavy
