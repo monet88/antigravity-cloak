@@ -1,7 +1,7 @@
 # Architecture Review & Deepening Proposals
 
 > **Document Status**: Accepted Roadmap / Backlog
-> **Source Target**: `main.go` (2,294 LOC)
+> **Source Target**: `main.go` (symbol names only; LOC and line ranges are deliberately not pinned, they rot on every edit)
 > **Vocabulary Standard**: `codebase-design` (`Module`, `Interface`, `Depth`, `Seam`, `Adapter`, `Leverage`, `Locality`)
 > **Domain Alignment**: [CONTEXT.md](../CONTEXT.md), [ADR 0001](adr/0001-stream-session-manager-and-atomic-config.md)
 
@@ -38,7 +38,7 @@ This document captures the architectural friction analysis and proposed **deepen
 ## 2. Deepening Candidates
 
 ### Candidate 1: Single-Pass `PayloadTranslator` Protocol Adapters
-* **Target Files/Lines**: `main.go:L1480-1820` (`rewriteRequestBodyWithClient`, `cloakToolNames`, `rewriteToolDescriptions`, `rewriteConversationContent`, `rewriteSystemFields`, `uncloakJSONNode`, `extractToolNames`)
+* **Target Files/Lines**: `main.go` (`rewriteRequestBodyWithClient`, `cloakToolNames`, `rewriteToolDescriptions`, `rewriteConversationContent`, `rewriteSystemFields`, `uncloakJSONNode`, `extractToolNames`)
 * **Recommendation Strength**: **Strong**
 
 #### Friction
@@ -78,7 +78,7 @@ flowchart LR
 ---
 
 ### Candidate 2: Cohesive Precompiled `TranslationRuleset` Engine
-* **Target Files/Lines**: `main.go:L440-470, L1100-1230` (`filterConfig`, `rebuildCachedRegexes`, `effectiveUncloakTable`, `effectiveCloakTable`, `cachedCloakPatterns`, `cachedUncloakPattern`)
+* **Target Files/Lines**: `main.go` (`filterConfig`, `rebuildCachedRegexes`, `effectiveUncloakTable`, `effectiveCloakTable`, `cachedCloakPatterns`, `cachedUncloakPattern`)
 * **Recommendation Strength**: **Strong**
 
 #### Friction
@@ -119,14 +119,14 @@ flowchart TD
 ---
 
 ### Candidate 3: Dedicated `StreamFrameAssembler` Internal Seam
-* **Target Files/Lines**: `main.go:L515-815` (`streamSessionManager`, `processChunk`, `splitSSEEvents`, `streamSession`)
+* **Target Files/Lines**: `main.go` (`streamSessionManager`, `processChunk`, `splitSSEEventsForBrand`, `streamSession`)
 * **Recommendation Strength**: **Worth exploring**
 
 #### Friction
 `streamSessionManager` conflates 4 distinct responsibilities behind a coarse mutex:
 1. Session correlation key extraction (headers, metadata, request IDs, FNV hash).
 2. Session TTL lifecycle eviction (`cleanupStaleLocked`).
-3. Byte-level SSE framing & boundary buffer slicing (`splitSSEEvents`, `\n\n` vs `\r\n\r\n`).
+3. Byte-level SSE framing & boundary buffer slicing (`splitSSEEventsForBrand`, `\n\n` vs `\r\n\r\n`).
 4. Regex stream uncloaking.
 
 Testing fragmented TCP chunks requires mocking full plugin interceptor structs and session state.
@@ -152,7 +152,7 @@ flowchart LR
 ---
 
 ### Candidate 4: Unified `InterceptorPipeline` Seam
-* **Target Files/Lines**: `main.go:L160-368` (`handlePluginCall`, `handleRequestInterceptBefore`, `handleResponseIntercept`, `handleStreamChunkIntercept`)
+* **Target Files/Lines**: `main.go` (`handlePluginCall`, `handleRequestInterceptBefore`, `handleResponseIntercept`, `handleStreamChunkIntercept`)
 * **Recommendation Strength**: **Speculative**
 
 #### Friction
