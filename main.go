@@ -1977,30 +1977,31 @@ func uncloakStreamChunkExact(body []byte, uncloakTable map[string]string) ([]byt
 	return out.Bytes(), true
 }
 
-// reverseBrandSSE maps model output back onto the client's own spelling. Oh My
-// Pi runs the protected-brand policy (Antigravity -> omp) on its own single
-// lane; every other client runs its own reverse table, one lane per
-// token, so a match split across two SSE events is held until it completes.
+// reverseBrandSSE maps model output back onto the client's own spelling. Both
+// reverse authorities share this loop - event splitting, the terminal flush
+// discipline, and the per-event rewrite; only the applier and the lane flusher
+// differ, and brandReverseFuncs picks those once per session.
+//
+// Oh My Pi runs the protected-brand policy (Antigravity -> omp) on a single
+// lane; every other client runs its own reverse table, one lane per token, so a
+// match split across two SSE events is held until it completes.
 func (m *streamSessionManager) reverseBrandSSE(sess *streamSession, sseBytes []byte, format string) ([]byte, bool) {
 	if sess == nil {
 		return nil, false
 	}
-	if sess.client != "oh_my_pi" {
-		return m.reverseCloakedBrandSSE(sess, sseBytes, format)
-	}
-	isDone := sseContainsOpenAIDone(sseBytes)
+	applyEvent, flushLanes := m.brandReverseFuncs(sess, format)
+
 	events := splitSSEEventsForBrand(sseBytes)
 	var out bytes.Buffer
 	changedOverall := false
 	for _, ev := range events {
-		isDoneEvent := sseContainsOpenAIDone(ev)
-		if isDoneEvent {
-			if isDone {
-				flushEvents := m.generateBrandFlushEvents(sess, format)
-				for _, fe := range flushEvents {
-					out.Write(fe)
-					changedOverall = true
-				}
+		if sseContainsOpenAIDone(ev) {
+			// The stream ends here, so any token still held in a lane is never
+			// going to complete. Flush it rather than dropping it: losing the
+			// tail of a sentence is far worse than emitting it unreversed.
+			if fe := flushLanes("", true); fe != nil {
+				out.Write(fe)
+				changedOverall = true
 			}
 			out.Write(ev)
 			continue
@@ -2012,100 +2013,55 @@ func (m *streamSessionManager) reverseBrandSSE(sess *streamSession, sseBytes []b
 		// not be deleted before this carry is delivered (Issue #21).
 		if format == "anthropic" {
 			if kind, laneKey := sseAnthropicTerminalKind(ev); kind != "" {
-				var flushEvents [][]byte
-				if kind == "content_block_stop" {
-					flushEvents = m.generateBrandFlushEventsFiltered(sess, format, []string{laneKey})
-				} else { // message_stop
-					flushEvents = m.generateBrandFlushEvents(sess, format)
-				}
-				for _, fe := range flushEvents {
+				// The lane a held token belongs to is complete by now, so it
+				// must be emitted before the stop event.
+				if fe := flushLanes(laneKey, kind == "message_stop"); fe != nil {
 					out.Write(fe)
 					changedOverall = true
 				}
 			}
 		}
-		modifiedEv, changed := m.reverseBrandSingleSSEEvent(sess, ev, format)
+		modifiedEv, changed := rewriteSSEEventData(ev, applyEvent)
 		if changed {
-			out.Write(modifiedEv)
 			changedOverall = true
-		} else {
-			out.Write(ev)
 		}
+		out.Write(modifiedEv)
 	}
 	return out.Bytes(), changedOverall
 }
 
-// reverseCloakedBrandSSE is the non-Oh-My-Pi streaming reverse. It reuses the
-// same event splitting and terminal-flush discipline as reverseBrandSSE, but
-// drives one lane per reverse-table entry instead of the single
-// protected-brand pair, so a token straddling two events is emitted only once
-// it is whole.
-func (m *streamSessionManager) reverseCloakedBrandSSE(sess *streamSession, sseBytes []byte, format string) ([]byte, bool) {
-	events := splitSSEEventsForBrand(sseBytes)
-	var out bytes.Buffer
-	changedOverall := false
-	for _, ev := range events {
-		if sseContainsOpenAIDone(ev) {
-			// The stream ends here, so any token still held in a lane is never
-			// going to complete. Flush it rather than dropping it: losing the
-			// tail of a sentence is far worse than emitting it unreversed.
-			if fe := m.reverseFlushCloakedBrandLanes(sess, format, "", true); fe != nil {
-				out.Write(fe)
-				changedOverall = true
+// brandReverseFuncs returns the per-event applier and the lane flusher for the
+// session's reverse authority. flushLanes(laneKey, allBlocks) emits whatever the
+// selected lanes still hold, or nil when nothing is pending.
+func (m *streamSessionManager) brandReverseFuncs(sess *streamSession, format string) (func(map[string]any) bool, func(string, bool) []byte) {
+	if sess.client != "oh_my_pi" {
+		return func(data map[string]any) bool {
+				return m.reverseCloakedBrandStreamingMap(data, sess, format)
+			}, func(laneKey string, allBlocks bool) []byte {
+				return m.reverseFlushCloakedBrandLanes(sess, format, laneKey, allBlocks)
 			}
-			out.Write(ev)
-			continue
-		}
-		if format == "anthropic" {
-			if kind, laneKey := sseAnthropicTerminalKind(ev); kind != "" {
-				// The block is closing, so any partial token in its lanes is
-				// complete by now and must be flushed before the stop event.
-				if fe := m.reverseFlushCloakedBrandLanes(sess, format, laneKey, kind == "message_stop"); fe != nil {
-					out.Write(fe)
-					changedOverall = true
-				}
-			}
-		}
-		modified, changed := m.reverseCloakedBrandSingleSSEEvent(sess, ev, format)
-		if changed {
-			changedOverall = true
-		}
-		out.Write(modified)
 	}
-	return out.Bytes(), changedOverall
-}
-
-// reverseCloakedBrandSingleSSEEvent rewrites the text deltas of one SSE event.
-func (m *streamSessionManager) reverseCloakedBrandSingleSSEEvent(sess *streamSession, ev []byte, format string) ([]byte, bool) {
-	evStr := string(ev)
-	lines := strings.Split(strings.ReplaceAll(evStr, "\r\n", "\n"), "\n")
-	changed := false
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "data:") {
-			continue
+	applyEvent := func(data map[string]any) bool {
+		switch format {
+		case "openai":
+			return m.reverseBrandOpenAIStreamingMap(data, sess)
+		case "anthropic":
+			return m.reverseBrandAnthropicStreamingMap(data, sess)
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(trimmed, "data:"))
-		if payload == "" || payload == "[DONE]" {
-			continue
-		}
-		var dataMap map[string]any
-		if err := safeUnmarshal([]byte(payload), &dataMap); err != nil {
-			continue
-		}
-		if !m.reverseCloakedBrandStreamingMap(dataMap, sess, format) {
-			continue
-		}
-		newPayload, err := safeMarshal(dataMap)
-		if err == nil {
-			lines[i] = "data: " + string(newPayload)
-			changed = true
-		}
+		return false
 	}
-	if !changed {
-		return ev, false
+	flushLanes := func(laneKey string, allBlocks bool) []byte {
+		only := []string{laneKey}
+		if allBlocks {
+			only = nil
+		}
+		var out []byte
+		for _, fe := range m.generateBrandFlushEventsFiltered(sess, format, only) {
+			out = append(out, fe...)
+		}
+		return out
 	}
-	return rebuildSSEEvent(ev, lines, evStr), true
+	return applyEvent, flushLanes
 }
 
 // reverseCloakedBrandStreamingMap applies the reverse mappings to every text
@@ -2260,7 +2216,9 @@ func splitSSEEventsForBrand(data []byte) [][]byte {
 	return events
 }
 
-func (m *streamSessionManager) reverseBrandSingleSSEEvent(sess *streamSession, ev []byte, format string) ([]byte, bool) {
+// rewriteSSEEventData rewrites one SSE event by applying apply to every data
+// payload in it, rebuilding the frame only when something changed.
+func rewriteSSEEventData(ev []byte, apply func(map[string]any) bool) ([]byte, bool) {
 	evStr := string(ev)
 	lines := strings.Split(strings.ReplaceAll(evStr, "\r\n", "\n"), "\n")
 	changed := false
@@ -2277,18 +2235,13 @@ func (m *streamSessionManager) reverseBrandSingleSSEEvent(sess *streamSession, e
 		if err := safeUnmarshal([]byte(payload), &dataMap); err != nil {
 			continue
 		}
-		didChange := false
-		if format == "openai" {
-			didChange = m.reverseBrandOpenAIStreamingMap(dataMap, sess)
-		} else if format == "anthropic" {
-			didChange = m.reverseBrandAnthropicStreamingMap(dataMap, sess)
+		if !apply(dataMap) {
+			continue
 		}
-		if didChange {
-			newPayload, err := safeMarshal(dataMap)
-			if err == nil {
-				lines[i] = "data: " + string(newPayload)
-				changed = true
-			}
+		newPayload, err := safeMarshal(dataMap)
+		if err == nil {
+			lines[i] = "data: " + string(newPayload)
+			changed = true
 		}
 	}
 	if !changed {
