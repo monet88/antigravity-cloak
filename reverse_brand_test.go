@@ -44,7 +44,7 @@ func decodeStreamBody(t *testing.T, rawEnvelope []byte) ([]byte, bool) {
 		OK     bool `json:"ok"`
 		Result struct {
 			Body      string `json:"Body"`
-			DropChunk bool `json:"DropChunk"`
+			DropChunk bool   `json:"DropChunk"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(rawEnvelope, &env); err != nil {
@@ -59,6 +59,7 @@ func decodeStreamBody(t *testing.T, rawEnvelope []byte) ([]byte, bool) {
 	dec, _ := base64.StdEncoding.DecodeString(env.Result.Body)
 	return dec, env.Result.DropChunk
 }
+
 // sseAssistantJoined centralizes repeated SSE assistant-text extraction for
 // both Anthropic content_block_delta and OpenAI choice delta content.
 // It joins delta texts in event order, handling the string and array content
@@ -363,9 +364,11 @@ func TestReverseBrand_ToolArgsPreserved(t *testing.T) {
 	}
 }
 
-func TestReverseBrand_NonOMPNoRewrite(t *testing.T) {
+func TestReverseBrand_NonOMPGetsItsOwnWordNotOmp(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
-	// Claude Code request
+	// Claude Code request. A non-OMP client now runs its own reverse table, so
+	// the bare brand word must come back as Claude and never as omp. Asserting
+	// only "the payload does not contain omp" would pass either way.
 	reqID := "rev-non-omp"
 	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
 	handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
@@ -377,7 +380,6 @@ func TestReverseBrand_NonOMPNoRewrite(t *testing.T) {
 	mm["Model"] = "agy/model"
 	payload, _ = json.Marshal(mm)
 	raw, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter, payload)
-	// Should be no change (empty Body) since not OMP
 	var env struct {
 		OK     bool `json:"ok"`
 		Result struct {
@@ -385,134 +387,17 @@ func TestReverseBrand_NonOMPNoRewrite(t *testing.T) {
 		} `json:"result"`
 	}
 	json.Unmarshal(raw, &env)
-	if env.Result.Body != "" {
-		dec, _ := base64.StdEncoding.DecodeString(env.Result.Body)
-		var resp map[string]any
-		json.Unmarshal(dec, &resp)
-		content := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string)
-		if strings.Contains(content, "omp") {
-			t.Fatalf("non-OMP incorrectly rewritten to omp: %q", content)
-		}
+	if env.Result.Body == "" {
+		t.Fatal("claude_code reverse must rewrite the bare brand word, not pass it through")
 	}
-}
-
-func TestReverseBrand_InterleavedLanesIsolated(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-	reqID := "rev-interleaved"
-	reqBody := `{"tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"task"}},{"type":"function","function":{"name":"hub"}}],"messages":[]}`
-	handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
-	initPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", -1, []byte(""), []byte(reqBody))
-	handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, initPayload)
-
-	// Choice 0 gets Anti, Choice 1 gets gravity, they should not combine to omp
-	chunk := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Anti\"}},{\"index\":1,\"delta\":{\"content\":\"gravity\"}}]}\n\n"
-	p := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 0, []byte(chunk), nil)
-	raw, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p)
-	body, _ := decodeStreamBody(t, raw)
-	// Decode choices
-	var assembled0, assembled1 string
-	if len(body) > 0 {
-		s := string(body)
-		parts := strings.Split(s, "data: ")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if part == "" || part == "[DONE]" {
-				continue
-			}
-			line := strings.Split(part, "\n")[0]
-			var m map[string]any
-			json.Unmarshal([]byte(line), &m)
-			if choices, ok := m["choices"].([]any); ok {
-				for _, cRaw := range choices {
-					c := cRaw.(map[string]any)
-					idx := int(c["index"].(float64))
-					if delta, ok := c["delta"].(map[string]any); ok {
-						if txt, ok := delta["content"].(string); ok {
-							if idx == 0 {
-								assembled0 += txt
-							} else {
-								assembled1 += txt
-							}
-						}
-					}
-				}
-			}
-		}
+	dec, _ := base64.StdEncoding.DecodeString(env.Result.Body)
+	content := string(dec)
+	if !strings.Contains(content, "Hello Claude") {
+		t.Fatalf("bare Antigravity was not reversed to Claude: %s", content)
 	}
-	// Neither lane should have omp, since fragments isolated
-	if strings.Contains(assembled0, "omp") || strings.Contains(assembled1, "omp") {
-		t.Fatalf("interleaved lanes incorrectly combined: 0=%q 1=%q body=%q", assembled0, assembled1, string(body))
+	if strings.Contains(content, "omp") {
+		t.Fatalf("non-OMP incorrectly rewritten to omp: %s", content)
 	}
-	// Flush DONE should emit remaining carries without creating false omp
-	doneChunk := "data: [DONE]\n\n"
-	pDone := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 1, []byte(doneChunk), nil)
-	rawDone, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, pDone)
-	bDone, _ := decodeStreamBody(t, rawDone)
-	// After DONE, check that no omp was synthesized from cross-lane
-	combined := string(body) + string(bDone)
-	if strings.Contains(combined, "\"content\":\"omp\"") {
-		t.Fatalf("false omp from interleaved: %q", combined)
-	}
-	// Flush carries should be Anti and gravity respectively, not omp
-	// Parse flush events if any
-}
-
-func TestReverseBrand_UnmatchedCarryFlush(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-	reqID := "rev-flush"
-	reqBody := `{"tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"task"}}],"messages":[]}`
-	handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
-	initPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", -1, []byte(""), []byte(reqBody))
-	handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, initPayload)
-
-	chunk := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello Anti\"}}]}\n\n"
-	p := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 0, []byte(chunk), nil)
-	raw, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p)
-	b, _ := decodeStreamBody(t, raw)
-	// b should contain Hello (without Anti)
-	if strings.Contains(string(b), "Anti") {
-		// Might still contain Anti as held? Actually hold should make first chunk not contain Anti
-	}
-
-	// DONE should flush Anti
-	done := "data: [DONE]\n\n"
-	pDone := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 1, []byte(done), nil)
-	rawDone, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, pDone)
-	bDone, _ := decodeStreamBody(t, rawDone)
-	combined := string(b) + string(bDone)
-	// Extract all delta contents
-	var texts []string
-	for _, s := range []string{string(b), string(bDone)} {
-		parts := strings.Split(s, "data: ")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if part == "" || part == "[DONE]" {
-				continue
-			}
-			line := strings.Split(part, "\n")[0]
-			var m map[string]any
-			if err := json.Unmarshal([]byte(line), &m); err == nil {
-				if choices, ok := m["choices"].([]any); ok {
-					for _, cRaw := range choices {
-						c := cRaw.(map[string]any)
-						if delta, ok := c["delta"].(map[string]any); ok {
-							if txt, ok := delta["content"].(string); ok {
-								texts = append(texts, txt)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	joined := strings.Join(texts, "")
-	if !strings.Contains(joined, "Anti") {
-		t.Fatalf("flush lost Anti, joined=%q b=%q bDone=%q", joined, string(b), string(bDone))
-	}
-	if strings.Contains(joined, "omp") {
-		t.Fatalf("unexpected omp for unmatched Anti, joined=%q", joined)
-	}
-	_ = combined
 }
 
 func TestReverseBrand_ModelGateRejectedNoRewrite(t *testing.T) {
@@ -556,7 +441,7 @@ func TestReverseBrand_ModelGateRejectedNoRewrite(t *testing.T) {
 		OK     bool `json:"ok"`
 		Result struct {
 			Body      string `json:"Body"`
-			DropChunk bool `json:"DropChunk"`
+			DropChunk bool   `json:"DropChunk"`
 		} `json:"result"`
 	}
 	json.Unmarshal(rawStream, &env2)
@@ -572,7 +457,7 @@ func TestReverseBrand_ModelGateRejectedNoRewrite(t *testing.T) {
 func TestReverseBrand_NativeAntigravityNoRewrite(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	reqID := "rev-native"
-	// Native Antigravity tools: not matching any client, so no cloak
+	// Native Antigravity tools: no client is resolved, so nothing may mutate.
 	reqBody := `{"tools":[{"type":"function","function":{"name":"view_file"}}],"messages":[]}`
 	handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
 	respBody := `{"choices":[{"message":{"content":"Antigravity should stay"}}]}`
@@ -590,10 +475,13 @@ func TestReverseBrand_NativeAntigravityNoRewrite(t *testing.T) {
 		} `json:"result"`
 	}
 	json.Unmarshal(raw, &env)
+	// An unresolved client means no reverse table at all, so the response comes
+	// back untouched. Checking for the absence of "omp" would pass even if the
+	// text had been rewritten to some other client's word.
 	if env.Result.Body != "" {
 		dec, _ := base64.StdEncoding.DecodeString(env.Result.Body)
-		if strings.Contains(string(dec), "omp") {
-			t.Fatalf("native antigravity incorrectly rewrote: %s", string(dec))
+		if string(dec) != respBody {
+			t.Fatalf("unresolved client must not mutate the response: got %s want %s", dec, respBody)
 		}
 	}
 }

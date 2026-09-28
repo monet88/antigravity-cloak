@@ -8,13 +8,18 @@ import (
 )
 
 // Claude Code sends brand text that the forward rewrite renames onto Antigravity
-// wording. Tool NAMES and brand TEXT are then on two different contracts:
+// wording. Tool NAMES and this particular brand TEXT are on two different
+// contracts:
 //
 //   - a tool name must come back exactly as the client spelled it, or the
 //     client cannot dispatch a call it was told about;
-//   - brand text is renamed for the model's benefit and is never mapped back.
-//     Mapping it back would hand the client "CLAUDE.md" for a file the model
-//     was legitimately told is called AGENTS.md.
+//   - the project instruction file is one-way on purpose: CLAUDE.md becomes
+//     AGENTS.md and is not mapped back, because AGENTS.md is what the model was
+//     legitimately told the file is called. Reversing it would hand the client a
+//     filename that does not exist in the conversation the model was given.
+//
+// Other claude_code brand tokens DO reverse (see claudeCodeReverseBrandMappings);
+// this test pins only the deliberate asymmetry.
 //
 // This pins both halves: the asymmetry is deliberate and easy to break by
 // someone adding a symmetric reverse rule.

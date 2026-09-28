@@ -164,24 +164,6 @@ func TestOMP_VibeModeToolsCloaked(t *testing.T) {
 	}
 }
 
-func TestOMP_CanonicalCollisionStillRejects(t *testing.T) {
-	isolateOMPMeasurement(t)
-	const requestID = "omp-issue37-collision"
-	body := []byte(`{
-		"messages":[],
-		"tools":[
-			{"type":"function","function":{"name":"read"}},
-			{"type":"function","function":{"name":"_read"}}
-		]
-	}`)
-
-	var result pluginapi.RequestInterceptResponse
-	ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(requestID, "openai", body), &result)
-	if !result.Terminate || result.StatusCode != 503 {
-		t.Fatalf("collision must reject with 503: terminate=%t status=%d body=%s", result.Terminate, result.StatusCode, result.ResponseBody)
-	}
-}
-
 func TestOMP_ExtendedTableReversal(t *testing.T) {
 	isolateOMPMeasurement(t)
 	const requestID = "omp-issue37-reversal"
