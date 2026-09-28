@@ -1898,31 +1898,48 @@ func TestReplaceInsensitiveWordBoundaries(t *testing.T) {
 	}
 }
 
-func TestReplaceBrandKeywordSkipsPathSegments(t *testing.T) {
+func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 	applyFilterConfig(filterConfig{
 		UseDefaultKeywords: true,
 		ToolMappings:       copyToolMappings(defaultCloakTables),
 	})
 	defer restoreDefaultFilterConfig(t)
 
-	// Windows OMP config dir path must survive the forward brand rewrite.
-	if got, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"agent config is at C:\\Users\\monet\\.omp\\agent"}`), "openai", "oh_my_pi"); changed {
-		t.Fatalf("windows .omp path must not be rewritten: body=%s", got)
+	// Every supported client's home directory is an operational identifier, so
+	// it is remapped onto the Antigravity equivalent instead of the brand word:
+	// a dead .Antigravity path is worse than a path that exists upstream.
+	for _, tc := range []struct {
+		name   string
+		client string
+		in     string
+		want   string
+	}{
+		{"claude unix", "claude_code", `{"system":"at /home/u/.claude/scheduled_tasks.json"}`, "/home/u/.gemini/scheduled_tasks.json"},
+		{"claude windows", "claude_code", `{"system":"at C:\\Users\\u\\.claude\\settings.json"}`, `C:\\Users\\u\\.gemini\\settings.json`},
+		{"codex unix", "codex", `{"system":"at /home/u/.codex/config.toml"}`, "/home/u/.gemini/config.toml"},
+		{"codex windows", "codex", `{"system":"at C:\\Users\\u\\.codex\\config.toml"}`, `C:\\Users\\u\\.gemini\\config.toml`},
+		{"omp unix", "oh_my_pi", `{"system":"at /home/u/.omp/agent"}`, "/home/u/.gemini/agent"},
+		{"omp windows", "oh_my_pi", `{"system":"at C:\\Users\\u\\.omp\\agent"}`, `C:\\Users\\u\\.gemini\\agent`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, changed, _ := rewriteRequestBodyWithClient([]byte(tc.in), "openai", tc.client)
+			if !changed {
+				t.Fatalf("path was not rewritten: %s", got)
+			}
+			if !strings.Contains(string(got), tc.want) {
+				t.Fatalf("got %s, want %s", got, tc.want)
+			}
+		})
 	}
-	// Unix-style path form survives too.
-	if _, c, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.omp"}`), "openai", "oh_my_pi"); c {
-		t.Fatalf("unix .omp path must not be rewritten")
-	}
-	if _, c, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.omp/agent"}`), "openai", "oh_my_pi"); c {
-		t.Fatalf("unix .omp/agent path must not be rewritten")
-	}
-	// Bare brand mention is still masked.
+
+	// Bare brand mentions are still masked.
 	b, bc, _ := rewriteRequestBodyWithClient([]byte(`{"system":"You are omp."}`), "openai", "oh_my_pi")
 	if !bc || !strings.Contains(string(b), "Antigravity.") {
 		t.Fatalf("bare omp brand must still be masked: changed=%v body=%s", bc, b)
 	}
 
-	// Non-dot path delimiters like /omp/ and \omp\ MUST be masked to Antigravity (OMP-only dot prefix scope).
+	// Non-dot delimiters like /omp/ and \omp\ MUST be masked to Antigravity: the
+	// remap is scoped to a literal dot-prefixed path segment.
 	bSlash, bcSlash, _ := rewriteRequestBodyWithClient([]byte(`{"system":"binary at /omp/agent"}`), "openai", "oh_my_pi")
 	if !bcSlash || !strings.Contains(string(bSlash), "/Antigravity/agent") {
 		t.Fatalf("/omp/ must be masked to Antigravity: changed=%v body=%s", bcSlash, bSlash)
@@ -1932,13 +1949,14 @@ func TestReplaceBrandKeywordSkipsPathSegments(t *testing.T) {
 		t.Fatalf(`\omp\ must be masked to Antigravity: changed=%v body=%s`, bcBackslash, bBackslash)
 	}
 
-	// Other clients/brands preceded by a dot are not skipped.
+	// Other dot-prefixed brands are not in the remap table, so they mask.
 	bOther, bcOther, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.oh-my-pi"}`), "openai", "oh_my_pi")
 	if !bcOther || !strings.Contains(string(bOther), "/home/user/.Antigravity") {
 		t.Fatalf(".oh-my-pi must be masked to Antigravity: changed=%v body=%s", bcOther, bOther)
 	}
 
-	// Only the exact .omp path segment is exempt; lookalike segments/files still mask the brand.
+	// Only an exact path segment is remapped; lookalike segments and files with
+	// a different leading name still mask the brand.
 	bSuffix, bcSuffix, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.omp-backup/agent"}`), "openai", "oh_my_pi")
 	if !bcSuffix || !strings.Contains(string(bSuffix), "/home/user/.Antigravity-backup/agent") {
 		t.Fatalf(".omp-backup must be masked to Antigravity: changed=%v body=%s", bcSuffix, bSuffix)

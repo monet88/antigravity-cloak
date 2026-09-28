@@ -209,7 +209,7 @@ func TestStreamingReverseFlushesCarryAtStreamEnd(t *testing.T) {
 	if !strings.Contains(text, "I read") {
 		t.Fatalf("text before the held token was lost: %s", joined)
 	}
-	if !strings.Contains(text, "~/.gemini/GEM") {
+	if !strings.Contains(text, "~/.claude/GEM") {
 		t.Fatalf("held token was dropped at stream end instead of flushed: %s", joined)
 	}
 }
@@ -256,13 +256,12 @@ func TestVendorAndSchemaAndPluralGapsAreClosed(t *testing.T) {
 	if !strings.Contains(back, "Anthropic") {
 		t.Fatalf("vendor name not restored to the client spelling: %s", back)
 	}
-	// The .gemini directory remap is deliberately forward-only. ~/.gemini is
-	// the real Antigravity app-data directory, so mapping it back to ~/.claude
-	// would send the client after a directory that does not exist, and would
-	// corrupt every legitimate reference to the Antigravity install. This is
-	// the same exception that keeps the repo's AGENTS.md untouched.
-	if !strings.Contains(back, ".gemini/scheduled_tasks.json") {
-		t.Fatalf("the .gemini directory must not be mapped back: %s", back)
+	// The home-directory remap is client-scoped in BOTH directions: this
+	// request only ever produced .gemini because the client's own .claude was
+	// remapped forward, so handing back a .gemini path would point the client
+	// at a directory that does not exist on its machine.
+	if !strings.Contains(back, ".claude/scheduled_tasks.json") {
+		t.Fatalf("the .gemini home directory was not mapped back to the client spelling: %s", back)
 	}
 }
 

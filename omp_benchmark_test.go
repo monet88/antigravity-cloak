@@ -26,7 +26,7 @@ func ompSizedRequest(tb testing.TB, format string, size int, textHeavy bool) []b
 	tools := make([]any, 0, len(names))
 	for _, name := range names {
 		definition := map[string]any{
-			"name": name, "description": "Oh My Pi tool " + name + ". Keep /workspace/.omp/agent paths intact. " + strings.Repeat("Tool documentation. ", 4),
+			"name": name, "description": "Oh My Pi tool " + name + ". Reads /workspace/.omp/agent config. " + strings.Repeat("Tool documentation. ", 4),
 		}
 		schema := map[string]any{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string"}}}
 		if format == "openai" {
@@ -38,7 +38,7 @@ func ompSizedRequest(tb testing.TB, format string, size int, textHeavy bool) []b
 		}
 	}
 	root := map[string]any{"tools": tools, "stream": true, "n": 2}
-	system := "You are Oh My Pi. Use bash and read. Keep /workspace/.omp/agent and C:\\Users\\agent\\.omp\\agent intact."
+	system := "You are Oh My Pi. Use bash and read. Config lives at /workspace/.omp/agent and C:\\Users\\agent\\.omp\\agent."
 	systemMessage := map[string]any{"role": "system", "content": system}
 	var messages []any
 	if format == "openai" {
@@ -152,8 +152,8 @@ func TestOMPMeasurementFixtures(t *testing.T) {
 				if len(route.activeReverse) != 9 || route.activeReverse["run_command"] != "bash" || route.expected != 2 || !route.cachedUncloak.exactOnly {
 					t.Fatal("fixture lost canonical request authority or choice count")
 				}
-				if !bytes.Contains(admitted.Body, []byte("Antigravity")) || !bytes.Contains(admitted.Body, []byte(".omp/agent")) {
-					t.Fatalf("fixture lost brand rewrite or preserved path: format=%s size=%d textHeavy=%t", format, size, textHeavy)
+				if !bytes.Contains(admitted.Body, []byte("Antigravity")) || !bytes.Contains(admitted.Body, []byte(".gemini/agent")) {
+					t.Fatalf("fixture lost brand rewrite or the remapped home path: format=%s size=%d textHeavy=%t", format, size, textHeavy)
 				}
 			}
 		}

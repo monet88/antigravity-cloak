@@ -1056,6 +1056,27 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 	rewriteProtectedBrand(rootMap, format, "oh_my_pi")
 	sanitizeProtectedSystemConventions(rootMap)
 
+	// Machine-generated prose has to name the request-scoped aliases, not the
+	// client's own tool names. extendedCloak IS the effective declaration map
+	// for this request: canonical, shared (wp_*) and the deterministic
+	// wp_ext_<hash> fallbacks, so a tool description that says "hub" reaches
+	// the model as its alias and the OMP source identity never appears in a
+	// system/developer/tool-description surface (Issue #51). Brand mappings
+	// are omitted: that pass already ran, and the alias-plan clients run it
+	// the same way.
+	proseCloak := &cachedCloakPatterns{
+		cloakTable: extendedCloak,
+		identRe:    buildCloakIdentRe(extendedCloak),
+		ambigRe:    buildCloakAmbiguousRe(extendedCloak),
+	}
+	rewriteToolDescriptions(rootMap, nil, proseCloak, format)
+	rewriteConversationContent(rootMap, nil, proseCloak)
+	if sysVal, ok := rootMap["system"]; ok {
+		if next, c := replaceToolNamesInValue(sysVal, proseCloak); c {
+			rootMap["system"] = next
+		}
+	}
+
 	uncloakedSources := make(map[string]bool)
 	for k := range canonicalOMPSafeMappingSet {
 		uncloakedSources[k] = true
@@ -1778,22 +1799,22 @@ func reverseAssistantBrandInJSON(root any, format, client string) bool {
 			if !ok {
 				continue
 			}
-			if msg, ok := ch["message"].(map[string]any); ok {
-				if content, exists := msg["content"]; exists {
-					if next, c := reverseBrandInOpenAIContent(content, client); c {
-						msg["content"] = next
-						changed = true
-					}
+			msg, _ := ch["message"].(map[string]any)
+			if content, exists := msg["content"]; exists {
+				if next, c := reverseBrandInOpenAIContent(content, client); c {
+					msg["content"] = next
+					changed = true
 				}
 			}
-			if delta, ok := ch["delta"].(map[string]any); ok {
-				if content, exists := delta["content"]; exists {
-					if next, c := reverseBrandInOpenAIContent(content, client); c {
-						delta["content"] = next
-						changed = true
-					}
+			delta, _ := ch["delta"].(map[string]any)
+			if content, exists := delta["content"]; exists {
+				if next, c := reverseBrandInOpenAIContent(content, client); c {
+					delta["content"] = next
+					changed = true
 				}
 			}
+			changed = reverseBrandInToolCallArguments(msg, client) || changed
+			changed = reverseBrandInToolCallArguments(delta, client) || changed
 		}
 	case "anthropic":
 		m, ok := root.(map[string]any)
@@ -1809,15 +1830,49 @@ func reverseAssistantBrandInJSON(root any, format, client string) bool {
 			if !ok {
 				continue
 			}
-			if block["type"] != "text" {
-				continue
-			}
-			if txt, ok := block["text"].(string); ok {
-				if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
-					block["text"] = next
-					changed = true
+			switch block["type"] {
+			case "text":
+				if txt, ok := block["text"].(string); ok {
+					if next, c := replaceInsensitiveSetWithPrev(txt, false, brandReverseTableFor(client)); c {
+						block["text"] = next
+						changed = true
+					}
+				}
+			case "tool_use":
+				// The non-stream twin of the streamed partial_json: a model that
+				// writes a cloaked path into a file hands the client a path that
+				// does not exist, so the arguments are reversed here exactly as
+				// the stream path reverses them.
+				if input, ok := block["input"]; ok {
+					if next, c := rewriteSystemValue(input, brandReverseTableFor(client)); c {
+						block["input"] = next
+						changed = true
+					}
 				}
 			}
+		}
+	}
+	return changed
+}
+
+// reverseBrandInToolCallArguments is the non-stream twin of the streamed
+// choices[].delta.tool_calls[].function.arguments handling: the arguments are
+// a JSON string, so they are reversed as text, the same way the stream path
+// treats a fragment.
+func reverseBrandInToolCallArguments(holder map[string]any, client string) bool {
+	changed := false
+	for _, callRaw := range sliceOfMaps(holder["tool_calls"]) {
+		fn, _ := callRaw["function"].(map[string]any)
+		if fn == nil {
+			continue
+		}
+		args, ok := fn["arguments"].(string)
+		if !ok {
+			continue
+		}
+		if next, c := replaceInsensitiveSetWithPrev(args, false, brandReverseTableFor(client)); c {
+			fn["arguments"] = next
+			changed = true
 		}
 	}
 	return changed
@@ -2102,7 +2157,9 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 			// plain strings, the same way uncloakStreamChunkExact already treats
 			// tool names inside them — JSON-escaped, which is why the path rules
 			// in the reverse tables also carry their escaped spelling.
-			apply(delta, "partial_json", laneKey)
+			// Its own lane, not the block's: prose and arguments are different
+			// carriers, so a carry held in one must never flush through the other.
+			apply(delta, "partial_json", toolArgsLaneKey(laneKey))
 		}
 		return changed
 	}
@@ -2122,15 +2179,106 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 		laneKey := openAIChoiceLaneKey(choice)
 		if delta, ok := choice["delta"].(map[string]any); ok {
 			apply(delta, "content", laneKey)
+			// Chat Completions streams tool-call arguments as
+			// choices[].delta.tool_calls[].function.arguments, the carrier
+			// Anthropic calls partial_json. They carry the same text, so
+			// reversing one and not the other left a .gemini path or an
+			// antigravity.google URL inside the arguments of every
+			// OpenAI-compatible client. Each call gets its own lane, because
+			// one choice streams several calls' fragments side by side and a
+			// shared lane would interleave them.
+			for _, tRaw := range sliceOfMaps(delta["tool_calls"]) {
+				fn, _ := tRaw["function"].(map[string]any)
+				if fn == nil {
+					continue
+				}
+				apply(fn, "arguments", openAIToolCallLaneKey(choice, tRaw))
+			}
 		}
 		// The final standalone chunk of some providers carries the whole turn as
 		// a message instead of a delta, the same shape the Oh My Pi applier
 		// already accepts.
 		if msg, ok := choice["message"].(map[string]any); ok {
 			apply(msg, "content", laneKey)
+			for _, tRaw := range sliceOfMaps(msg["tool_calls"]) {
+				fn, _ := tRaw["function"].(map[string]any)
+				if fn == nil {
+					continue
+				}
+				apply(fn, "arguments", openAIToolCallLaneKey(choice, tRaw))
+			}
 		}
 	}
 	return changed
+}
+
+// toolArgsLaneParts splits a tool-argument lane key back into the content block
+// or choice it belongs to and the argument index within it. It reports false
+// for an ordinary prose lane.
+//
+// This is also THE rule for delivering a recovered carry: every flush and every
+// standalone merge routes through it, so a held argument fragment always goes
+// back as an input_json_delta or a tool_call argument, never as assistant
+// text. Sending it through the text carrier would print the recovered bytes in
+// the message and leave the call truncated.
+func toolArgsLaneParts(laneKey string) (blockLaneKey string, argIndex int, ok bool) {
+	i := strings.Index(laneKey, reverseBrandLaneSuffix)
+	if i < 0 {
+		return laneKey, 0, false
+	}
+	blockLaneKey = laneKey[:i]
+	tail := laneKey[i+len(reverseBrandLaneSuffix):]
+	// The third part of the key is the per-mapping lane the reverse table runs
+	// in; only the marker just behind the suffix names the carrier.
+	if j := strings.Index(tail, reverseBrandLaneSuffix); j >= 0 {
+		tail = tail[:j]
+	}
+	switch {
+	case tail == toolArgsLaneMarker:
+		return blockLaneKey, 0, true
+	case strings.HasPrefix(tail, "tool"):
+		n, err := strconv.Atoi(strings.TrimPrefix(tail, "tool"))
+		if err != nil {
+			return blockLaneKey, 0, false
+		}
+		return blockLaneKey, n, true
+	}
+	return blockLaneKey, 0, false
+}
+
+// sliceOfMaps returns the []any members of raw that are objects, so a
+// malformed or absent field is skipped instead of panicking.
+func sliceOfMaps(raw any) []map[string]any {
+	items, _ := raw.([]any)
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if m, ok := item.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// toolArgsLaneMarker names the lane that carries a content block's streamed
+// tool-call ARGUMENTS, as opposed to its prose. The two are different fields of
+// the same event, so they need different lanes and different flush carriers.
+const toolArgsLaneMarker = "args"
+
+// toolArgsLaneKey is the arguments lane of one content block.
+func toolArgsLaneKey(blockLaneKey string) string {
+	return blockLaneKey + reverseBrandLaneSuffix + toolArgsLaneMarker
+}
+
+// openAIToolCallLaneKey derives the brand lane key for one streamed tool call:
+// the choice it belongs to plus the call's own index after the lane suffix, so
+// two calls of the same choice never share a carry and the flush event still
+// reports the choice index the client dispatches on.
+func openAIToolCallLaneKey(choice, toolCall map[string]any) string {
+	idx := 0
+	if n, ok := jsonIndexValue(toolCall["index"]); ok {
+		idx = n
+	}
+	return openAIChoiceLaneKey(choice) + reverseBrandLaneSuffix + "tool" + strconv.Itoa(idx)
 }
 
 // reverseFlushCloakedBrandLanes emits whatever a content block's lanes still
@@ -2151,7 +2299,7 @@ func (m *streamSessionManager) reverseFlushCloakedBrandLanes(sess *streamSession
 		if lane == nil || lane.carry == "" {
 			continue
 		}
-		text := resolveCarry(lane.carry, lane.lastIsWord, table)
+		text, _ := replaceInsensitiveSetWithPrev(lane.carry, lane.lastIsWord, table)
 		lane.carry = ""
 		lane.lastIsWord = false
 		if text == "" {
@@ -2165,31 +2313,63 @@ func (m *streamSessionManager) reverseFlushCloakedBrandLanes(sess *streamSession
 // buildBrandFlushEvent encodes one flushed lane as the protocol's terminal text
 // delta, carrying the lane index so the client attaches the recovered text to
 // the content block (Anthropic) or choice (OpenAI) the held bytes came from.
-// The frame is a bare `data:` event, the same shape the Oh My Pi flush emits —
-// an SSE client dispatches on the payload's `type`, so the `event:` field is
-// redundant. Returns nil for a format with no text-delta encoding.
+// An Anthropic flush is a real SSE event frame, `event:` plus `data:`, because
+// that is how the Anthropic Messages stream itself frames every event: a
+// client that dispatches on the SSE event name and never parses the payload
+// would otherwise never deliver the recovered text. Returns nil for a format
+// with no text-delta encoding.
 func buildBrandFlushEvent(format, laneKey, text string) []byte {
-	idx, _ := laneIndexNum(laneKey)
-	var payload []byte
-	var err error
+	var frame string
 	switch format {
 	case "anthropic":
-		payload, err = safeMarshal(map[string]any{
+		payload, err := safeMarshal(map[string]any{
 			"type":  "content_block_delta",
-			"index": idx,
-			"delta": map[string]any{"type": "text_delta", "text": text},
+			"index": laneIndexNumOrZero(laneKey),
+			"delta": anthropicFlushDelta(laneKey, text),
 		})
+		if err != nil {
+			return nil
+		}
+		frame = "event: content_block_delta\ndata: " + string(payload) + "\n\n"
 	case "openai":
-		payload, err = safeMarshal(map[string]any{
-			"choices": []any{map[string]any{"index": idx, "delta": map[string]any{"content": text}}},
+		payload, err := safeMarshal(map[string]any{
+			"choices": []any{map[string]any{"index": laneIndexNumOrZero(laneKey), "delta": openAIChoiceDelta(laneKey, text)}},
 		})
+		if err != nil {
+			return nil
+		}
+		frame = "data: " + string(payload) + "\n\n"
 	default:
 		return nil
 	}
-	if err != nil {
-		return nil
+	return []byte(frame)
+}
+
+// anthropicFlushDelta picks the carrier toolArgsLaneParts identified.
+func anthropicFlushDelta(laneKey, text string) map[string]any {
+	if _, _, isArgs := toolArgsLaneParts(laneKey); isArgs {
+		return map[string]any{"type": "input_json_delta", "partial_json": text}
 	}
-	return []byte("data: " + string(payload) + "\n\n")
+	return map[string]any{"type": "text_delta", "text": text}
+}
+
+// openAIChoiceDelta picks the carrier toolArgsLaneParts identified.
+func openAIChoiceDelta(laneKey, text string) map[string]any {
+	_, argIndex, isArgs := toolArgsLaneParts(laneKey)
+	if !isArgs {
+		return map[string]any{"content": text}
+	}
+	return map[string]any{"tool_calls": []any{map[string]any{
+		"index":    argIndex,
+		"function": map[string]any{"arguments": text},
+	}}}
+}
+
+// laneIndexNumOrZero is laneIndexNum with the unparsable-key case pinned to
+// lane 0, so a flush never silently drops a block's recovered text.
+func laneIndexNumOrZero(laneKey string) int {
+	idx, _ := laneIndexNum(laneKey)
+	return idx
 }
 
 func splitSSEEventsForBrand(data []byte) [][]byte {
@@ -2304,7 +2484,7 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 		if content, exists := delta["content"]; exists {
 			switch v := content.(type) {
 			case string:
-				newStr, _ := applyBrandLane(v, lane, reverseBrandMatch, reverseBrandReplacement)
+				newStr, _ := applyBrandLaneSet(v, lane, ompProtectedReverseTable)
 				if newStr != v {
 					delta["content"] = newStr
 					changed = true
@@ -2317,14 +2497,14 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 							continue
 						}
 						if txt, ok := part["text"].(string); ok {
-							newTxt, _ := applyBrandLane(txt, lane, reverseBrandMatch, reverseBrandReplacement)
+							newTxt, _ := applyBrandLaneSet(txt, lane, ompProtectedReverseTable)
 							if newTxt != txt {
 								part["text"] = newTxt
 								c2 = true
 							}
 						}
 					} else if s, ok := partRaw.(string); ok {
-						newStr, _ := applyBrandLane(s, lane, reverseBrandMatch, reverseBrandReplacement)
+						newStr, _ := applyBrandLaneSet(s, lane, ompProtectedReverseTable)
 						if newStr != s {
 							for i, elem := range v {
 								if elem == partRaw {
@@ -2342,7 +2522,7 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 			case map[string]any:
 				if typ, _ := v["type"].(string); isAssistantTextPartType(typ) {
 					if txt, ok := v["text"].(string); ok {
-						newTxt, _ := applyBrandLane(txt, lane, reverseBrandMatch, reverseBrandReplacement)
+						newTxt, _ := applyBrandLaneSet(txt, lane, ompProtectedReverseTable)
 						if newTxt != txt {
 							v["text"] = newTxt
 							changed = true
@@ -2384,7 +2564,7 @@ func (m *streamSessionManager) reverseBrandAnthropicStreamingMap(data map[string
 			return false
 		}
 		if txt, ok := cb["text"].(string); ok {
-			newTxt, _ := applyBrandLane(txt, lane, reverseBrandMatch, reverseBrandReplacement)
+			newTxt, _ := applyBrandLaneSet(txt, lane, ompProtectedReverseTable)
 			if newTxt != txt {
 				cb["text"] = newTxt
 				return true
@@ -2399,7 +2579,7 @@ func (m *streamSessionManager) reverseBrandAnthropicStreamingMap(data map[string
 			return false
 		}
 		if txt, ok := delta["text"].(string); ok {
-			newTxt, _ := applyBrandLane(txt, lane, reverseBrandMatch, reverseBrandReplacement)
+			newTxt, _ := applyBrandLaneSet(txt, lane, ompProtectedReverseTable)
 			if newTxt != txt {
 				delta["text"] = newTxt
 				return true
@@ -2409,7 +2589,7 @@ func (m *streamSessionManager) reverseBrandAnthropicStreamingMap(data map[string
 		if delta, ok := data["delta"].(map[string]any); ok {
 			if delta["type"] == "text_delta" {
 				if txt, ok := delta["text"].(string); ok {
-					newTxt, _ := applyBrandLane(txt, lane, reverseBrandMatch, reverseBrandReplacement)
+					newTxt, _ := applyBrandLaneSet(txt, lane, ompProtectedReverseTable)
 					if newTxt != txt {
 						delta["text"] = newTxt
 						return true
@@ -2448,10 +2628,15 @@ func laneIndexNum(key string) (int, bool) {
 }
 
 // sortedCarryKeys returns the key of every lane holding a non-empty carry, in
-// deterministic lane order: numeric lane indices ascending, non-numeric lanes
-// last, tie-broken by key. Go map iteration would otherwise randomise the
-// cross-lane flush sequence; Issue #18 requires stable event/lane ordering
-// while keeping distinct indexed lanes isolated.
+// deterministic lane order: numeric lane indices ascending, then the order the
+// lanes were opened. Go map iteration would otherwise randomise the cross-lane
+// flush sequence; Issue #18 requires stable event/lane ordering while keeping
+// distinct indexed lanes isolated.
+//
+// Lanes of the SAME content block are ordered by brandLane.seq, the order their
+// text arrived in. Tie-breaking those by key string instead made the flush
+// order follow reverse-table declaration order, so two held tokens from one
+// block could reach the client transposed (Issue #48).
 func sortedCarryKeys(sess *streamSession) []string {
 	keys := make([]string, 0, len(sess.brandCarries))
 	for k, lane := range sess.brandCarries {
@@ -2469,21 +2654,13 @@ func sortedCarryKeys(sess *streamSession) []string {
 		if ni != nj {
 			return ni < nj
 		}
+		si, sj := sess.brandCarries[keys[i]].seq, sess.brandCarries[keys[j]].seq
+		if si != sj {
+			return si < sj
+		}
 		return keys[i] < keys[j]
 	})
 	return keys
-}
-
-// resolveCarry runs one held carry through the whole reverse table in its
-// declared order, so a token held open by a longer rule ("Antigravity" held by
-// the "Antigravity-api" lane, waiting for a suffix that never arrived) still
-// comes back as the shorter rule's replacement. The character before the carry
-// never changes, so it bounds the first match of every rule.
-func resolveCarry(carry string, prevIsWord bool, table []rewriteMapping) string {
-	for _, mm := range table {
-		carry, _ = replaceInsensitiveWithPrev(carry, prevIsWord, mm.Match, mm.Replacement)
-	}
-	return carry
 }
 
 // orderedBrandFlushes resolves the final text of every held carry in
@@ -2494,7 +2671,7 @@ func orderedBrandFlushes(sess *streamSession, table []rewriteMapping) []brandFlu
 	flushes := make([]brandFlush, 0, len(keys))
 	for _, k := range keys {
 		lane := sess.brandCarries[k]
-		text := resolveCarry(lane.carry, lane.lastIsWord, table)
+		text, _ := replaceInsensitiveSetWithPrev(lane.carry, lane.lastIsWord, table)
 		if text == "" {
 			continue
 		}
@@ -2812,25 +2989,16 @@ func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []
 			if t, _ := root["type"].(string); t == "message_stop" || t == "content_block_stop" {
 				if len(flushes) > 0 {
 					var buf bytes.Buffer
-					for i, f := range flushes {
-						idx, _ := laneIndexNum(f.key)
-						dataMap := map[string]any{
-							"type":  "content_block_delta",
-							"index": idx,
-							"delta": map[string]any{
-								"type": "text_delta",
-								"text": f.text,
-							},
+					for _, f := range flushes {
+						ev := buildBrandFlushEvent("anthropic", f.key, f.text)
+						if ev == nil {
+							continue
 						}
-						jb, _ := safeMarshal(dataMap)
-						if i > 0 {
-							buf.WriteString("\n\n")
-						}
-						buf.WriteString("data: ")
-						buf.Write(jb)
+						buf.Write(ev)
 					}
-					buf.WriteString("\n\ndata: ")
+					buf.WriteString("data: ")
 					buf.Write(trimmed)
+					buf.WriteString("\n\n")
 					drainBrandFlushes(sess, flushes)
 					return buf.Bytes(), true
 				}
@@ -2854,10 +3022,7 @@ func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []
 func mergeOpenAIStandaloneFlush(root map[string]any, flushes []brandFlush) bool {
 	choices, _ := root["choices"].([]any)
 	for _, f := range flushes {
-		idx, ok := laneIndexNum(f.key)
-		if !ok {
-			idx = 0
-		}
+		idx := laneIndexNumOrZero(f.key)
 		target := openAIChoiceAt(choices, idx)
 		if target == nil {
 			target = map[string]any{"index": idx}
@@ -2872,14 +3037,54 @@ func mergeOpenAIStandaloneFlush(root map[string]any, flushes []brandFlush) bool 
 				target["delta"] = delta
 			}
 		}
+		appendBrandFlushToChoice(delta, f)
+	}
+	root["choices"] = choices
+	return true
+}
+
+// appendBrandFlushToChoice merges one recovered carry into a choice's delta,
+// through the carrier toolArgsLaneParts identified.
+func appendBrandFlushToChoice(delta map[string]any, f brandFlush) {
+	_, argIndex, isArgs := toolArgsLaneParts(f.key)
+	if !isArgs {
 		if s, ok := delta["content"].(string); ok {
 			delta["content"] = s + f.text
 		} else {
 			delta["content"] = f.text
 		}
+		return
 	}
-	root["choices"] = choices
-	return true
+	calls, fn := openAIToolCallAt(delta["tool_calls"], argIndex)
+	delta["tool_calls"] = calls
+	if s, ok := fn["arguments"].(string); ok {
+		fn["arguments"] = s + f.text
+	} else {
+		fn["arguments"] = f.text
+	}
+}
+
+// openAIToolCallAt returns the streamed tool call at idx as it now is in raw,
+// creating it when the chunk has not declared it yet. The possibly grown
+// slice is returned so the caller can write it back.
+func openAIToolCallAt(raw any, idx int) ([]any, map[string]any) {
+	calls, _ := raw.([]any)
+	for _, cRaw := range calls {
+		call, ok := cRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if n, ok := jsonIndexValue(call["index"]); ok && n == idx {
+			fn, ok := call["function"].(map[string]any)
+			if !ok {
+				fn = map[string]any{}
+				call["function"] = fn
+			}
+			return calls, fn
+		}
+	}
+	fn := map[string]any{}
+	return append(calls, map[string]any{"index": idx, "function": fn}), fn
 }
 
 func openAIChoiceAt(choices []any, idx int) map[string]any {
@@ -2919,6 +3124,14 @@ func mergeAnthropicStandaloneFlush(root map[string]any, flushes []brandFlush) bo
 	delta, ok := root["delta"].(map[string]any)
 	if !ok {
 		return false
+	}
+	if _, _, isArgs := toolArgsLaneParts(flushes[0].key); isArgs {
+		if s, ok := delta["partial_json"].(string); ok {
+			delta["partial_json"] = s + flushes[0].text
+		} else {
+			delta["partial_json"] = flushes[0].text
+		}
+		return true
 	}
 	txt, ok := delta["text"].(string)
 	if !ok {
@@ -2997,6 +3210,11 @@ func (m *streamSessionManager) reverseBrandStandalone(sess *streamSession, body 
 type brandLane struct {
 	carry      string
 	lastIsWord bool
+	// seq is the order in which this lane was first opened, i.e. the order its
+	// text appeared in the stream. Two lanes of the same content block can hold
+	// text at once (one per reverse rule), and their flushes have to reach the
+	// client in the order the text arrived, not in mapping-name order.
+	seq int
 	// finished marks the lane's choice as ended by a non-null
 	// finish_reason on the standalone path; the whole session is freed
 	// only once every expected lane is finished.
@@ -3009,6 +3227,9 @@ type streamSession struct {
 	tail         []byte
 	updatedAt    time.Time
 	brandCarries map[string]*brandLane
+	// laneSeq hands every new brand lane its arrival order, so flushes of two
+	// lanes of the same block can be emitted in source order.
+	laneSeq int
 	// expected is the request's OpenAI "n" (choices per completion),
 	// minimum 1; gates standalone stream-end detection.
 	expected       int
@@ -3022,9 +3243,22 @@ const (
 )
 
 // ompProtectedReverseTable is Oh My Pi's entire reverse authority: the one
-// protected pair its lane owns. Packaged as a table so the flush path can treat
-// every client the same way without allocating per chunk.
-var ompProtectedReverseTable = []rewriteMapping{{Match: reverseBrandMatch, Replacement: reverseBrandReplacement}}
+// protected pair its lane owns, plus the operational home directory the
+// forward path-segment remap produced. Packaged as a table so the flush path
+// can treat every client the same way without allocating per chunk, and
+// applied to the block's single lane as one set, so the path rules and the
+// protected pair share one carry instead of deadlocking each other.
+var ompProtectedReverseTable = []rewriteMapping{
+	{Match: reverseBrandMatch, Replacement: reverseBrandReplacement},
+	{Match: ".gemini/", Replacement: ".omp/"},
+	{Match: ".gemini\\", Replacement: ".omp\\"},
+	// The bare form, matching the forward remap's end-of-string case.
+	{Match: ".gemini", Replacement: ".omp"},
+	// Repairs the same damage the protected pair causes above, for the same
+	// reason as the codex rule: Oh My Pi's forward pass never introduces this
+	// domain, so the host has to come back exactly as it arrived.
+	{Match: "omp.google", Replacement: "antigravity.google"},
+}
 
 // brandReverseTableFor returns the table used to resolve and flush a session's
 // carried tokens: the protected pair for Oh My Pi, that client's own reverse
@@ -4190,6 +4424,21 @@ var claudeCodeReverseBrandMappings = []rewriteMapping{
 	// client a .gemini path that does not exist on disk.
 	{Match: `.gemini\\GEMINI.md`, Replacement: `.claude\\CLAUDE.md`},
 	{Match: "GEMINI.md", Replacement: "CLAUDE.md"},
+	// The bare home directory, for every other file under it. Declared after
+	// the whole-path forms above so they win the longer match. The backslash
+	// form is what a JSON-escaped Windows path looks like on the wire, and one
+	// rule covers both spellings because ".gemini\\" contains ".gemini\".
+	{Match: ".gemini/", Replacement: ".claude/"},
+	{Match: ".gemini\\", Replacement: ".claude\\"},
+	// The bare form, which the forward path-segment remap produces too: a tool
+	// argument that IS the home directory ends the text with no separator. The
+	// separator rules above win the longer match; this one is what covers
+	// end-of-string.
+	{Match: ".gemini", Replacement: ".claude"},
+	// Inverse of the forward domain rule. It has to precede the bare brand word
+	// below, or "Antigravity" would match inside "antigravity.google" and the
+	// client would receive "Claude.google".
+	{Match: "antigravity.google", Replacement: "claude.ai"},
 	// Inverse of the bare vendor rule. Safe to reverse precisely because the
 	// replacement is the two-word vendor name and not the bare "Google", which
 	// would collide with ordinary prose in model output.
@@ -4207,7 +4456,19 @@ var claudeCodeReverseBrandMappings = []rewriteMapping{
 }
 
 var codexReverseBrandMappings = []rewriteMapping{
+	// Codex's own home directory, the exact inverse of the .codex path-segment
+	// remap in the forward pass, for both separators.
+	{Match: ".gemini/", Replacement: ".codex/"},
+	{Match: ".gemini\\", Replacement: ".codex\\"},
+	// The bare form, matching the forward remap's end-of-string case.
+	{Match: ".gemini", Replacement: ".codex"},
 	{Match: "Antigravity", Replacement: "Codex"},
+	// Codex's forward pass never introduces this domain, so there is nothing to
+	// restore. The bare rule above would still match inside it - the dot is a
+	// non-word byte, so the right boundary passes - and hand the client the
+	// dead host "Codex.google". This repairs exactly that damage, and is inert
+	// unless it happened.
+	{Match: "Codex.google", Replacement: "antigravity.google"},
 }
 
 var reverseBrandMappingsByClient = map[string][]rewriteMapping{
@@ -5486,11 +5747,25 @@ func rewriteSchemaDescriptions(tool map[string]any, mappings []rewriteMapping) b
 	return changed
 }
 
+// schemaLiteralKeys are the keywords whose value is DATA the caller validates
+// against, not a schema. Rewriting anything below one of them changes a
+// constant while the property carrying it keeps the client's spelling, so the
+// schema can no longer be satisfied: enum:["Antigravity"] over a property
+// still called "Claude" rejects every argument the client can send. A nested
+// schema is only ever found under a schema keyword, so skipping these subtrees
+// costs no real traversal.
+var schemaLiteralKeys = map[string]bool{
+	"const":    true,
+	"enum":     true,
+	"default":  true,
+	"example":  true,
+	"examples": true,
+}
+
 // rewriteSchemaText rewrites the descriptive strings of a JSON Schema value,
 // recursing through properties, items, $defs and the composition keywords to
 // reach nested schemas, and leaving every structural string exactly as it was.
-// A non-container schema value carries no description field, so it is returned
-// unchanged.
+// The subtree under a literal-bearing keyword is never descended into.
 func rewriteSchemaText(value any, mappings []rewriteMapping) (any, bool) {
 	switch typed := value.(type) {
 	case map[string]any:
@@ -5510,9 +5785,13 @@ func rewriteSchemaText(value any, mappings []rewriteMapping) (any, bool) {
 				}
 				continue
 			}
-			// Only containers are walked. A nested string is either a text
-			// field of its own map (handled above) or a structural member of an
-			// array/const/default, which must not be touched.
+			// Only containers are walked, and never under a literal-bearing
+			// keyword: a nested string there is a validated constant, not help
+			// text, and rewriting it would break the contract the model's
+			// arguments have to satisfy.
+			if schemaLiteralKeys[key] {
+				continue
+			}
 			switch child.(type) {
 			case map[string]any, []any:
 				if next, c := rewriteSchemaText(child, mappings); c {
@@ -5786,21 +6065,22 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 // Dot-prefixed directory names get their own treatment in the forward brand
 // rewrite, because rewriting them as prose would hand the model a path that
 // does not exist on disk.
-//
-// preservedPathSegments keep their literal spelling: the plugin's own
-// workspace (C:\Users\<u>\.omp\agent) is not ours to rename.
-//
+
 // pathSegmentReplacements map a client home directory onto the Antigravity
 // equivalent, so ~/.claude/projects/<slug>/memory becomes
-// ~/.gemini/projects/<slug>/memory rather than a dead .Antigravity path.
-var (
-	preservedPathSegments   = map[string]bool{"omp": true}
-	pathSegmentReplacements = map[string]string{"claude": "gemini"}
-)
+// ~/.gemini/projects/<slug>/memory rather than a dead .Antigravity path. Every
+// supported client remaps: these are operational identifiers, not brand prose,
+// and each one is inverted by that client's own reverse table.
+var pathSegmentReplacements = map[string]string{
+	"claude": "gemini",
+	"codex":  "gemini",
+	"omp":    "gemini",
+}
 
 // replaceInsensitiveOpt is the shared case-insensitive word-boundary matcher.
-// When skipPath is true, matches that are literal dot-prefixed path segments
-// listed in preservedPathSegments are left untouched.
+// When skipPath is true, a match that names a literal dot-prefixed path segment
+// is remapped to the Antigravity home directory instead of the brand word, so
+// a client's own config path becomes one that exists upstream.
 func replaceInsensitiveOpt(value, match, replacement string, skipPath bool) (string, bool) {
 	if match == "" {
 		return value, false
@@ -5825,7 +6105,6 @@ func replaceInsensitiveOpt(value, match, replacement string, skipPath bool) (str
 		hasLeftBoundary := !firstIsWord || index == 0 || !isWordByte(value[index-1])
 		hasRightBoundary := !lastIsWord || matchEnd == len(value) || !isWordByte(value[matchEnd])
 		effectiveReplacement := replacement
-		pathSegment := false
 		if skipPath && index > 0 && value[index-1] == '.' {
 			dotIndex := index - 1
 			// A dot-directory can start right after prose punctuation, not just
@@ -5838,15 +6117,13 @@ func replaceInsensitiveOpt(value, match, replacement string, skipPath bool) (str
 			leftSegmentBoundary := dotIndex == 0 || !isWordByte(value[dotIndex-1])
 			rightSegmentBoundary := matchEnd == len(value) || value[matchEnd] == '/' || value[matchEnd] == '\\'
 			if leftSegmentBoundary && rightSegmentBoundary {
-				if preservedPathSegments[lowerMatch] {
-					pathSegment = true
-				} else if remapped, ok := pathSegmentReplacements[lowerMatch]; ok {
+				if remapped, ok := pathSegmentReplacements[lowerMatch]; ok {
 					effectiveReplacement = remapped
 				}
 			}
 		}
 
-		if hasLeftBoundary && hasRightBoundary && !pathSegment {
+		if hasLeftBoundary && hasRightBoundary {
 			builder.WriteString(value[start:index])
 			builder.WriteString(effectiveReplacement)
 			start = matchEnd
@@ -5914,6 +6191,26 @@ func replaceInsensitiveWithPrev(value string, prevIsWord bool, match, replacemen
 	return builder.String(), true
 }
 
+// holdIsLive reports whether a held candidate of length k can still become a
+// boundary-valid match of brand, and so is worth delaying the client's text
+// for. A candidate shorter than the match can always still be completed, so it
+// is live. A candidate equal to the whole match is live only while its RIGHT
+// boundary is still unproven: the matcher has yet to see whether a word byte
+// follows, which would rule the match out. A match whose last byte is not a
+// word byte is already boundary-valid at end of text, so holding it defers
+// output the client could have had immediately and proves nothing.
+func holdIsLive(brand string, k int) bool {
+	if k <= 0 || k > len(brand) {
+		return false
+	}
+	return k < len(brand) || isWordByte(brand[len(brand)-1])
+}
+
+// findHoldLenWithBoundary returns the longest suffix of combined that is still
+// a live, possibly-incomplete match of brand: the bytes already prove its left
+// boundary, and holdIsLive proves the match can still grow into a
+// boundary-valid one. A suffix that can no longer become one is never retained
+// (Issue #48).
 func findHoldLenWithBoundary(combined, brand string, prevIsWord bool) int {
 	max := len(brand)
 	if len(combined) < max {
@@ -5931,7 +6228,7 @@ func findHoldLenWithBoundary(combined, brand string, prevIsWord bool) int {
 		} else {
 			leftOK = !isWordByte(combined[pos-1])
 		}
-		if leftOK {
+		if leftOK && holdIsLive(brand, k) {
 			return k
 		}
 	}
@@ -5950,21 +6247,47 @@ func getBrandLane(sess *streamSession, key string) *brandLane {
 	return lane
 }
 
-// applyBrandLane is the chunk-safe streaming brand matcher. A match split
-// across two SSE events is held in lane.carry until the rest of it arrives, so
-// a token is never rewritten half way. Callers flush a completed block's
-// remaining carry through the terminal flush rather than through a flag here.
-func applyBrandLane(text string, lane *brandLane, match, replacement string) (string, bool) {
+// findHoldLenSet is findHoldLenWithBoundary over a whole table: the longest
+// suffix of combined that is still a live prefix of ANY of the table's matches.
+// One shared search keeps several rules in a single lane from each holding a
+// different partial token of the same text, which is what deadlocks them.
+func findHoldLenSet(combined string, table []rewriteMapping, prevIsWord bool) int {
+	best := 0
+	for _, m := range table {
+		if k := findHoldLenWithBoundary(combined, m.Match, prevIsWord); k > best {
+			best = k
+		}
+	}
+	return best
+}
+
+// replaceInsensitiveSetWithPrev runs every rule of a reverse table over one
+// emitted fragment, in declaration order, so the longer tokens win the prefix.
+func replaceInsensitiveSetWithPrev(value string, prevIsWord bool, table []rewriteMapping) (string, bool) {
+	out, changed := value, false
+	for _, m := range table {
+		next, c := replaceInsensitiveWithPrev(out, prevIsWord, m.Match, m.Replacement)
+		out = next
+		changed = changed || c
+	}
+	return out, changed
+}
+
+// applyBrandLaneSet is applyBrandLane over a whole table in ONE lane: the
+// longest live partial token across all rules is held, and the fragment that
+// remains is resolved against the same table. Used by the Oh My Pi protected
+// lane, which owns several rules in one carry.
+func applyBrandLaneSet(text string, lane *brandLane, table []rewriteMapping) (string, bool) {
 	combined := lane.carry + text
 	if combined == "" {
 		return "", false
 	}
-	holdLen := findHoldLenWithBoundary(combined, match, lane.lastIsWord)
+	holdLen := findHoldLenSet(combined, table, lane.lastIsWord)
 	emitPart, newCarry := combined, ""
 	if holdLen > 0 {
 		emitPart, newCarry = combined[:len(combined)-holdLen], combined[len(combined)-holdLen:]
 	}
-	out, changed := replaceInsensitiveWithPrev(emitPart, lane.lastIsWord, match, replacement)
+	out, changed := replaceInsensitiveSetWithPrev(emitPart, lane.lastIsWord, table)
 	lane.carry = newCarry
 	if out != "" {
 		lane.lastIsWord = isWordByte(out[len(out)-1])
@@ -5976,6 +6299,19 @@ func applyBrandLane(text string, lane *brandLane, match, replacement string) (st
 // token being matched inside it, so one block can carry one lane per mapping.
 const reverseBrandLaneSuffix = "\x00"
 
+// stampLaneArrival records the order in which a lane first held text, which is
+// the order its bytes appeared in the stream. It has to happen at the first
+// HOLD, not at lane creation: every lane of a content block is created on the
+// block's first chunk, in reverse-table order, so a creation-order stamp would
+// just re-encode the table order sortedCarryKeys is meant to stop depending on.
+func stampLaneArrival(sess *streamSession, lane *brandLane) {
+	if lane == nil || lane.seq != 0 || lane.carry == "" {
+		return
+	}
+	sess.laneSeq++
+	lane.seq = sess.laneSeq
+}
+
 // applyReverseBrandLanes runs every reverse-table entry for this session over a
 // streamed text fragment, one lane each.
 func applyReverseBrandLanes(sess *streamSession, laneKey, text string) (string, bool) {
@@ -5983,8 +6319,11 @@ func applyReverseBrandLanes(sess *streamSession, laneKey, text string) (string, 
 		return text, false
 	}
 	out, changed := text, false
-	for _, m := range reverseBrandMappingsFor(sess.client) {
-		next, c := applyBrandLane(out, getBrandLane(sess, laneKey+reverseBrandLaneSuffix+m.Match), m.Match, m.Replacement)
+	table := reverseBrandMappingsFor(sess.client)
+	for i, m := range table {
+		lane := getBrandLane(sess, laneKey+reverseBrandLaneSuffix+m.Match)
+		next, c := applyBrandLaneSet(out, lane, table[i:i+1])
+		stampLaneArrival(sess, lane)
 		out = next
 		changed = changed || c
 	}

@@ -210,11 +210,13 @@ func TestReverseBrand_Anthropic_NonStream_OMP(t *testing.T) {
 	if !strings.Contains(txt, "omp") || strings.Contains(txt, "Antigravity") {
 		t.Fatalf("anthropic brand reverse failed, got %q", txt)
 	}
-	// tool input must preserve Antigravity
+	// Tool input is the non-stream twin of the streamed partial_json: a cloaked
+	// path left in the arguments is a path the model writes to disk, so it is
+	// reversed here exactly as the stream path reverses it.
 	toolBlock := content[1].(map[string]any)
 	input := toolBlock["input"].(map[string]any)
-	if input["path"] != "/tmp/Antigravity" {
-		t.Fatalf("tool arg mangled, got %v", input["path"])
+	if input["path"] != "/tmp/omp" {
+		t.Fatalf("tool arg not reversed, got %v", input["path"])
 	}
 	// tool name uncloaked
 	if toolBlock["name"] != "read" {
@@ -357,10 +359,12 @@ func TestReverseBrand_ToolArgsPreserved(t *testing.T) {
 	if strings.Contains(content, "Antigravity") {
 		t.Fatalf("assistant content not rewritten: %q", content)
 	}
+	// Carried by the same contract as the streamed arguments: the model writes
+	// these bytes to disk, where nothing can reverse them later.
 	tc := msg["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
 	args := tc["arguments"].(string)
-	if !strings.Contains(args, "Antigravity") {
-		t.Fatalf("tool args mangled, expected Antigravity preserved, got %q", args)
+	if strings.Contains(args, "Antigravity") || !strings.Contains(args, "omp") {
+		t.Fatalf("tool args not reversed: %q", args)
 	}
 }
 
@@ -755,21 +759,58 @@ func TestReviewFix_DeterministicMultiLaneFlushOrder(t *testing.T) {
 	}
 }
 
-// sseDataMaps decodes every JSON `data:` payload of an SSE body, skipping
-// `event:` lines and the terminal [DONE] frame.
-func sseDataMaps(t *testing.T, body []byte) []map[string]any {
+// sseFrame is one parsed SSE event: the name from its `event:` line (empty
+// when the frame carried none) and the JSON payload from its `data:` lines.
+type sseFrame struct {
+	name string
+	data map[string]any
+}
+
+// sseFrames decodes an SSE body the way a strict client does: an `event:` line
+// names the frame and every `data:` line contributes to its JSON payload.
+// A frame whose payload is not JSON (the terminal [DONE]) is skipped, but a
+// frame whose `event:` name disagrees with the payload's own "type" fails the
+// test — that agreement is the protocol rule a real Anthropic client relies on,
+// so a data-only "flush" frame can never pass as a well-formed event again.
+func sseFrames(t *testing.T, body []byte) []sseFrame {
 	t.Helper()
-	var out []map[string]any
+	var out []sseFrame
 	for _, ev := range strings.Split(string(body), "\n\n") {
-		payload := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(ev), "data:"))
-		if !strings.HasPrefix(payload, "{") {
+		var name string
+		var payload strings.Builder
+		for _, line := range strings.Split(ev, "\n") {
+			line = strings.TrimRight(line, "\r")
+			switch {
+			case strings.HasPrefix(line, "event:"):
+				name = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			case strings.HasPrefix(line, "data:"):
+				payload.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			}
+		}
+		raw := strings.TrimSpace(payload.String())
+		if !strings.HasPrefix(raw, "{") {
 			continue
 		}
 		var m map[string]any
-		if err := json.Unmarshal([]byte(payload), &m); err != nil {
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
 			t.Fatalf("unparseable SSE event %q: %v", ev, err)
 		}
-		out = append(out, m)
+		if typ, ok := m["type"].(string); ok && name != "" && name != typ {
+			t.Fatalf("SSE event name %q disagrees with payload type %q in %q", name, typ, ev)
+		}
+		out = append(out, sseFrame{name: name, data: m})
+	}
+	return out
+}
+
+// sseDataMaps decodes every JSON payload of an SSE body, dropping the event
+// names. Callers that assert framing use sseFrames instead.
+func sseDataMaps(t *testing.T, body []byte) []map[string]any {
+	t.Helper()
+	frames := sseFrames(t, body)
+	out := make([]map[string]any, 0, len(frames))
+	for _, f := range frames {
+		out = append(out, f.data)
 	}
 	return out
 }
