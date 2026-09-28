@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
@@ -13,13 +14,26 @@ import (
 // looks clean while the client is handed text it cannot resolve, which is the
 // "Unknown skill" and "read a file that does not exist" class of bug.
 //
-// These cases carry each client's REAL context, not a shared one. That
-// distinction is the whole point: Oh My Pi names context files by their bare
-// filename (CLAUDE.md -> AGENTS.md, no vendor token anywhere) and brands itself
-// Oh My Pi -> Antigravity -> omp, while Claude Code and Codex carry the
-// path-qualified ~/.claude/CLAUDE.md and the vendor word Anthropic. Driving all
-// three with Claude Code's context asserts a reverse Oh My Pi never needs and
-// misses the one reverse it actually depends on.
+// Each case carries its own context, and the comment on every field says where
+// that text comes from, because the provenance differs per client and getting
+// it wrong is silent:
+//
+//   - claude_code: the path-qualified ~/.claude/CLAUDE.md and the vendor word
+//     are its own. There is no public repo to read, so this row rests on
+//     observed Claude Code traffic rather than on source.
+//   - codex and oh_my_pi: neither ships a vendor token. Verified by reading
+//     their sources, not by assumption. Codex's model-facing prompts
+//     (.ref/codex codex-rs/core/gpt_5*.md) contain AGENTS.md eleven times and
+//     anthropic/claude/gemini/CLAUDE.md zero times; its claude mentions are all
+//     in external-agent-migration, hooks and core-plugins, which read a Claude
+//     Code install to migrate config and never reach the wire. Oh My Pi is the
+//     same across all 83 prompt files it ships.
+//   - What DOES put those tokens in a codex or oh_my_pi request is the project's
+//     own context files. This repository's AGENTS.md names Claude Code and
+//     .claude/CLAUDE.md throughout, so any client working in it carries them.
+//
+// The forward pass is client-agnostic, so whatever a request carries must come
+// back; the per-client tables below exist to pin each client's own reverse.
 //
 // Both tests go through the real entry points, not the internal helpers. An
 // earlier version dispatched the streaming reverse correctly inside
@@ -194,6 +208,9 @@ func TestEveryClientReversesWhatItRewritesWhileStreaming(t *testing.T) {
 				ev := ""
 				if tc.format == "anthropic" {
 					if i == 0 {
+						ev += "event: message_start\ndata: " + mustJSON(t, map[string]any{
+							"type":    "message_start",
+							"message": map[string]any{"type": "message", "role": "assistant"}}) + "\n\n"
 						ev += "event: content_block_start\ndata: " + mustJSON(t, map[string]any{
 							"type": "content_block_start", "index": 0,
 							"content_block": map[string]any{"type": "text", "text": ""}}) + "\n\n"
@@ -247,5 +264,59 @@ func TestEveryClientReversesWhatItRewritesWhileStreaming(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A resolved client with no cached uncloak pattern is the shape an alias-plan
+// client actually has: it pins its tool-name authority in the plan, not in a
+// pattern, so the stream session arrives with cached == nil. The brand reverse
+// does not need the pattern, so it has to run anyway.
+//
+// This is the case the request-scoped audit above cannot reach: registering
+// through request.intercept_before also populates the pattern, so every
+// session that test builds has one. A guard that returned early on a nil
+// pattern therefore passed that whole audit while never reversing a single
+// byte on the wire.
+func TestBrandReverseRunsWithNoCachedPattern(t *testing.T) {
+	m := globalStreamManager
+	const reqID = "req_nil_cached_brand"
+	key := m.sessionKey(&pluginapi.StreamChunkInterceptRequest{RequestID: reqID})
+	m.mu.Lock()
+	m.sessions[key] = &streamSession{
+		client: "claude_code", brandCarries: map[string]*brandLane{}, updatedAt: time.Now(),
+	}
+	m.mu.Unlock()
+	t.Cleanup(func() {
+		m.mu.Lock()
+		delete(m.sessions, key)
+		m.mu.Unlock()
+	})
+
+	if m.sessions[key].cached != nil {
+		t.Fatal("probe must start with a nil cached pattern")
+	}
+
+	ev := "event: content_block_delta\ndata: " +
+		mustJSON(t, map[string]any{
+			"type": "content_block_delta", "index": 0,
+			"delta": map[string]any{"type": "text_delta", "text": "open .gemini/GEMINI.md now"}}) + "\n\n" +
+		"event: content_block_stop\ndata: " +
+		mustJSON(t, map[string]any{"type": "content_block_stop", "index": 0}) + "\n\n" +
+		"event: message_stop\ndata: " +
+		mustJSON(t, map[string]any{"type": "message_stop"}) + "\n\n"
+
+	resp := m.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: reqID, ChunkIndex: 0, Body: []byte(ev), SourceFormat: "anthropic",
+	}, "anthropic")
+
+	out := string(resp.Body)
+	if !resp.DropChunk && out == "" {
+		out = ev
+	}
+	if strings.Contains(out, ".gemini/GEMINI.md") {
+		t.Fatalf("cloaked token streamed out unreversed: %s", out)
+	}
+	if !strings.Contains(out, ".claude/CLAUDE.md") {
+		t.Fatalf("expected the client's own spelling back: %s", out)
 	}
 }

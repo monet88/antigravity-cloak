@@ -3667,7 +3667,15 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 	if sess == nil {
 		return pluginapi.StreamChunkInterceptResponse{}
 	}
-	if sess.cached == nil && sess.client != "oh_my_pi" {
+	// A cached pattern is what the tool-name uncloak pass needs, but not what
+	// the brand reverse needs: that runs off the session's resolved client
+	// alone. An alias-plan client pins its tool-name authority in the plan
+	// rather than in a pattern, so it reaches here with cached == nil, and
+	// bailing on that skipped the brand reverse for every such client: the
+	// request went out cloaked and the response came back cloaked. Only bail
+	// when no client was resolved. The SSE branch below already handles a nil
+	// pattern (modified = completeEvents, no uncloak).
+	if sess.cached == nil && (sess.client == "" || sess.client == negativeClientResolution) {
 		return pluginapi.StreamChunkInterceptResponse{}
 	}
 	m.mu.Lock()
@@ -3742,9 +3750,6 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		brandChanged := false
 		if sess.client != "" && sess.client != negativeClientResolution {
 			if bm, bc := m.reverseBrandSSE(sess, modified, format); bc {
-				modified = bm
-				brandChanged = true
-			} else if bm != nil && !bytes.Equal(bm, modified) {
 				modified = bm
 				brandChanged = true
 			}
