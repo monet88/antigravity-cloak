@@ -3000,3 +3000,46 @@ func TestAliasPlan_ConfigValidation(t *testing.T) {
 		})
 	}
 }
+
+// Only the help text of a tool schema may be rewritten. The walk used to touch
+// every string in the schema, so a `required` member diverged from the property
+// name it referred to: required:["Claude"] became required:["Antigravity"] while
+// the property stayed "Claude", leaving a schema no arguments could satisfy.
+func TestToolSchemaStructureSurvivesBrandRewrite(t *testing.T) {
+	applyFilterConfig(filterConfig{
+		UseDefaultKeywords: true,
+		ToolMappings:       copyToolMappings(defaultCloakTables),
+	})
+	defer restoreDefaultFilterConfig(t)
+
+	body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"x","tools":[{"name":"Bash","description":"d","input_schema":{"type":"object","description":"see .claude/CLAUDE.md","properties":{"Claude":{"type":"string","description":"the Claude name"}},"required":["Claude"],"additionalProperties":false}}]}`), "anthropic", "claude_code")
+	if !changed {
+		t.Fatalf("schema help text must still be rewritten (body=%s)", body)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("rewritten body is not JSON: %v", err)
+	}
+	schema, _ := doc["tools"].([]any)[0].(map[string]any)["input_schema"].(map[string]any)
+	if schema == nil {
+		t.Fatalf("input_schema lost: %s", body)
+	}
+	req, _ := schema["required"].([]any)
+	if len(req) != 1 || req[0] != "Claude" {
+		t.Fatalf("required member rewritten away from the property name: %v", schema["required"])
+	}
+	props, _ := schema["properties"].(map[string]any)
+	inner, _ := props["Claude"].(map[string]any)
+	if inner == nil {
+		t.Fatalf("property name rewritten; required no longer resolves: %v", props)
+	}
+	if _, ok := schema["additionalProperties"].(bool); !ok {
+		t.Fatalf("additionalProperties keyword lost: %v", schema["additionalProperties"])
+	}
+	if got, _ := schema["description"].(string); !strings.Contains(got, ".gemini/GEMINI.md") {
+		t.Fatalf("schema description not remapped: %q", got)
+	}
+	if got, _ := inner["description"].(string); strings.Contains(got, "Claude") {
+		t.Fatalf("nested property description not remapped: %q", got)
+	}
+}

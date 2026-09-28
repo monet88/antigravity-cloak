@@ -1295,6 +1295,11 @@ func sseEventsStrict(t *testing.T, body []byte) []map[string]any {
 				t.Fatalf("SSE event line not data:-framed: %q in body=%q", line, string(body))
 			}
 			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "[DONE]" {
+				// The OpenAI terminal marker is a valid frame, not a JSON event.
+				gotData = true
+				continue
+			}
 			var m map[string]any
 			if err := json.Unmarshal([]byte(payload), &m); err != nil {
 				t.Fatalf("data: payload not valid JSON %q: %v", payload, err)
@@ -1386,5 +1391,247 @@ func TestIssue21_AnthropicStandalone_TerminalFlushCompositeIsSSEFramed(t *testin
 	mgr2.mu.Unlock()
 	if sess2 == nil || pending {
 		t.Fatalf("session must survive block stop with drained carry: sess=%v pending=%v", sess2 != nil, pending)
+	}
+}
+
+// ── Cloaked-brand stream review regressions (claude_code / codex) ─────────
+
+// A held token flushed at content_block_stop must carry the index of the block
+// it was held in. Without an index the client cannot attach the text to a
+// content block, so the end of the sentence is unplaceable and is dropped.
+// "A" is a prefix of every Antigravity rule, so it is held, not emitted inline.
+func TestCloakedFlushKeepsContentBlockIndex(t *testing.T) {
+	sess := &streamSession{client: "claude_code"}
+	m := globalStreamManager
+
+	held := []byte("event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_delta", "index": 2,
+		"delta": map[string]any{"type": "text_delta", "text": "A"}}) + "\n\n")
+	stop := []byte("event: content_block_stop\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_stop", "index": 2}) + "\n\n")
+
+	out1, _ := m.reverseBrandSSE(sess, held, "anthropic")
+	out2, _ := m.reverseBrandSSE(sess, stop, "anthropic")
+	joined := string(out1) + string(out2)
+	if strings.Contains(string(out1), `"text":"A"`) {
+		t.Fatalf("the partial token should be held until the block closes, body=%q", out1)
+	}
+
+	var flush map[string]any
+	for _, ev := range sseEventsStrict(t, []byte(joined)) {
+		if d, ok := ev["delta"].(map[string]any); ok && d["text"] == "A" {
+			flush = ev
+		}
+	}
+	if flush == nil {
+		t.Fatalf("held token was never flushed at content_block_stop, body=%q", joined)
+	}
+	if got, _ := flush["index"].(float64); int(got) != 2 {
+		t.Fatalf("flush index = %v, want 2 (body=%q)", flush["index"], joined)
+	}
+	if flush["type"] != "content_block_delta" {
+		t.Fatalf("flush event type = %v, body=%q", flush["type"], joined)
+	}
+}
+
+// A token held open by a longer rule's lane has to be reversed by the shorter
+// rule that actually owns it. "Antigravity" sits in the "Antigravity-api" lane
+// because it is a prefix of that rule; resolving the carry with that rule alone
+// emitted the cloaked word to the client verbatim.
+func TestCloakedTerminalCarryResolvesAgainstTheWholeTable(t *testing.T) {
+	sess := &streamSession{client: "claude_code"}
+	m := globalStreamManager
+
+	held := []byte("event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_delta", "index": 0,
+		"delta": map[string]any{"type": "text_delta", "text": "say Antigravity"}}) + "\n\n")
+	stop := []byte("event: content_block_stop\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_stop", "index": 0}) + "\n\n")
+
+	out1, _ := m.reverseBrandSSE(sess, held, "anthropic")
+	out2, _ := m.reverseBrandSSE(sess, stop, "anthropic")
+	joined := string(out1) + string(out2)
+	if strings.Contains(joined, "Antigravity") {
+		t.Fatalf("terminal carry kept the cloaked word, body=%q", joined)
+	}
+	if !strings.Contains(joined, `"text":"Claude"`) {
+		t.Fatalf("terminal carry not restored to the client's word, body=%q", joined)
+	}
+}
+
+// OpenAI streamed choices carry their index on the choice, not on the event
+// root. Reading the root alone put every choice in one lane, so a token held
+// for choice 0 was emitted through choice 1: "A" + "hello " came back as
+// "" + "Ahello ".
+func TestCloakedOpenAIChoicesKeepTheirOwnCarry(t *testing.T) {
+	sess := &streamSession{client: "codex"}
+	m := globalStreamManager
+
+	chunk := []byte("data: " + mustJSON(t, map[string]any{"choices": []any{
+		map[string]any{"index": 0, "delta": map[string]any{"content": "A"}},
+		map[string]any{"index": 1, "delta": map[string]any{"content": "hello "}},
+	}}) + "\n\n")
+	done := []byte("data: [DONE]\n\n")
+
+	out1, _ := m.reverseBrandSSE(sess, chunk, "openai")
+	out2, _ := m.reverseBrandSSE(sess, done, "openai")
+	joined := string(out1) + string(out2)
+	if strings.Contains(joined, "Ahello") {
+		t.Fatalf("choice 0's held token bled into choice 1, body=%q", joined)
+	}
+
+	// A client concatenates every delta addressed to a choice, so the held
+	// token arriving in a later event still belongs to choice 0.
+	byChoice := map[int]string{}
+	for _, ev := range sseEventsStrict(t, []byte(joined)) {
+		choices, _ := ev["choices"].([]any)
+		for _, cRaw := range choices {
+			c, ok := cRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			n, _ := c["index"].(float64)
+			d, _ := c["delta"].(map[string]any)
+			s, _ := d["content"].(string)
+			byChoice[int(n)] += s
+		}
+	}
+	if got := byChoice[0]; got != "A" {
+		t.Fatalf("choice 0 content = %q, want %q (body=%q)", got, "A", joined)
+	}
+	if got := byChoice[1]; got != "hello " {
+		t.Fatalf("choice 1 content = %q, want %q (body=%q)", got, "hello ", joined)
+	}
+}
+
+// Tool-call arguments stream as raw JSON, so the backslash of a Windows path is
+// written twice there. The whole-path rule missed the escaped spelling and only
+// the bare GEMINI.md rule fired, handing the client C:\...\.gemini\CLAUDE.md.
+func TestCloakedStreamedToolArgsRestoreEscapedWindowsPath(t *testing.T) {
+	sess := &streamSession{client: "claude_code"}
+	m := globalStreamManager
+
+	// Split inside the path so the lane has to carry the escaped form across
+	// two deltas.
+	first := []byte("event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_delta", "index": 1,
+		"delta": map[string]any{"type": "input_json_delta",
+			"partial_json": `{"path":"C:\\Users\\dev\\.gemini\\`}}) + "\n\n")
+	second := []byte("event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_delta", "index": 1,
+		"delta": map[string]any{"type": "input_json_delta",
+			"partial_json": `GEMINI.md"}`}}) + "\n\n")
+
+	out1, _ := m.reverseBrandSSE(sess, first, "anthropic")
+	out2, _ := m.reverseBrandSSE(sess, second, "anthropic")
+
+	// Reassemble the fragments the way a streaming client does.
+	var args strings.Builder
+	for _, ev := range sseEventsStrict(t, []byte(string(out1)+string(out2))) {
+		if d, ok := ev["delta"].(map[string]any); ok {
+			if pj, ok := d["partial_json"].(string); ok {
+				args.WriteString(pj)
+			}
+		}
+	}
+	got := args.String()
+	if strings.Contains(got, ".gemini") || strings.Contains(got, "GEMINI.md") {
+		t.Fatalf("cloaked path reached the client, args=%q", got)
+	}
+	if !strings.Contains(got, `C:\\Users\\dev\\.claude\\CLAUDE.md`) {
+		t.Fatalf("Windows path not restored to the client spelling, args=%q", got)
+	}
+}
+
+// ── Standalone (non-SSE) chunks: brand reverse for every resolved client ──
+
+// The OpenAI-protocol exits hand the plugin unframed JSON chunks — the host
+// adds `data: ` itself after interception (`openai_handlers.go` does
+// `fmt.Fprintf(c.Writer, "data: %s\n\n", chunk)`) — so a codex or claude_code
+// session takes the standalone branch, not the SSE one. Brand reverse used to be
+// gated on Oh My Pi there, which left the cloaked word in every such response.
+func TestStandaloneBrandReverseRunsForCodex(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:sa-codex", "codex", nil)
+
+	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-codex", SourceFormat: "openai", ChunkIndex: 0,
+		Body: []byte(`{"choices":[{"index":0,"delta":{"content":"say Antigravity"}}]}`),
+	}, "openai")
+	if strings.Contains(string(resp1.Body), "Antigravity") {
+		t.Fatalf("held token emitted inline on the standalone path: %s", resp1.Body)
+	}
+
+	resp2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-codex", SourceFormat: "openai", ChunkIndex: 1,
+		Body: []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`),
+	}, "openai")
+	body2 := string(resp2.Body)
+	if strings.Contains(body2, "Antigravity") {
+		t.Fatalf("standalone brand reverse did not run for codex: %s", body2)
+	}
+	if !strings.Contains(body2, `"content":"Codex"`) {
+		t.Fatalf("held carry not flushed as the client's word: %s", body2)
+	}
+
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:sa-codex"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be freed at standalone stream completion")
+	}
+}
+
+func TestStandaloneBrandReverseRunsForClaudeCode(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:sa-cc", "claude_code", nil)
+
+	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-cc", SourceFormat: "anthropic", ChunkIndex: 0,
+		Body: []byte(`{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"see .gemini/GEMINI.md then Antigravity"}}`),
+	}, "anthropic")
+	body1 := string(resp1.Body)
+	if !strings.Contains(body1, ".claude/CLAUDE.md") || strings.Contains(body1, ".gemini/GEMINI.md") {
+		t.Fatalf("standalone path did not reverse the instruction file: %s", body1)
+	}
+	if strings.Contains(body1, "Antigravity") {
+		t.Fatalf("held token emitted inline: %s", body1)
+	}
+
+	resp2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-cc", SourceFormat: "anthropic", ChunkIndex: 1,
+		Body: []byte(`{"type":"message_stop"}`),
+	}, "anthropic")
+	body2 := string(resp2.Body)
+	if strings.Contains(body2, "Antigravity") || !strings.Contains(body2, `"text":"Claude"`) {
+		t.Fatalf("standalone carry not flushed as the client's word: %s", body2)
+	}
+	if !strings.Contains(body2, `"index":2`) {
+		t.Fatalf("standalone flush lost the content block index: %s", body2)
+	}
+
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:sa-cc"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be freed at standalone stream completion")
+	}
+}
+
+// A standalone chunk with nothing to reverse must pass through untouched,
+// otherwise every such chunk would be re-encoded for no reason.
+func TestStandalonePlainChunkPassesThroughForNonOMP(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:sa-plain", "claude_code", nil)
+
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-plain", SourceFormat: "openai", ChunkIndex: 0,
+		Body: []byte(`{"choices":[{"index":0,"delta":{"content":"plain text"}}]}`),
+	}, "openai")
+	if resp.DropChunk || len(resp.Body) != 0 {
+		t.Fatalf("untouched standalone chunk must pass through, got body=%q drop=%v", resp.Body, resp.DropChunk)
 	}
 }
