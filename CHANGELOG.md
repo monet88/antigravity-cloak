@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 ## [Unreleased]
 
 ### Changed
+- **Brand rewriting is scoped per client.** The built-in forward and reverse tables are declared per client (`claudeCodeBrandMappings`, `codexBrandMappings`, `ompBrandMappings` and their `*ReverseBrandMappings`, registered in `brandMappingsByClient` / `reverseBrandMappingsByClient`), and the resolved client selects exactly one. Every target a client's forward pass can produce therefore inverts back to that same client: a bare `Antigravity` becomes `Claude` for `claude_code`, `Codex` for `codex`, and `omp` for `oh_my_pi`. Previously only the Oh My Pi pair was reversed, so a model that shortened a cloaked token to bare `Antigravity` leaked that word to the other clients.
+- Removed the competitor and general-agent brand rules (`Cursor`, `Windsurf`, `Cline`, `Devin`, `OpenCode`, `Trail`, and the rest). They belonged to no supported client, and an unowned rule mapping onto `Antigravity` left the reverse with no way to tell which source had produced it. `CLAUDE.md` -> `AGENTS.md` is kept and referenced by every client table, because its target is never inverted.
+- `rewriteProtectedBrandText` now applies client scoping; it walked the mapping tables directly and so ignored `rewriteMapping.Client` entirely.
+
+### Fixed
+- `reverseFlushCloakedBrandLanes` compared each lane key against `prefix+match`. When draining every block at end of stream the prefix is empty while the key still carries its block prefix, so nothing matched and every still-held token was silently dropped instead of flushed.
+- A streamed delta whose trailing token was held in a lane kept its original text, sending the held token inline and then a second time from the flush. The held remainder is now stripped from the emitted text, so the token arrives once.
 - Pruned obsolete internal seams and test-only utilities from core production source: removed `resolveExplicitClient`, `(*explicitOMPLifecycleManager).reset`, legacy `splitSSEEvents` wrapper, and `corroborateCloakedTargetOMP` (Issue #42).
 - Relocated test-only JSON exploration utilities (`walkJSON`, `appendPath`, `collectText`) to `json_test_helpers_test.go` (Issue #42).
 - Consolidated duplicate round-trip streaming tests and client-specific uniqueness tests into canonical integration and table initialization suites, merging `session_cleanup_test.go` into `filter_test.go` (Issue #42).

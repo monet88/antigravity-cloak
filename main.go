@@ -767,7 +767,7 @@ func isOMPAlias(match string) bool {
 	return m == "omp" || m == "oh-my-pi" || m == "oh my pi"
 }
 
-func rewriteProtectedBrandText(text string, cfg *filterConfig) (string, bool) {
+func rewriteProtectedBrandText(text string, cfg *filterConfig, client string) (string, bool) {
 	if text == "" {
 		return text, false
 	}
@@ -785,16 +785,22 @@ func rewriteProtectedBrandText(text string, cfg *filterConfig) (string, bool) {
 		}
 	}
 
+	// Client scoping is applied here too: this walker predates applicableMappings
+	// and used to ignore rewriteMapping.Client, which would let a claude_code or
+	// codex rule fire on a protected Oh My Pi request.
+	inScope := func(m rewriteMapping) bool {
+		return (m.Client == "" || m.Client == client) && !isOMPAlias(m.Match)
+	}
 	var nonOMPMappings []rewriteMapping
 	if cfg.UseDefaultKeywords {
-		for _, m := range defaultRewriteMappings {
-			if !isOMPAlias(m.Match) {
+		for _, m := range brandMappingsFor(client) {
+			if inScope(m) {
 				nonOMPMappings = append(nonOMPMappings, m)
 			}
 		}
 	}
 	for _, m := range cfg.CustomMappings {
-		if !isOMPAlias(m.Match) {
+		if inScope(m) {
 			nonOMPMappings = append(nonOMPMappings, m)
 		}
 	}
@@ -817,19 +823,19 @@ func rewriteProtectedBrandText(text string, cfg *filterConfig) (string, bool) {
 	return current, changed
 }
 
-func rewriteProtectedBrandValue(value any, cfg *filterConfig) any {
+func rewriteProtectedBrandValue(value any, cfg *filterConfig, client string) any {
 	switch typed := value.(type) {
 	case string:
-		next, _ := rewriteProtectedBrandText(typed, cfg)
+		next, _ := rewriteProtectedBrandText(typed, cfg, client)
 		return next
 	case map[string]any:
 		for k, v := range typed {
-			typed[k] = rewriteProtectedBrandValue(v, cfg)
+			typed[k] = rewriteProtectedBrandValue(v, cfg, client)
 		}
 		return typed
 	case []any:
 		for i, v := range typed {
-			typed[i] = rewriteProtectedBrandValue(v, cfg)
+			typed[i] = rewriteProtectedBrandValue(v, cfg, client)
 		}
 		return typed
 	default:
@@ -837,11 +843,11 @@ func rewriteProtectedBrandValue(value any, cfg *filterConfig) any {
 	}
 }
 
-func rewriteProtectedBrand(rootMap map[string]any, sourceFormat string) {
+func rewriteProtectedBrand(rootMap map[string]any, sourceFormat, client string) {
 	cfg := activeFilterConfig()
 
 	if sysVal, ok := rootMap["system"]; ok {
-		rootMap["system"] = rewriteProtectedBrandValue(sysVal, cfg)
+		rootMap["system"] = rewriteProtectedBrandValue(sysVal, cfg, client)
 	}
 
 	if msgsRaw, ok := rootMap["messages"].([]any); ok {
@@ -849,7 +855,7 @@ func rewriteProtectedBrand(rootMap map[string]any, sourceFormat string) {
 			if msg, ok := mRaw.(map[string]any); ok {
 				if role, ok := msg["role"].(string); ok && role == "system" {
 					if content, exists := msg["content"]; exists {
-						msg["content"] = rewriteProtectedBrandValue(content, cfg)
+						msg["content"] = rewriteProtectedBrandValue(content, cfg, client)
 					}
 				}
 			}
@@ -862,14 +868,14 @@ func rewriteProtectedBrand(rootMap map[string]any, sourceFormat string) {
 				if sourceFormat == "openai" {
 					if fn, ok := tMap["function"].(map[string]any); ok {
 						if desc, ok := fn["description"].(string); ok {
-							if next, c := rewriteProtectedBrandText(desc, cfg); c {
+							if next, c := rewriteProtectedBrandText(desc, cfg, client); c {
 								fn["description"] = next
 							}
 						}
 					}
 				} else if sourceFormat == "anthropic" {
 					if desc, ok := tMap["description"].(string); ok {
-						if next, c := rewriteProtectedBrandText(desc, cfg); c {
+						if next, c := rewriteProtectedBrandText(desc, cfg, client); c {
 							tMap["description"] = next
 						}
 					}
@@ -1047,7 +1053,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 	}
 
 	cloakProtectedToolNames(rootMap, extendedCloak, format)
-	rewriteProtectedBrand(rootMap, format)
+	rewriteProtectedBrand(rootMap, format, "oh_my_pi")
 	sanitizeProtectedSystemConventions(rootMap)
 
 	uncloakedSources := make(map[string]bool)
@@ -1307,7 +1313,7 @@ func handleResponseIntercept(request []byte) []byte {
 					}
 				}
 				if route.brandRestorationEnabled {
-					if rev, c := reverseBrandInResponseBody(modified, format); c {
+					if rev, c := reverseBrandInResponseBody(modified, format, route.client); c {
 						modified = rev
 						changed = true
 					}
@@ -1329,7 +1335,7 @@ func handleResponseIntercept(request []byte) []byte {
 			// Brand text introduced by the request path is restored here
 			// independently of the tool-name plan: none of those tokens can
 			// appear in plan.reverse, so the two authorities never collide.
-			if rev, c := reverseCloakedBrandBody(modified); c {
+			if rev, c := reverseCloakedBrandBody(modified, plan.client); c {
 				return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: rev})
 			}
 			if uncloaked {
@@ -1409,13 +1415,13 @@ func handleResponseIntercept(request []byte) []byte {
 		}
 	}
 	if client == "oh_my_pi" {
-		if rev, c := reverseBrandInResponseBody(modified, format); c {
+		if rev, c := reverseBrandInResponseBody(modified, format, client); c {
 			modified = rev
 			changed = true
 		}
 	}
 	if client != "oh_my_pi" {
-		if rev, c := reverseCloakedBrandBody(modified); c {
+		if rev, c := reverseCloakedBrandBody(modified, client); c {
 			modified = rev
 			changed = true
 		}
@@ -1740,12 +1746,12 @@ func uncloakResponseBodyExact(body []byte, uncloakTable map[string]string, sourc
 	return raw, true
 }
 
-func reverseBrandInResponseBody(body []byte, format string) ([]byte, bool) {
+func reverseBrandInResponseBody(body []byte, format, client string) ([]byte, bool) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {
 		return nil, false
 	}
-	if !reverseAssistantBrandInJSON(root, format) {
+	if !reverseAssistantBrandInJSON(root, format, client) {
 		return nil, false
 	}
 	raw, err := safeMarshal(root)
@@ -1755,7 +1761,7 @@ func reverseBrandInResponseBody(body []byte, format string) ([]byte, bool) {
 	return raw, true
 }
 
-func reverseAssistantBrandInJSON(root any, format string) bool {
+func reverseAssistantBrandInJSON(root any, format, client string) bool {
 	changed := false
 	switch format {
 	case "openai":
@@ -1774,7 +1780,7 @@ func reverseAssistantBrandInJSON(root any, format string) bool {
 			}
 			if msg, ok := ch["message"].(map[string]any); ok {
 				if content, exists := msg["content"]; exists {
-					if next, c := reverseBrandInOpenAIContent(content); c {
+					if next, c := reverseBrandInOpenAIContent(content, client); c {
 						msg["content"] = next
 						changed = true
 					}
@@ -1782,7 +1788,7 @@ func reverseAssistantBrandInJSON(root any, format string) bool {
 			}
 			if delta, ok := ch["delta"].(map[string]any); ok {
 				if content, exists := delta["content"]; exists {
-					if next, c := reverseBrandInOpenAIContent(content); c {
+					if next, c := reverseBrandInOpenAIContent(content, client); c {
 						delta["content"] = next
 						changed = true
 					}
@@ -1825,7 +1831,7 @@ func isAssistantTextPartType(typ string) bool {
 	return typ == "text" || typ == "output_text" || typ == ""
 }
 
-func reverseBrandInOpenAIContent(content any) (any, bool) {
+func reverseBrandInOpenAIContent(content any, client string) (any, bool) {
 	switch v := content.(type) {
 	case string:
 		return replaceInsensitive(v, reverseBrandMatch, reverseBrandReplacement)
@@ -1973,7 +1979,7 @@ func uncloakStreamChunkExact(body []byte, uncloakTable map[string]string) ([]byt
 
 // reverseBrandSSE maps model output back onto the client's own spelling. Oh My
 // Pi runs the protected-brand policy (Antigravity -> omp) on its own single
-// lane; every other client runs defaultReverseBrandMappings, one lane per
+// lane; every other client runs its own reverse table, one lane per
 // token, so a match split across two SSE events is held until it completes.
 func (m *streamSessionManager) reverseBrandSSE(sess *streamSession, sseBytes []byte, format string) ([]byte, bool) {
 	if sess == nil {
@@ -2031,7 +2037,7 @@ func (m *streamSessionManager) reverseBrandSSE(sess *streamSession, sseBytes []b
 
 // reverseCloakedBrandSSE is the non-Oh-My-Pi streaming reverse. It reuses the
 // same event splitting and terminal-flush discipline as reverseBrandSSE, but
-// drives one lane per defaultReverseBrandMappings entry instead of the single
+// drives one lane per reverse-table entry instead of the single
 // protected-brand pair, so a token straddling two events is emitted only once
 // it is whole.
 func (m *streamSessionManager) reverseCloakedBrandSSE(sess *streamSession, sseBytes []byte, format string) ([]byte, bool) {
@@ -2120,7 +2126,12 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 		if !ok || txt == "" {
 			return
 		}
-		if next, c := applyReverseBrandLanes(sess, laneKey, txt); c && next != txt {
+		// next != txt is the trigger, not the changed flag: when a lane holds a
+		// trailing partial token the remainder is stripped from the text, and
+		// that edit has to reach the client even though nothing was replaced
+		// yet. Keeping the original here would send the held token inline and
+		// then send it a second time from the flush.
+		if next, _ := applyReverseBrandLanes(sess, laneKey, txt); next != txt {
 			m[key] = next
 			changed = true
 		}
@@ -2161,6 +2172,7 @@ func (m *streamSessionManager) reverseFlushCloakedBrandLanes(sess *streamSession
 	if allBlocks {
 		prefix = ""
 	}
+	table := reverseBrandMappingsFor(sess.client)
 	var flush []string
 	for key, lane := range sess.brandCarries {
 		if lane == nil || lane.carry == "" || !strings.HasPrefix(key, prefix) {
@@ -2169,8 +2181,12 @@ func (m *streamSessionManager) reverseFlushCloakedBrandLanes(sess *streamSession
 		carry := lane.carry
 		lane.carry = ""
 		lane.lastIsWord = false
-		for _, mm := range defaultReverseBrandMappings {
-			if key == prefix+mm.Match {
+		for _, mm := range table {
+			// Draining every block, the key carries whatever block prefix that
+			// lane was opened under, so the token has to be matched as a suffix.
+			// Requiring prefix+match here matched nothing and silently dropped
+			// every held token at end of stream.
+			if key == prefix+mm.Match || (allBlocks && strings.HasSuffix(key, reverseBrandLaneSuffix+mm.Match)) {
 				next, _ := replaceInsensitiveWithPrev(carry, false, mm.Match, mm.Replacement)
 				flush = append(flush, next)
 				break
@@ -3744,7 +3760,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		}
 		// Every resolved client runs a brand reverse, not just Oh My Pi.
 		// reverseBrandSSE dispatches: oh_my_pi takes the protected-brand lane,
-		// everyone else takes the defaultReverseBrandMappings set. A session
+		// everyone else takes its own client's reverse set. A session
 		// with no resolved client has nothing to restore against, so it is
 		// left alone rather than guessed at.
 		brandChanged := false
@@ -4052,7 +4068,16 @@ func safeMarshal(v any) ([]byte, error) {
 // session and its subagents share it.
 const antigravityIdentity = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding."
 
-var defaultRewriteMappings = []rewriteMapping{
+// Forward brand tables, one per client. Exactly one is consulted per request:
+// the resolved client — an explicit X-Cloak-Client header first, then verified
+// User-Agent evidence, then body detection — selects its own table and no other.
+// Adding a client (opencode, cursor, ...) is one table here plus one line in
+// brandMappingsByClient; nothing else in the rewrite path changes.
+//
+// A client's forward and reverse table are declared together, because they are
+// two halves of one identity: whatever that client's own words are rewritten to
+// must be rewritten back to that same client's words, and nothing else.
+var claudeCodeBrandMappings = []rewriteMapping{
 	// Opening identity lines. Each names the vendor twice, so token substitution
 	// alone yields nonsense ("Antigravity, Google's official CLI for
 	// Antigravity"). The replacements are the verbatim <identity> lines used by
@@ -4066,14 +4091,13 @@ var defaultRewriteMappings = []rewriteMapping{
 	// the actual vendor of the Antigravity surface this plugin impersonates.
 	// Must precede any bare vendor mapping.
 	{Match: "Anthropic's official CLI", Replacement: "Google's official CLI"},
-	// The client home instruction file. Claude Code injects
-	// ~/.claude/CLAUDE.md as the user's private global instructions;
-	// Antigravity carries the mirror image at ~/.gemini/GEMINI.md. The whole
-	// path is matched (both separators) so it fires ahead of the general
-	// CLAUDE.md rule below, and GEMINI.md is the only instruction-file token
-	// that may be mapped back on the response path.
+	// The client home instruction file. Claude Code injects ~/.claude/CLAUDE.md
+	// as the user's private global instructions; Antigravity carries the mirror
+	// image at ~/.gemini/GEMINI.md. The whole path is matched (both separators)
+	// so it fires ahead of the bare CLAUDE.md rule below.
 	{Match: ".claude/CLAUDE.md", Replacement: ".gemini/GEMINI.md"},
 	{Match: ".claude\\CLAUDE.md", Replacement: ".gemini\\GEMINI.md"},
+	claudeMdBrandMapping,
 	// Official product/URL names, taken from antigravity.google and its docs.
 	// The product is "Antigravity SDK" (pip install google-antigravity); the
 	// platform lives on antigravity.google.
@@ -4088,90 +4112,67 @@ var defaultRewriteMappings = []rewriteMapping{
 	{Match: "claude-opus-5-5", Replacement: "gemini-3.1-pro-low"},
 	{Match: "claude-sonnet-5", Replacement: "gemini-3.8-flash"},
 	{Match: "claude-haiku-4-5-20251001", Replacement: "gemini-3.5-flash-lite"},
-	// Project instruction file. The catch-all "Claude" rule below is
-	// case-sensitive, so uppercase CLAUDE.md would otherwise survive intact
-	// and leak the client. Antigravity reads the same file as AGENTS.md.
-	{Match: "CLAUDE.md", Replacement: "AGENTS.md"},
 	// Claude Code's multi-agent workflow tool. Antigravity ships the same
-	// capability as teamwork_preview_layer, so a cloaked request names the
-	// tool Antigravity traffic would actually use. Scoped to claude_code
-	// because the name is a client-specific surface, not a brand token.
-	{Match: "Workflow", Replacement: "teamwork_preview_layer", Client: "claude_code"},
-	// Plural of the tool name above. Matching is word-bounded, so "Workflows"
-	// in prose is a distinct token and would otherwise survive. Grammar is
+	// capability as teamwork_preview_layer, so a cloaked request names the tool
+	// Antigravity traffic would actually use. It is a client-specific surface,
+	// not a brand token.
+	{Match: "Workflow", Replacement: "teamwork_preview_layer"},
+	// Plural of the tool name above. Matching is word-bounded, so "Workflows" in
+	// prose is a distinct token and would otherwise survive. Grammar is
 	// deliberately not repaired, same policy as the bare-brand rules below.
-	{Match: "Workflows", Replacement: "teamwork_preview_layer", Client: "claude_code"},
-	// Bare vendor name. Mapped to "Google Deepmind" rather than a plain
-	// "Google" so the reverse pass has a token specific enough to match
-	// safely: a bare "Google" would fire on ordinary response prose, while
-	// "Google Deepmind" is exactly the vendor's own name and nothing else.
+	{Match: "Workflows", Replacement: "teamwork_preview_layer"},
+	// Bare vendor name. Mapped to "Google Deepmind" rather than a plain "Google"
+	// so the reverse pass has a token specific enough to match safely: a bare
+	// "Google" would fire on ordinary response prose, while "Google Deepmind" is
+	// exactly the vendor's own name and nothing else.
 	{Match: "Anthropic", Replacement: "Google Deepmind"},
 	// Catch-all. Must stay after every longer "Claude" form above.
 	{Match: "Claude", Replacement: "Antigravity"},
+}
+
+var codexBrandMappings = []rewriteMapping{
+	claudeMdBrandMapping,
+	// Codex's own prompts carry no vendor token, so the client name is the
+	// entire forward surface. Verified against codex-rs/core/gpt_5*.md:
+	// AGENTS.md eleven times, anthropic/claude/gemini/CLAUDE.md zero times.
 	{Match: "OpenAI Codex", Replacement: "Antigravity"},
 	{Match: "Codex CLI", Replacement: "Antigravity"},
 	{Match: "Codex", Replacement: "Antigravity"},
-	{Match: "OpenCode", Replacement: "Antigravity"},
-	{Match: "GitHub Copilot CLI", Replacement: "Antigravity"},
-	{Match: "GitHub Copilot", Replacement: "Antigravity"},
-	{Match: "Gemini Code Assist", Replacement: "Antigravity"},
-	{Match: "Gemini CLI", Replacement: "Antigravity"},
-	{Match: "Cursor", Replacement: "Antigravity"},
-	{Match: "Windsurf", Replacement: "Antigravity"},
-	{Match: "Codeium", Replacement: "Antigravity"},
-	{Match: "Cline", Replacement: "Antigravity"},
-	{Match: "Roo Code", Replacement: "Antigravity"},
-	{Match: "Kilo Code", Replacement: "Antigravity"},
-	{Match: "Aider", Replacement: "Antigravity"},
-	{Match: "Continue.dev", Replacement: "Antigravity"},
-	{Match: "Amazon Q Developer", Replacement: "Antigravity"},
-	{Match: "Amazon CodeWhisperer", Replacement: "Antigravity"},
-	{Match: "JetBrains AI Assistant", Replacement: "Antigravity"},
-	{Match: "JetBrains Junie", Replacement: "Antigravity"},
-	{Match: "Kiro", Replacement: "Antigravity"},
-	{Match: "Qoder CLI", Replacement: "Antigravity"},
-	{Match: "Qoder", Replacement: "Antigravity"},
-	{Match: "Qwen Code", Replacement: "Antigravity"},
-	{Match: "Trae", Replacement: "Antigravity"},
-	{Match: "Tabnine", Replacement: "Antigravity"},
-	{Match: "Sourcegraph Cody", Replacement: "Antigravity"},
-	{Match: "Augment Code", Replacement: "Antigravity"},
-	{Match: "Replit Agent", Replacement: "Antigravity"},
-	{Match: "Replit Ghostwriter", Replacement: "Antigravity"},
-	{Match: "Devin", Replacement: "Antigravity"},
-	{Match: "OpenHands", Replacement: "Antigravity"},
-	{Match: "SWE-agent", Replacement: "Antigravity"},
-	{Match: "Goose", Replacement: "Antigravity"},
-	{Match: "Zed AI", Replacement: "Antigravity"},
-	{Match: "Void Editor", Replacement: "Antigravity"},
-	{Match: "PearAI", Replacement: "Antigravity"},
-	{Match: "Refact.ai", Replacement: "Antigravity"},
-	{Match: "Tabby", Replacement: "Antigravity"},
-	{Match: "GitLab Duo", Replacement: "Antigravity"},
-	{Match: "Visual Studio IntelliCode", Replacement: "Antigravity"},
-	{Match: "CodeBuddy", Replacement: "Antigravity"},
-	{Match: "Blackbox AI", Replacement: "Antigravity"},
-	{Match: "Pieces for Developers", Replacement: "Antigravity"},
-	{Match: "Qodo", Replacement: "Antigravity"},
-	{Match: "CodiumAI", Replacement: "Antigravity"},
-	{Match: "Rovo Dev CLI", Replacement: "Antigravity"},
-	{Match: "Factory Droid", Replacement: "Antigravity"},
+}
 
-	// Oh My Pi coding agent & harness.
+var ompBrandMappings = []rewriteMapping{
+	claudeMdBrandMapping,
+	// Oh My Pi coding agent & harness. On the protected route these go through
+	// the sentinel path instead; these entries cover an OMP marker that did not
+	// take the protected branch.
 	{Match: "Oh My Pi", Replacement: "Antigravity"},
 	{Match: "oh-my-pi", Replacement: "Antigravity"},
 	{Match: "omp", Replacement: "Antigravity"},
-
-	// General-purpose local agents that can generate and modify code.
-	{Match: "OpenClaw", Replacement: "Antigravity"},
-	{Match: "Clawdbot", Replacement: "Antigravity"},
-	{Match: "Moltbot", Replacement: "Antigravity"},
-	{Match: "Hermes Agent", Replacement: "Antigravity"},
-	{Match: "Hermes", Replacement: "Antigravity"},
-	{Match: "WorkBuddy", Replacement: "Antigravity"},
 }
 
-var defaultReverseBrandMappings = []rewriteMapping{
+// claudeMdBrandMapping is the one rule every client shares: each supported
+// client reads a CLAUDE.md as a context source, and its target (AGENTS.md) is
+// never inverted, so it cannot make any reverse ambiguous. It is referenced by
+// each table rather than declared globally, because the tables are the single
+// place where a client's rewriting is declared.
+var claudeMdBrandMapping = rewriteMapping{Match: "CLAUDE.md", Replacement: "AGENTS.md"}
+
+// brandMappingsByClient is the whole forward surface. A resolved client with no
+// entry has no forward brand table, so its request body is left untouched.
+var brandMappingsByClient = map[string][]rewriteMapping{
+	"claude_code": claudeCodeBrandMappings,
+	"codex":       codexBrandMappings,
+	"oh_my_pi":    ompBrandMappings,
+}
+
+// Reverse tables, same shape and the same selection rule by resolved client. A
+// reverse entry's Match is what that client's forward table produced, so the two
+// are read together: claude_code rewrites Claude -> Antigravity and reads
+// Antigravity -> Claude back.
+//
+// Oh My Pi has no entry here: it runs the protected brand lane, whose
+// Antigravity -> omp pair is its own reverse authority.
+var claudeCodeReverseBrandMappings = []rewriteMapping{
 	{Match: ".gemini/GEMINI.md", Replacement: ".claude/CLAUDE.md"},
 	{Match: ".gemini\\GEMINI.md", Replacement: ".claude\\CLAUDE.md"},
 	{Match: "GEMINI.md", Replacement: "CLAUDE.md"},
@@ -4179,12 +4180,39 @@ var defaultReverseBrandMappings = []rewriteMapping{
 	// replacement is the two-word vendor name and not the bare "Google", which
 	// would collide with ordinary prose in model output.
 	{Match: "Google Deepmind", Replacement: "Anthropic"},
-	// A client-declared identifier, like a tool name: the skill slug lives in
-	// the client's own registry, so the response has to hand back a slug the
-	// client can actually resolve. Without this the model calls
-	// Skill("Antigravity-api") and the client answers "Unknown skill".
+	// A client-declared identifier, like a tool name: the skill slug lives in the
+	// client's own registry, so the response has to hand back a slug the client
+	// can actually resolve. Without this the model calls Skill("Antigravity-api")
+	// and the client answers "Unknown skill".
 	{Match: "Antigravity-api", Replacement: "claude-api"},
 	{Match: "Antigravity SDK", Replacement: "Anthropic SDK"},
+	// The bare brand word, listed last so the two longer "Antigravity" tokens
+	// above win the prefix. This client's forward pass produced that word only
+	// from its own name, so inverting it here is unambiguous.
+	{Match: "Antigravity", Replacement: "Claude"},
+}
+
+var codexReverseBrandMappings = []rewriteMapping{
+	{Match: "Antigravity", Replacement: "Codex"},
+}
+
+var reverseBrandMappingsByClient = map[string][]rewriteMapping{
+	"claude_code": claudeCodeReverseBrandMappings,
+	"codex":       codexReverseBrandMappings,
+}
+
+// brandMappingsFor returns the forward table for one client, or nil when the
+// client has none. Order within a table is load-bearing: a longer token that
+// contains a shorter one must run first.
+func brandMappingsFor(client string) []rewriteMapping {
+	return brandMappingsByClient[client]
+}
+
+// reverseBrandMappingsFor returns the reverse table for one client, or nil when
+// the client has none. Order is load-bearing here too, for the bare
+// "Antigravity" token in particular.
+func reverseBrandMappingsFor(client string) []rewriteMapping {
+	return reverseBrandMappingsByClient[client]
 }
 
 type rewriteMapping struct {
@@ -4202,14 +4230,16 @@ type rewriteMapping struct {
 //
 // This is separate from reverseBrandInResponseBody, which is the Oh My Pi
 // protected-brand policy (Antigravity -> omp) and has its own chunk-safe
-// streaming lane. The two never overlap: none of the reverse mappings above
-// produce or consume the "Antigravity" token.
-func reverseCloakedBrandBody(body []byte) ([]byte, bool) {
+// streaming lane. For claude_code and codex the two tables do share the bare
+// "Antigravity" token: those clients run this pass and invert it to their own
+// name, while Oh My Pi runs the protected lane and inverts it to omp. No client
+// runs both, so the token is still inverted exactly once.
+func reverseCloakedBrandBody(body []byte, client string) ([]byte, bool) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {
 		return nil, false
 	}
-	next, changed := rewriteSystemValue(root, defaultReverseBrandMappings)
+	next, changed := rewriteSystemValue(root, reverseBrandMappingsFor(client))
 	if !changed {
 		return nil, false
 	}
@@ -5136,7 +5166,7 @@ func parseMappingString(value string) ([]rewriteMapping, error) {
 func effectiveMappings(cfg *filterConfig, client string) []rewriteMapping {
 	var mappings []rewriteMapping
 	if cfg == nil || cfg.UseDefaultKeywords {
-		mappings = append(mappings, defaultRewriteMappings...)
+		mappings = append(mappings, brandMappingsFor(client)...)
 	}
 	if cfg != nil && len(cfg.CustomMappings) > 0 {
 		mappings = append(mappings, cfg.CustomMappings...)
@@ -5874,14 +5904,14 @@ func applyBrandLane(text string, lane *brandLane, match, replacement string) (st
 // token being matched inside it, so one block can carry one lane per mapping.
 const reverseBrandLaneSuffix = "\x00"
 
-// applyReverseBrandLanes runs every defaultReverseBrandMappings entry over a
+// applyReverseBrandLanes runs every reverse-table entry for this session over a
 // streamed text fragment, one lane each.
 func applyReverseBrandLanes(sess *streamSession, laneKey, text string) (string, bool) {
 	if sess == nil || text == "" {
 		return text, false
 	}
 	out, changed := text, false
-	for _, m := range defaultReverseBrandMappings {
+	for _, m := range reverseBrandMappingsFor(sess.client) {
 		next, c := applyBrandLane(out, getBrandLane(sess, laneKey+reverseBrandLaneSuffix+m.Match), m.Match, m.Replacement)
 		out = next
 		changed = changed || c

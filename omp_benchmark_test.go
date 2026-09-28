@@ -226,6 +226,8 @@ func BenchmarkOMPChoiceCount(b *testing.B) {
 }
 
 func BenchmarkOMPBrandDerivation(b *testing.B) {
+	// The protected brand walker always runs for the Oh My Pi client.
+	const client = "oh_my_pi"
 	for _, custom := range []int{0, 32} {
 		b.Run(fmt.Sprintf("custom%d", custom), func(b *testing.B) {
 			cfg := defaultFilterConfig()
@@ -236,18 +238,22 @@ func BenchmarkOMPBrandDerivation(b *testing.B) {
 				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					// Attribution probe of main.go's rewriteProtectedBrandText
-					// mapping-derivation block (680-693 at 1428005). Keep this
-					// probe in sync if that production block changes.
+					// mapping-derivation block. Keep this probe in sync if that
+					// production block changes: it now draws from the resolved
+					// client's own table and applies the same client scope.
+					inScope := func(m rewriteMapping) bool {
+						return (m.Client == "" || m.Client == client) && !isOMPAlias(m.Match)
+					}
 					var mappings []rewriteMapping
 					if cfg.UseDefaultKeywords {
-						for _, m := range defaultRewriteMappings {
-							if !isOMPAlias(m.Match) {
+						for _, m := range brandMappingsFor(client) {
+							if inScope(m) {
 								mappings = append(mappings, m)
 							}
 						}
 					}
 					for _, m := range cfg.CustomMappings {
-						if !isOMPAlias(m.Match) {
+						if inScope(m) {
 							mappings = append(mappings, m)
 						}
 					}
@@ -259,7 +265,7 @@ func BenchmarkOMPBrandDerivation(b *testing.B) {
 				b.Run(fmt.Sprintf("RewriteNoMatch/%dB", size), func(b *testing.B) {
 					b.ReportAllocs()
 					for i := 0; i < b.N; i++ {
-						result, _ := rewriteProtectedBrandText(text, &cfg)
+						result, _ := rewriteProtectedBrandText(text, &cfg, client)
 						runtime.KeepAlive(result)
 					}
 				})

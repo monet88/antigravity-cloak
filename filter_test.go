@@ -20,27 +20,42 @@ func TestRewriteRequestReplacesDefaultSystemKeywords(t *testing.T) {
 		name string
 		body string
 		want string
+		// client is the resolved client the case is driven with.
+		client string
+		// wantUnchanged marks a body no client owns, so nothing may touch it.
+		wantUnchanged bool
 	}{
 		{
-			name: "string system mentions opencode",
-			body: `{"system":"You are OpenCode, an AI coding tool."}`,
-			want: "You are Antigravity, an AI coding tool.",
+			// A competitor name belongs to no table: under the per-client model
+			// only a client's own identity is rewritten, so this survives.
+			name:          "competitor name is owned by nobody",
+			body:          `{"system":"You are OpenCode, an AI coding tool."}`,
+			client:        "claude_code",
+			wantUnchanged: true,
 		},
 		{
-			name: "array system mentions claude code",
-			body: `{"system":[{"type":"text","text":"Run as Claude Code."}]}`,
-			want: "Run as Antigravity.",
+			name:   "array system mentions claude code",
+			body:   `{"system":[{"type":"text","text":"Run as Claude Code."}]}`,
+			want:   "Run as Antigravity.",
+			client: "claude_code",
 		},
 		{
-			name: "case insensitive codex",
-			body: `{"system":"route this CODEX session"}`,
-			want: "route this Antigravity session",
+			name:   "case insensitive codex",
+			body:   `{"system":"route this CODEX session"}`,
+			want:   "route this Antigravity session",
+			client: "codex",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(tt.body), "openai", "claude_code")
+			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(tt.body), "openai", tt.client)
+			if tt.wantUnchanged {
+				if rewritten {
+					t.Fatalf("body owned by no client was rewritten: %s", got)
+				}
+				return
+			}
 			if !rewritten {
 				t.Fatalf("rewritten = false, want true")
 			}
@@ -60,8 +75,8 @@ func TestRewriteRequestCloaksClientContextButNotTypedUserText(t *testing.T) {
 	// machine-generated context and are still cloaked.
 	body := []byte(`{
 		"messages":[
-			{"role":"user","content":"compare OpenCode and Codex please"},
-			{"role":"assistant","content":"OpenCode is a tool"},
+			{"role":"user","content":"compare Claude Code and Codex please"},
+			{"role":"assistant","content":"Claude Code is a tool"},
 			{"role":"user","content":"<system-reminder>the catalogue mentions Anthropic</system-reminder>"}
 		],
 		"input":"Claude Code is mentioned by the user"
@@ -75,10 +90,10 @@ func TestRewriteRequestCloaksClientContextButNotTypedUserText(t *testing.T) {
 		t.Fatalf("rewritten body is not JSON: %v", err)
 	}
 	msgs := doc["messages"].([]any)
-	if typed := msgs[0].(map[string]any)["content"].(string); typed != "compare OpenCode and Codex please" {
+	if typed := msgs[0].(map[string]any)["content"].(string); typed != "compare Claude Code and Codex please" {
 		t.Errorf("typed user text was altered: %q", typed)
 	}
-	if assistant := msgs[1].(map[string]any)["content"].(string); strings.Contains(assistant, "OpenCode") {
+	if assistant := msgs[1].(map[string]any)["content"].(string); strings.Contains(assistant, "Claude") {
 		t.Errorf("assistant text must be cloaked, got %q", assistant)
 	}
 	if reminder := msgs[2].(map[string]any)["content"].(string); !strings.Contains(reminder, "Google Deepmind") {
@@ -1241,28 +1256,64 @@ func TestParseFilterConfigYAMLModelPrefixes(t *testing.T) {
 	}
 }
 
-func TestBuiltInKeywordPresetCoversMainstreamCodingToolsAndAgents(t *testing.T) {
+func TestBuiltInBrandTablesCoverEachClientsOwnIdentity(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	applyFilterConfig(defaultFilterConfig())
 
-	for _, mapping := range defaultRewriteMappings {
-		keyword := mapping.Match
-		t.Run(keyword, func(t *testing.T) {
-			// strconv.Quote, not raw concatenation: a keyword containing a
-			// backslash would otherwise emit an invalid JSON escape and the body
-			// would fail to parse, silently passing a rule that never fired.
-			body := `{"system":` + strconv.Quote("You are running with "+keyword+" in this environment.") + `}`
-			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", "claude_code")
-			if !rewritten {
-				t.Fatalf("keyword %q was not rewritten", keyword)
+	// One table per client, driven with that client as the resolved client: a
+	// rule belongs to the client whose identity it is, and rewriting a keyword
+	// under a different client must leave it alone (asserted separately).
+	for client, mappings := range brandMappingsByClient {
+		for _, mapping := range mappings {
+			keyword := mapping.Match
+			t.Run(client+"/"+keyword, func(t *testing.T) {
+				// strconv.Quote, not raw concatenation: a keyword containing a
+				// backslash would otherwise emit an invalid JSON escape and the body
+				// would fail to parse, silently passing a rule that never fired.
+				body := `{"system":` + strconv.Quote("You are running with "+keyword+" in this environment.") + `}`
+				got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", client)
+				if !rewritten {
+					t.Fatalf("keyword %q was not rewritten for client %q", keyword, client)
+				}
+				// Assert the configured replacement landed verbatim rather than only
+				// that "Antigravity" appears: some keywords deliberately map onto a
+				// different surface (a vendor phrase, or a model id that must name a
+				// route the gateway really serves).
+				want := `{"system":` + strconv.Quote("You are running with "+mapping.Replacement+" in this environment.") + `}`
+				if string(got) != want {
+					t.Fatalf("keyword %q rewrote to\n  got  %s\n  want %s", keyword, got, want)
+				}
+			})
+		}
+	}
+}
+
+func TestBrandTableIsScopedToTheResolvedClient(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	applyFilterConfig(defaultFilterConfig())
+
+	// Each pair is a word that belongs to one client and a client that does not
+	// own it. The body must come back untouched: a target may only be produced
+	// by the client that owns it, or the reverse pass cannot invert it.
+	for _, tc := range []struct{ keyword, foreignClient string }{
+		{"Claude Code", "codex"},
+		{"Anthropic SDK", "codex"},
+		{"Claude Code", "oh_my_pi"},
+		{"OpenAI Codex", "claude_code"},
+		{"Codex", "claude_code"},
+		{"Oh My Pi", "claude_code"},
+		{"omp", "codex"},
+	} {
+		t.Run(tc.keyword+"-under-"+tc.foreignClient, func(t *testing.T) {
+			body := `{"system":` + strconv.Quote("You are running with "+tc.keyword+" in this environment.") + `}`
+			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", tc.foreignClient)
+			if rewritten {
+				t.Fatalf("keyword %q was rewritten under client %q:\n  %s", tc.keyword, tc.foreignClient, got)
 			}
-			// Assert the configured replacement landed verbatim rather than only
-			// that "Antigravity" appears: some keywords deliberately map onto a
-			// different surface (a vendor phrase, or a model id that must name a
-			// route the gateway really serves).
-			want := `{"system":` + strconv.Quote("You are running with "+mapping.Replacement+" in this environment.") + `}`
-			if string(got) != want {
-				t.Fatalf("keyword %q rewrote to\n  got  %s\n  want %s", keyword, got, want)
+			// The rewrite helper returns a nil body when nothing changed, so an
+			// untouched body arrives as nil rather than as the original bytes.
+			if got != nil && string(got) != body {
+				t.Fatalf("body mutated under client %q:\n  got  %s\n  want %s", tc.foreignClient, got, body)
 			}
 		})
 	}

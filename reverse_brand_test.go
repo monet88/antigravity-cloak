@@ -1024,7 +1024,7 @@ func TestReviewFix_OpenAIContentSingletonMapAllowlist(t *testing.T) {
 		{"type": "data", "text": "g Antigravity h"},
 	}
 	for _, part := range literal {
-		got, changed := reverseBrandInOpenAIContent(part)
+		got, changed := reverseBrandInOpenAIContent(part, "claude_code")
 		if changed {
 			t.Fatalf("explicit non-text part was rewritten: %v", got)
 		}
@@ -1038,7 +1038,7 @@ func TestReviewFix_OpenAIContentSingletonMapAllowlist(t *testing.T) {
 		{"text": "e Antigravity f"},
 	}
 	for _, part := range rewritten {
-		if _, changed := reverseBrandInOpenAIContent(part); !changed {
+		if _, changed := reverseBrandInOpenAIContent(part, "claude_code"); !changed {
 			t.Fatalf("assistant text part not rewritten: %v", part)
 		}
 	}

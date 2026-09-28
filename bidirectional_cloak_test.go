@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -193,11 +195,21 @@ func TestStreamingReverseFlushesCarryAtStreamEnd(t *testing.T) {
 	out1, _ := m.reverseBrandSSE(sess, held, "anthropic")
 	out2, _ := m.reverseBrandSSE(sess, done, "anthropic")
 
+	// The flushed carry necessarily arrives as its own delta event, because the
+	// bytes were withheld from the delta that held them. Reassemble the deltas
+	// the way a streaming client does before asserting on the text; matching the
+	// raw stream would only pass if the held token had leaked inline instead.
 	joined := string(out1) + string(out2)
-	if !strings.Contains(joined, "I read") {
+	text := ""
+	for _, mt := range regexp.MustCompile(`"text":"((?:[^"\\]|\\.)*)"`).FindAllStringSubmatch(joined, -1) {
+		if dec, err := strconv.Unquote(`"` + mt[1] + `"`); err == nil {
+			text += dec
+		}
+	}
+	if !strings.Contains(text, "I read") {
 		t.Fatalf("text before the held token was lost: %s", joined)
 	}
-	if !strings.Contains(joined, "~/.gemini/GEM") {
+	if !strings.Contains(text, "~/.gemini/GEM") {
 		t.Fatalf("held token was dropped at stream end instead of flushed: %s", joined)
 	}
 }

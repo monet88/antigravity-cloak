@@ -8,8 +8,15 @@ building, or debugging. Written for a future agent session.
 A CLIProxyAPI v7 dynamic plugin (buildmode=c-shared .so) that disguises
 coding-CLI traffic as Antigravity. Two jobs:
 
-1. Brand rewrite: replace OpenCode / Codex / Claude Code with Antigravity
-   in the request `system` field and `system`-role messages.
+1. Brand rewrite: replace the resolved client's own identity words with
+   Antigravity in the request `system` field and `system`-role messages, then
+   restore them on the way back. The forward and reverse tables are declared
+   per client (`brandMappingsByClient` / `reverseBrandMappingsByClient` in
+   `main.go`), and the resolved client selects exactly one and no other, so
+   every target a client's forward pass can produce inverts back to that same
+   client. Adding a client (opencode, cursor, ...) is one table plus one
+   registry line. A competitor product name owns no table, so a request that
+   merely mentions one is left alone.
 2. Tool-name cloaking: rename a client's native tool names to Antigravity tool
    names on the way up (request), then restore them on the way back (response +
    stream), so the client still sees its own tool names.

@@ -89,11 +89,15 @@ func clientContexts() []clientContext {
 			brandBack:    "",
 		},
 		{
+			// Codex owns no vendor token, so its table holds only its own name.
+			// The bare brand word is both what it rewrites and what the reverse
+			// hands back; CLAUDE.md -> AGENTS.md is one-way on purpose, since
+			// AGENTS.md is Codex's own convention and needs no reverse.
 			client: "codex", tools: codexTools, format: "openai", declared: "openai",
-			sent:         "see .claude/CLAUDE.md and the Anthropic SDK from Google Deepmind",
-			echoes:       "see .gemini/GEMINI.md and the Antigravity SDK from Google Deepmind",
-			mustComeBack: ".claude/CLAUDE.md",
-			mustNotReach: ".gemini/GEMINI.md",
+			sent:         "read CLAUDE.md, then run Codex",
+			echoes:       "read AGENTS.md, then run Antigravity",
+			mustComeBack: "Codex",
+			mustNotReach: "Antigravity",
 		},
 		{
 			// Oh My Pi ships bare filenames in prose and brands itself Oh My Pi.
