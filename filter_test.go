@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -50,19 +51,41 @@ func TestRewriteRequestReplacesDefaultSystemKeywords(t *testing.T) {
 	}
 }
 
-func TestRewriteRequestIgnoresKeywordsOutsideSystem(t *testing.T) {
-	// UPDATED: This test now verifies brand replace does NOT touch
-	// user/assistant message content. System role messages ARE replaced (new behavior).
+func TestRewriteRequestCloaksClientContextButNotTypedUserText(t *testing.T) {
+	// The typed message is the user's own words and is left byte-identical: if
+	// it were cloaked, anything the model then writes to disk would be
+	// persisted in the cloaked spelling with no way back, because a file never
+	// flows through the response path that reverses the other direction. The
+	// assistant turn and the client's own <system-reminder> block are
+	// machine-generated context and are still cloaked.
 	body := []byte(`{
 		"messages":[
-			{"role":"user","content":"please compare OpenCode and Codex"},
-			{"role":"assistant","content":"Claude Code is a tool"}
+			{"role":"user","content":"compare OpenCode and Codex please"},
+			{"role":"assistant","content":"OpenCode is a tool"},
+			{"role":"user","content":"<system-reminder>the catalogue mentions Anthropic</system-reminder>"}
 		],
 		"input":"Claude Code is mentioned by the user"
 	}`)
 	got, rewritten, _ := rewriteRequestBodyWithClient(body, "openai", "claude_code")
-	if rewritten {
-		t.Fatalf("rewritten = true, want false; body=%s", got)
+	if !rewritten {
+		t.Fatalf("client context must still be rewritten; body=%s", got)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(got, &doc); err != nil {
+		t.Fatalf("rewritten body is not JSON: %v", err)
+	}
+	msgs := doc["messages"].([]any)
+	if typed := msgs[0].(map[string]any)["content"].(string); typed != "compare OpenCode and Codex please" {
+		t.Errorf("typed user text was altered: %q", typed)
+	}
+	if assistant := msgs[1].(map[string]any)["content"].(string); strings.Contains(assistant, "OpenCode") {
+		t.Errorf("assistant text must be cloaked, got %q", assistant)
+	}
+	if reminder := msgs[2].(map[string]any)["content"].(string); !strings.Contains(reminder, "Google Deepmind") {
+		t.Errorf("<system-reminder> client context must be cloaked, got %q", reminder)
+	}
+	if s, _ := doc["input"].(string); s != "Claude Code is mentioned by the user" {
+		t.Errorf("top-level input is the typed turn and must be untouched, got %q", s)
 	}
 }
 
@@ -328,8 +351,8 @@ func TestRewriteRequestBodyAppliesBrandReplaceToSystemMessages(t *testing.T) {
 	}
 
 	m1 := msgs[1].(map[string]any)
-	if content := m1["content"].(string); !strings.Contains(content, "Claude Code") {
-		t.Errorf("user message content = %q, want unchanged", content)
+	if content := m1["content"].(string); content != "hello Claude Code" {
+		t.Errorf("typed user message = %q, want it left byte-identical", content)
 	}
 }
 
@@ -1225,16 +1248,21 @@ func TestBuiltInKeywordPresetCoversMainstreamCodingToolsAndAgents(t *testing.T) 
 	for _, mapping := range defaultRewriteMappings {
 		keyword := mapping.Match
 		t.Run(keyword, func(t *testing.T) {
-			body := `{"system":"You are running with ` + keyword + ` in this environment."}`
+			// strconv.Quote, not raw concatenation: a keyword containing a
+			// backslash would otherwise emit an invalid JSON escape and the body
+			// would fail to parse, silently passing a rule that never fired.
+			body := `{"system":` + strconv.Quote("You are running with "+keyword+" in this environment.") + `}`
 			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", "claude_code")
 			if !rewritten {
 				t.Fatalf("keyword %q was not rewritten", keyword)
 			}
-			if strings.Contains(strings.ToLower(string(got)), strings.ToLower(keyword)) && strings.ToLower(keyword) != "antigravity" {
-				t.Fatalf("keyword %q still present in output: %s", keyword, got)
-			}
-			if !strings.Contains(string(got), "Antigravity") {
-				t.Fatalf("replacement Antigravity missing for keyword %q: %s", keyword, got)
+			// Assert the configured replacement landed verbatim rather than only
+			// that "Antigravity" appears: some keywords deliberately map onto a
+			// different surface (a vendor phrase, or a model id that must name a
+			// route the gateway really serves).
+			want := `{"system":` + strconv.Quote("You are running with "+mapping.Replacement+" in this environment.") + `}`
+			if string(got) != want {
+				t.Fatalf("keyword %q rewrote to\n  got  %s\n  want %s", keyword, got, want)
 			}
 		})
 	}
@@ -1868,6 +1896,140 @@ func TestReplaceBrandKeywordSkipsPathSegments(t *testing.T) {
 	if !bcExtension || !strings.Contains(string(bExtension), "/home/user/profile.Antigravity/agent") {
 		t.Fatalf("profile.omp must be masked to Antigravity: changed=%v body=%s", bcExtension, bExtension)
 	}
+}
+
+func TestRewriteMasksBareClaudeAndRemapsClaudeHomePath(t *testing.T) {
+	applyFilterConfig(filterConfig{
+		UseDefaultKeywords: true,
+		ToolMappings:       copyToolMappings(defaultCloakTables),
+	})
+	defer restoreDefaultFilterConfig(t)
+
+	// Real strings lifted from a live Claude Code system instruction: the
+	// multi-word form must be consumed first, and the bare brand must mask.
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		changed bool
+	}{
+		// Both the main session and the subagent open with an identity line that
+		// names the vendor twice; each maps onto the real Antigravity wording.
+		{"main identity sentence", `You are Claude Code, Anthropic's official CLI for Claude.`, antigravityIdentity, true},
+		{"subagent identity sentence", `You are a Claude agent, built on Anthropic's Claude Agent SDK.`, antigravityIdentity, true},
+		{"claude code longer form first", `You are an agent for Claude Code.`, `You are an agent for Antigravity.`, true},
+		// Literal substitution does not repair the article: "a Claude" becomes
+		// "a Antigravity". Grammar repair is deliberately out of scope.
+		{"bare claude prose keeps article", `You are a Claude agent.`, `You are a Antigravity agent.`, true},
+		{"claude agent sdk uses official product name", `built on Claude Agent SDK`, `built on Antigravity SDK`, true},
+		{"vendor phrase then bare claude", `Anthropic's official CLI for Claude.`, `Google's official CLI for Antigravity.`, true},
+		// Model IDs must land on Antigravity routes the gateway really serves, so
+		// the bare "Claude" rule cannot consume the vendor prefix first.
+		{"opus model id", `Opus 5.5: 'claude-opus-5-5'`, `Opus 5.5: 'gemini-3.1-pro-low'`, true},
+		{"fable model id", `Fable 5.1: 'claude-fable-5-1'`, `Fable 5.1: 'gemini-3.1-pro-low'`, true},
+		{"sonnet model id", `Sonnet 5: 'claude-sonnet-5'`, `Sonnet 5: 'gemini-3.8-flash'`, true},
+		{"haiku model id", `Haiku 4.5: 'claude-haiku-4-5-20251001'`, `Haiku 4.5: 'gemini-3.5-flash-lite'`, true},
+		// A model ID the table does not know still loses its vendor prefix.
+		{"unknown model id falls through", `'claude-9-9'`, `'Antigravity-9-9'`, true},
+		{"url uses official domain", `web app (claude.ai/code)`, `web app (antigravity.google/code)`, true},
+		// The client home directory maps onto the Antigravity equivalent so the
+		// model is not handed a dead .Antigravity path.
+		{"claude home remapped to gemini", `memory at C:\\Users\\monet\\.claude\\projects\\slug\\memory`, `memory at C:\\Users\\monet\\.gemini\\projects\\slug\\memory`, true},
+		{"unix claude home remapped", `memory at /home/user/.claude/projects/slug`, `memory at /home/user/.gemini/projects/slug`, true},
+		// Not a path segment, so the brand still masks.
+		{"claude-backup is not a path segment", `/home/user/.claude-backup/x`, `/home/user/.Antigravity-backup/x`, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":`+strconv.Quote(tc.in)+`}`), "anthropic", "claude_code")
+			got := systemText(t, body)
+			if changed != tc.changed {
+				t.Fatalf("changed = %v, want %v (body=%s)", changed, tc.changed, body)
+			}
+			if got != tc.want {
+				t.Fatalf("system = %q, want %q", got, tc.want)
+			}
+		})
+	}
+
+	// A system prompt with no Claude token is left byte-identical.
+	if _, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"nothing to mask here"}`), "anthropic", "claude_code"); changed {
+		t.Fatalf("unrelated system text must not be rewritten")
+	}
+}
+
+func TestWorkflowRuleIsScopedToClaudeCode(t *testing.T) {
+	applyFilterConfig(filterConfig{
+		UseDefaultKeywords: true,
+		ToolMappings:       copyToolMappings(defaultCloakTables),
+	})
+	defer restoreDefaultFilterConfig(t)
+
+	// The workflow tool name is a client surface, not a brand token: only
+	// Claude Code traffic gets it renamed onto Antigravity's own tool. The
+	// plural is renamed too, because a word-bounded matcher treats it as a
+	// different token and leaving it would keep the client name in the
+	// payload. Grammar is not repaired, same policy as the bare-brand rules.
+	const in = `Use the Workflow tool. Workflows run in the background.`
+	const want = `Use the teamwork_preview_layer tool. teamwork_preview_layer run in the background.`
+
+	body, changed, client := rewriteRequestBodyWithClient([]byte(`{"system":`+strconv.Quote(in)+`}`), "anthropic", "claude_code")
+	if client != "claude_code" {
+		t.Fatalf("resolved client = %q, want claude_code", client)
+	}
+	if !changed || systemText(t, body) != want {
+		t.Fatalf("claude_code system = %q, want %q", systemText(t, body), want)
+	}
+
+	// Another client declaring the same tool name must keep it: renaming here
+	// would rewrite a tool name the client actually called.
+	other, otherChanged, _ := rewriteRequestBodyWithClient([]byte(`{"system":`+strconv.Quote(in)+`}`), "anthropic", "codex")
+	if otherChanged {
+		t.Fatalf("codex system must be untouched, got %q", systemText(t, other))
+	}
+}
+
+func TestClaudeMdInstructionFileIsRemappedInToolDescriptions(t *testing.T) {
+	applyFilterConfig(filterConfig{
+		UseDefaultKeywords: true,
+		ToolMappings:       copyToolMappings(defaultCloakTables),
+	})
+	defer restoreDefaultFilterConfig(t)
+
+	// Both strings were observed leaking upstream on a request that returned
+	// 200: the client home directory inside a skill description, and the
+	// uppercase instruction file name the case-sensitive catch-all misses.
+	body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"x","tools":[{"name":"Bash","description":"Edit ~/CLAUDE.md, rekey ~/.claude/keybindings.json and project .claude/settings.json","input_schema":{"type":"object"}}]}`), "anthropic", "claude_code")
+	if !changed {
+		t.Fatalf("tool description must be rewritten (body=%s)", body)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("rewritten body is not JSON: %v", err)
+	}
+	desc, _ := doc["tools"].([]any)[0].(map[string]any)["description"].(string)
+	for _, leak := range []string{"CLAUDE.md", ".claude/"} {
+		if strings.Contains(desc, leak) {
+			t.Fatalf("tool description still leaks %q: %s", leak, desc)
+		}
+	}
+	if !strings.Contains(desc, "AGENTS.md") || !strings.Contains(desc, ".gemini/") {
+		t.Fatalf("tool description not remapped to Antigravity equivalents: %s", desc)
+	}
+}
+
+// systemText extracts the system field of a rewritten request body for assertions.
+func systemText(t *testing.T, body []byte) string {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal(body, &doc); err != nil {
+		t.Fatalf("rewritten body is not JSON: %v (body=%s)", err, body)
+	}
+	sys, ok := doc["system"].(string)
+	if !ok {
+		t.Fatalf("system field missing or not a string: %s", body)
+	}
+	return sys
 }
 
 func TestDetectClientOhMyPiRequiresSignatureOrThreshold(t *testing.T) {
