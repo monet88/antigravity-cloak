@@ -53,19 +53,25 @@ func TestBidirectionalBrandRoundTrip(t *testing.T) {
 	handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`model_prefixes: [agy]`)))
 
 	cases := []struct {
-		name string
-		req  string
-		resp string
-		want string
+		name         string
+		req, resp    string
+		want         string
+		mustNotReach []string
+		mustReach    []string
 	}{
 		{
 			// The audit covers the posix spelling and the SDK name; only the
 			// windows separator is unique to this path.
 			name: "home instruction file, windows path",
-			req:  `{"messages":[{"role":"user","content":"<system-reminder>read C:\\\\Users\\\\dev\\\\.claude\\CLAUDE.md now</system-reminder>"}]}`,
+			req:  `{"messages":[{"role":"user","content":"<system-reminder>read C:\\\\Users\\\\dev\\\\.claude\\CLAUDE.md and the Anthropic SDK now</system-reminder>"}]}`,
 			resp: `{"content":[{"type":"text","text":"I read C:\\\\Users\\\\dev\\\\.gemini\\GEMINI.md and it says hello."}]}`,
 			// back is the raw JSON text, so path separators appear escaped.
 			want: `C:\\\\Users\\\\dev\\\\.claude\\CLAUDE.md`,
+			// asserted against the forward body, in the escaped spelling that
+			// body actually carries. The previous list used a forward slash on a
+			// backslash path, so it could never fire.
+			mustNotReach: []string{`.claude\\CLAUDE.md`, `Anthropic SDK`},
+			mustReach:    []string{`.gemini\\GEMINI.md`, `Antigravity SDK`},
 		},
 	}
 
@@ -73,10 +79,17 @@ func TestBidirectionalBrandRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			reqID := "req_bidi_" + strings.ReplaceAll(tc.name, " ", "_")
 			forward := forwardCloakedBody(t, reqID, tc.req)
-			// Nothing the client spelled may survive toward the model.
-			for _, leak := range []string{".claude/CLAUDE.md", "Anthropic SDK"} {
+			// The client's own spellings must not survive toward the model, and
+			// the cloaked ones must actually be there. A leak check with no
+			// matching positive assertion passes on a no-op forward pass.
+			for _, leak := range tc.mustNotReach {
 				if strings.Contains(forward, leak) {
 					t.Fatalf("forward pass leaked %q: %s", leak, forward)
+				}
+			}
+			for _, want := range tc.mustReach {
+				if !strings.Contains(forward, want) {
+					t.Fatalf("forward pass did not produce %q: %s", want, forward)
 				}
 			}
 			back := reverseBrandPass(t, reqID, tc.req, tc.resp, "anthropic", "agy/claude-test")

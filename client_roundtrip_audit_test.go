@@ -145,12 +145,28 @@ func TestEveryClientReversesWhatItRewrites(t *testing.T) {
 			if forward == "" {
 				t.Fatalf("forward pass produced no body: %s", raw)
 			}
+			// Prove the forward half before testing the reverse half. A non-empty
+			// body proves nothing: tool declarations alone keep it non-empty, so
+			// a brand rewrite that never ran would still reach every assertion
+			// below and the whole round trip would be vacuous.
+			if !strings.Contains(forward, tc.echoes) {
+				t.Fatalf("%s: forward pass did not produce %q:\n%s", tc.client, tc.echoes, forward)
+			}
 
 			echo := tc.echoes
 			if tc.brandReply != "" {
 				echo += " " + tc.brandReply
 			}
-			reply := `{"choices":[{"message":{"content":"ok"}}],"content":[{"type":"text","text":"` + echo + `"}]}`
+			// Put the echo in the carrier THIS protocol's client actually reads.
+			// A single body carrying both shapes let the anthropic branch satisfy
+			// every case, so the openai string branch was never executed and
+			// stayed green while broken.
+			var reply string
+			if tc.format == "anthropic" {
+				reply = `{"content":[{"type":"text","text":"` + echo + `"}]}`
+			} else {
+				reply = `{"choices":[{"message":{"content":` + mustJSON(t, echo) + `}}]}`
+			}
 			back := reverseBrandPass(t, reqID, body, reply, tc.format, "agy/audit-model")
 			if back == "" {
 				t.Fatalf("%s: response reverse produced no body", tc.client)
@@ -186,9 +202,17 @@ func TestEveryClientReversesWhatItRewritesWhileStreaming(t *testing.T) {
 			reqBody := []byte(`{"system":"` + tc.sent + `","messages":[{"role":"user","content":"go"}],"tools":[` + tc.tools + `]}`)
 			h := http.Header{}
 			h.Set("X-Cloak-Client", tc.client)
-			if raw, code := handlePluginCall("request.intercept_before",
-				makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, tc.declared, "agy/audit-model", reqBody, h)); code != 0 {
+			raw, code := handlePluginCall("request.intercept_before",
+				makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, tc.declared, "agy/audit-model", reqBody, h))
+			if code != 0 {
 				t.Fatalf("code=%d, envelope=%s", code, raw)
+			}
+			// The stream test proves nothing about the forward pass either, for
+			// the same reason: the echo below is only meaningful if the model was
+			// really shown the cloaked spelling.
+			forward := string(decodeEnvelopeBody(t, raw))
+			if !strings.Contains(forward, tc.echoes) {
+				t.Fatalf("%s: forward pass did not produce %q:\n%s", tc.client, tc.echoes, forward)
 			}
 
 			m := globalStreamManager
