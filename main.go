@@ -1782,49 +1782,23 @@ func reverseBrandInResponseBody(body []byte, format, client string) ([]byte, boo
 	return raw, true
 }
 
+// reverseAssistantBrandInJSON restores the resolved client's own reverse table
+// over the CARRIERS a response actually carries: assistant prose, and the values
+// inside tool arguments. It never rewrites a tool name, an id, a type or any
+// other identity field - those belong to the exact alias-plan authority, which
+// has already run by this point. A recursive all-string walk used to reach
+// tool_use.name and rewrite a tool the client had declared under a spelling
+// that happens to look like a cloaked token.
+//
+// Both carriers are processed whenever the body has them; the format argument
+// is only a hint.
 func reverseAssistantBrandInJSON(root any, format, client string) bool {
+	m, ok := root.(map[string]any)
+	if !ok {
+		return false
+	}
 	changed := false
-	switch format {
-	case "openai":
-		m, ok := root.(map[string]any)
-		if !ok {
-			return false
-		}
-		choices, ok := m["choices"].([]any)
-		if !ok {
-			return false
-		}
-		for _, chRaw := range choices {
-			ch, ok := chRaw.(map[string]any)
-			if !ok {
-				continue
-			}
-			msg, _ := ch["message"].(map[string]any)
-			if content, exists := msg["content"]; exists {
-				if next, c := reverseBrandInOpenAIContent(content, client); c {
-					msg["content"] = next
-					changed = true
-				}
-			}
-			delta, _ := ch["delta"].(map[string]any)
-			if content, exists := delta["content"]; exists {
-				if next, c := reverseBrandInOpenAIContent(content, client); c {
-					delta["content"] = next
-					changed = true
-				}
-			}
-			changed = reverseBrandInToolCallArguments(msg, client) || changed
-			changed = reverseBrandInToolCallArguments(delta, client) || changed
-		}
-	case "anthropic":
-		m, ok := root.(map[string]any)
-		if !ok {
-			return false
-		}
-		contentArr, ok := m["content"].([]any)
-		if !ok {
-			return false
-		}
+	if contentArr, ok := m["content"].([]any); ok {
 		for _, blockRaw := range contentArr {
 			block, ok := blockRaw.(map[string]any)
 			if !ok {
@@ -1839,10 +1813,11 @@ func reverseAssistantBrandInJSON(root any, format, client string) bool {
 					}
 				}
 			case "tool_use":
-				// The non-stream twin of the streamed partial_json: a model that
-				// writes a cloaked path into a file hands the client a path that
-				// does not exist, so the arguments are reversed here exactly as
-				// the stream path reverses them.
+				// The non-stream twin of the streamed input_json_delta: a model
+				// that writes a cloaked path into a file hands the client a path
+				// that does not exist. Only the VALUES are touched - the block's
+				// name and id are identity fields and stay exactly as the exact
+				// uncloak pass left them.
 				if input, ok := block["input"]; ok {
 					if next, c := rewriteSystemValue(input, brandReverseTableFor(client)); c {
 						block["input"] = next
@@ -1852,13 +1827,38 @@ func reverseAssistantBrandInJSON(root any, format, client string) bool {
 			}
 		}
 	}
+	if choices, ok := m["choices"].([]any); ok {
+		for _, chRaw := range choices {
+			ch, ok := chRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			holders := make([]map[string]any, 0, 2)
+			if msg, ok := ch["message"].(map[string]any); ok {
+				holders = append(holders, msg)
+			}
+			if d, ok := ch["delta"].(map[string]any); ok {
+				holders = append(holders, d)
+			}
+			for _, holder := range holders {
+				if content, exists := holder["content"]; exists {
+					if next, c := reverseBrandInOpenAIContent(content, client); c {
+						holder["content"] = next
+						changed = true
+					}
+				}
+				if reverseBrandInToolCallArguments(holder, client) {
+					changed = true
+				}
+			}
+		}
+	}
 	return changed
 }
 
-// reverseBrandInToolCallArguments is the non-stream twin of the streamed
-// choices[].delta.tool_calls[].function.arguments handling: the arguments are
-// a JSON string, so they are reversed as text, the same way the stream path
-// treats a fragment.
+// reverseBrandInToolCallArguments restores operational identifiers inside the
+// arguments a tool call carries, on the non-stream path, treating an argument
+// string as a complete fragment rather than a mid-stream hold.
 func reverseBrandInToolCallArguments(holder map[string]any, client string) bool {
 	changed := false
 	for _, callRaw := range sliceOfMaps(holder["tool_calls"]) {
@@ -1889,7 +1889,7 @@ func isAssistantTextPartType(typ string) bool {
 func reverseBrandInOpenAIContent(content any, client string) (any, bool) {
 	switch v := content.(type) {
 	case string:
-		return replaceInsensitive(v, reverseBrandMatch, reverseBrandReplacement)
+		return replaceInsensitiveSetWithPrev(v, false, brandReverseTableFor(client))
 	case []any:
 		changed := false
 		for _, partRaw := range v {
@@ -1898,13 +1898,13 @@ func reverseBrandInOpenAIContent(content any, client string) (any, bool) {
 					continue
 				}
 				if txt, ok := part["text"].(string); ok {
-					if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
+					if next, c := replaceInsensitiveSetWithPrev(txt, false, brandReverseTableFor(client)); c {
 						part["text"] = next
 						changed = true
 					}
 				}
 			} else if s, ok := partRaw.(string); ok {
-				if next, c := replaceInsensitive(s, reverseBrandMatch, reverseBrandReplacement); c {
+				if next, c := replaceInsensitiveSetWithPrev(s, false, brandReverseTableFor(client)); c {
 					for i, elem := range v {
 						if elem == partRaw {
 							v[i] = next
@@ -1921,7 +1921,7 @@ func reverseBrandInOpenAIContent(content any, client string) (any, bool) {
 			return content, false
 		}
 		if txt, ok := v["text"].(string); ok {
-			if next, c := replaceInsensitive(txt, reverseBrandMatch, reverseBrandReplacement); c {
+			if next, c := replaceInsensitiveSetWithPrev(txt, false, brandReverseTableFor(client)); c {
 				v["text"] = next
 				return v, true
 			}
@@ -2137,7 +2137,7 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 		// that edit has to reach the client even though nothing was replaced
 		// yet. Keeping the original here would send the held token inline and
 		// then send it a second time from the flush.
-		if next, _ := applyReverseBrandLanes(sess, laneKey, txt); next != txt {
+		if next, _ := applySemanticBrandLane(sess, laneKey, txt); next != txt {
 			m[key] = next
 			changed = true
 		}
@@ -2285,14 +2285,18 @@ func openAIToolCallLaneKey(choice, toolCall map[string]any) string {
 // hold once the block is known to be complete. Each lane flushes as its own
 // event so the index survives.
 func (m *streamSessionManager) reverseFlushCloakedBrandLanes(sess *streamSession, format, laneKey string, allBlocks bool) []byte {
-	prefix := laneKey + reverseBrandLaneSuffix
+	// The block's own lane is keyed exactly, and its tool-argument lane is that
+	// key plus the carrier marker, so both have to be selected. Draining every
+	// block matches on the bare prefix.
+	suffix := laneKey + reverseBrandLaneSuffix
+	prefix := suffix
 	if allBlocks {
 		prefix = ""
 	}
 	table := brandReverseTableFor(sess.client)
 	var out []byte
 	for _, key := range sortedCarryKeys(sess) {
-		if !strings.HasPrefix(key, prefix) {
+		if key != laneKey && !strings.HasPrefix(key, prefix) {
 			continue
 		}
 		lane := sess.brandCarries[key]
@@ -2300,7 +2304,7 @@ func (m *streamSessionManager) reverseFlushCloakedBrandLanes(sess *streamSession
 			continue
 		}
 		text, _ := replaceInsensitiveSetWithPrev(lane.carry, lane.lastIsWord, table)
-		lane.carry = ""
+		lane.setCarry("")
 		lane.lastIsWord = false
 		if text == "" {
 			continue
@@ -2471,7 +2475,6 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 			continue
 		}
 		laneKey := openAIChoiceLaneKey(ch)
-		lane := getBrandLane(sess, laneKey)
 		var delta map[string]any
 		if d, ok := ch["delta"].(map[string]any); ok {
 			delta = d
@@ -2481,10 +2484,25 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 		if delta == nil {
 			continue
 		}
+		// Streamed tool-call arguments: the Chat Completions twin of Anthropic's
+		// input_json_delta. Each call gets its own lane, so two calls of one
+		// choice never interleave, and the terminal flush sends the recovered
+		// bytes back as an argument fragment rather than assistant text.
+		for _, call := range sliceOfMaps(delta["tool_calls"]) {
+			if fn, ok := call["function"].(map[string]any); ok {
+				if args, ok := fn["arguments"].(string); ok {
+					callLane := openAIToolCallLaneKey(ch, call)
+					if newArgs, _ := applySemanticBrandLane(sess, callLane, args); newArgs != args {
+						fn["arguments"] = newArgs
+						changed = true
+					}
+				}
+			}
+		}
 		if content, exists := delta["content"]; exists {
 			switch v := content.(type) {
 			case string:
-				newStr, _ := applyBrandLaneSet(v, lane, ompProtectedReverseTable)
+				newStr, _ := applySemanticBrandLane(sess, laneKey, v)
 				if newStr != v {
 					delta["content"] = newStr
 					changed = true
@@ -2497,14 +2515,14 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 							continue
 						}
 						if txt, ok := part["text"].(string); ok {
-							newTxt, _ := applyBrandLaneSet(txt, lane, ompProtectedReverseTable)
+							newTxt, _ := applySemanticBrandLane(sess, laneKey, txt)
 							if newTxt != txt {
 								part["text"] = newTxt
 								c2 = true
 							}
 						}
 					} else if s, ok := partRaw.(string); ok {
-						newStr, _ := applyBrandLaneSet(s, lane, ompProtectedReverseTable)
+						newStr, _ := applySemanticBrandLane(sess, laneKey, s)
 						if newStr != s {
 							for i, elem := range v {
 								if elem == partRaw {
@@ -2522,7 +2540,7 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 			case map[string]any:
 				if typ, _ := v["type"].(string); isAssistantTextPartType(typ) {
 					if txt, ok := v["text"].(string); ok {
-						newTxt, _ := applyBrandLaneSet(txt, lane, ompProtectedReverseTable)
+						newTxt, _ := applySemanticBrandLane(sess, laneKey, txt)
 						if newTxt != txt {
 							v["text"] = newTxt
 							changed = true
@@ -2552,7 +2570,6 @@ func (m *streamSessionManager) reverseBrandAnthropicStreamingMap(data map[string
 			laneKey = fmt.Sprintf("anthropic:%v", v)
 		}
 	}
-	lane := getBrandLane(sess, laneKey)
 	typ, _ := data["type"].(string)
 	switch typ {
 	case "content_block_start":
@@ -2564,7 +2581,7 @@ func (m *streamSessionManager) reverseBrandAnthropicStreamingMap(data map[string
 			return false
 		}
 		if txt, ok := cb["text"].(string); ok {
-			newTxt, _ := applyBrandLaneSet(txt, lane, ompProtectedReverseTable)
+			newTxt, _ := applySemanticBrandLane(sess, laneKey, txt)
 			if newTxt != txt {
 				cb["text"] = newTxt
 				return true
@@ -2575,25 +2592,24 @@ func (m *streamSessionManager) reverseBrandAnthropicStreamingMap(data map[string
 		if !ok {
 			return false
 		}
-		if delta["type"] != "text_delta" {
-			return false
-		}
-		if txt, ok := delta["text"].(string); ok {
-			newTxt, _ := applyBrandLaneSet(txt, lane, ompProtectedReverseTable)
-			if newTxt != txt {
-				delta["text"] = newTxt
-				return true
+		switch delta["type"] {
+		case "text_delta":
+			if txt, ok := delta["text"].(string); ok {
+				newTxt, _ := applySemanticBrandLane(sess, laneKey, txt)
+				if newTxt != txt {
+					delta["text"] = newTxt
+					return true
+				}
 			}
-		}
-	default:
-		if delta, ok := data["delta"].(map[string]any); ok {
-			if delta["type"] == "text_delta" {
-				if txt, ok := delta["text"].(string); ok {
-					newTxt, _ := applyBrandLaneSet(txt, lane, ompProtectedReverseTable)
-					if newTxt != txt {
-						delta["text"] = newTxt
-						return true
-					}
+		case "input_json_delta":
+			// Tool-call arguments carry the same operational identifiers as the
+			// prose, and the model writes them to disk, so they are restored in
+			// their own lane: a hold here must never flush as assistant text.
+			if txt, ok := delta["partial_json"].(string); ok {
+				newTxt, _ := applySemanticBrandLane(sess, toolArgsLaneKey(laneKey), txt)
+				if newTxt != txt {
+					delta["partial_json"] = newTxt
+					return true
 				}
 			}
 		}
@@ -2686,7 +2702,7 @@ func drainBrandFlushes(sess *streamSession, flushes []brandFlush) {
 		if lane == nil {
 			continue
 		}
-		lane.carry = ""
+		lane.setCarry("")
 		lane.lastIsWord = isWordByte(f.text[len(f.text)-1])
 	}
 }
@@ -4514,11 +4530,17 @@ func reverseCloakedBrandBody(body []byte, client string) ([]byte, bool) {
 	if err := safeUnmarshal(body, &root); err != nil {
 		return nil, false
 	}
-	next, changed := rewriteSystemValue(root, reverseBrandMappingsFor(client))
-	if !changed {
+	// Carrier-aware, never a recursive all-string walk. The walk used to reach
+	// tool_use.name, so a client-declared tool that happens to be spelled like
+	// a cloaked token (Claude Code declares "Antigravity-api") was rewritten
+	// AFTER exact uncloak had already restored it, and the client got a tool it
+	// never declared. Tool identity, ids, types and metadata belong to the
+	// exact alias-plan authority alone; brand reverse owns assistant prose and
+	// the VALUES inside tool arguments.
+	if !reverseAssistantBrandInJSON(root, "", client) {
 		return nil, false
 	}
-	raw, err := safeMarshal(next)
+	raw, err := safeMarshal(root)
 	if err != nil {
 		return nil, false
 	}
@@ -4751,6 +4773,14 @@ var ompSharedAliases = map[string]string{
 	"learn": "wp_learn", "manage_skill": "wp_manage_skill",
 	// Semantic search (cannot map to grep_search: declaration collision).
 	"find": "wp_find",
+	// Goal and loop runtime. These are declared only while /goal, /guided-goal
+	// or /loop is active, so they are invisible in a default session and were
+	// silently taking the deterministic wp_ext_<hash> fallback. Every family
+	// above is named rather than hashed, and codex has mapped its own "wait" to
+	// wp_wait all along, so leaving the Oh My Pi equivalents out was an omission
+	// rather than a decision. The fallback stays: any tool a future Oh My Pi
+	// release declares still resolves through it.
+	"goal": "wp_goal", "yield": "wp_yield", "wait": "wp_wait",
 }
 
 // ompCloakedTargetIdentityInventory contains the nine canonical AGY-facing
@@ -5858,7 +5888,7 @@ func rewriteConversationContent(root map[string]any, mappings []rewriteMapping, 
 	// client's own <system-reminder> and tool_result blocks are cloaked, the
 	// words the user typed are not.
 	if input, ok := root["input"]; ok {
-		if next, c := rewriteUserTurnContent(input, mappings); c {
+		if next, c := rewriteUserTurnContent(input, mappings, cached); c {
 			root["input"] = next
 			changed = true
 		}
@@ -5878,16 +5908,24 @@ func rewriteConversationContent(root map[string]any, mappings []rewriteMapping, 
 		}
 		role, _ := msg["role"].(string)
 		if role == "user" {
-			if next, c := rewriteUserTurnContent(content, mappings); c {
+			// The words the user typed are theirs, byte for byte. Only the
+			// client's own machine-generated blocks inside the turn (its
+			// <system-reminder> spans and its tool_result payloads) are
+			// rewritten, for brands AND for tool names. A blanket
+			// replaceToolNamesInValue over the whole turn used to corrupt an
+			// ordered typed user string - a file the user really wrote in
+			// out.txt was silently persisted as the declaration's wp_find_tools
+			// literal instead.
+			if next, c := rewriteUserTurnContent(content, mappings, cached); c {
 				msg["content"] = next
 				changed = true
 			}
-		} else {
-			next, contentChanged := rewriteSystemValue(content, mappings)
-			if contentChanged {
-				msg["content"] = next
-				changed = true
-			}
+			continue
+		}
+		next, contentChanged := rewriteSystemValue(content, mappings)
+		if contentChanged {
+			msg["content"] = next
+			changed = true
 		}
 		if cached != nil {
 			toolNext, toolChanged := replaceToolNamesInValue(msg["content"], cached)
@@ -5898,6 +5936,19 @@ func rewriteConversationContent(root map[string]any, mappings []rewriteMapping, 
 		}
 	}
 	return changed
+}
+
+// rewriteMachineSpan runs both cloaks over one client-generated span: the brand
+// mappings, then the request-scoped tool aliases.
+func rewriteMachineSpan(block string, mappings []rewriteMapping, cached *cachedCloakPatterns) (string, bool) {
+	next, c := rewriteSystemValue(block, mappings)
+	out, _ := next.(string)
+	if cached != nil {
+		withTools, tc := replaceToolNamesInText(out, cached)
+		out = withTools
+		c = c || tc
+	}
+	return out, c
 }
 
 // rewriteUserTurnContent applies the brand mapping to a user turn, but only to
@@ -5912,13 +5963,14 @@ func rewriteConversationContent(root map[string]any, mappings []rewriteMapping, 
 // response path that reverses the other direction. Cloaking the
 // <system-reminder> and tool_result blocks costs nothing in correctness: that
 // text is machine-produced context, not the user's.
-func rewriteUserTurnContent(content any, mappings []rewriteMapping) (any, bool) {
+func rewriteUserTurnContent(content any, mappings []rewriteMapping, cached *cachedCloakPatterns) (any, bool) {
 	changed := false
 	switch typed := content.(type) {
 	case string:
 		// A bare string turn: the typed message, possibly with the client's
-		// own <system-reminder> block spliced into it.
-		next, c := rewriteSystemReminderSpans(typed, mappings)
+		// own <system-reminder> block spliced into it. Only the span is
+		// cloaked; the words the user typed around it are theirs.
+		next, c := rewriteSystemReminderSpans(typed, mappings, cached)
 		return next, c
 	case []any:
 		for _, blockRaw := range typed {
@@ -5928,16 +5980,27 @@ func rewriteUserTurnContent(content any, mappings []rewriteMapping) (any, bool) 
 			}
 			switch block["type"] {
 			case "tool_result":
+				// A tool result is machine-generated output echoing the alias
+				// names the model was given, so it is cloaked on both surfaces -
+				// but only on its content, never on the block's identity fields.
 				if next, c := rewriteSystemValue(block["content"], mappings); c {
 					block["content"] = next
 					changed = true
+				}
+				if cached != nil {
+					if next, c := replaceToolNamesInValue(block["content"], cached); c {
+						block["content"] = next
+						changed = true
+					}
 				}
 			case "text":
 				txt, ok := block["text"].(string)
 				if !ok {
 					continue
 				}
-				if next, c := rewriteSystemReminderSpans(txt, mappings); c {
+				// Same span-aware rule as the bare-string turn: ordinary text is
+				// untouched, <system-reminder> spans get brands + tool aliases.
+				if next, c := rewriteSystemReminderSpans(txt, mappings, cached); c {
 					block["text"] = next
 					changed = true
 				}
@@ -5949,7 +6012,20 @@ func rewriteUserTurnContent(content any, mappings []rewriteMapping) (any, bool) 
 
 // rewriteSystemReminderSpans rewrites only the text between <system-reminder>
 // markers, leaving the surrounding typed message byte-identical.
-func rewriteSystemReminderSpans(text string, mappings []rewriteMapping) (string, bool) {
+// rewriteSystemReminderSpans applies the client's own cloaks to the bytes
+// INSIDE its <system-reminder> spans and to nothing else.
+//
+// The span body gets both surfaces: the brand mappings and, when cached is
+// non-nil, the request-scoped tool aliases. A tool named in a reminder is text
+// the client generated from the same conversation state the model saw, so it
+// carries aliases upstream just like the prose does.
+//
+// Everything outside a span is written through verbatim. The user typed those
+// bytes. Running either surface across the whole turn rewrote real content -
+// "Write the literal ToolSearch into out.txt" was silently persisted as
+// "Write the literal wp_find_tools into out.txt", and the model was told to
+// create a file whose name the user never asked for.
+func rewriteSystemReminderSpans(text string, mappings []rewriteMapping, cached *cachedCloakPatterns) (string, bool) {
 	const openTag, closeTag = "<system-reminder>", "</system-reminder>"
 	var b strings.Builder
 	rest := text
@@ -5966,14 +6042,14 @@ func rewriteSystemReminderSpans(text string, mappings []rewriteMapping) (string,
 		if end < 0 {
 			// Unterminated marker: the client truncated the turn. Treat the
 			// remainder as context rather than leaving half a block unclaked.
-			next, c := rewriteSystemValue(rest, mappings)
-			b.WriteString(next.(string))
+			next, c := rewriteMachineSpan(rest, mappings, cached)
+			b.WriteString(next)
 			changed = changed || c
 			break
 		}
 		block := rest[:end+len(closeTag)]
-		next, c := rewriteSystemValue(block, mappings)
-		b.WriteString(next.(string))
+		next, c := rewriteMachineSpan(block, mappings, cached)
+		b.WriteString(next)
 		changed = changed || c
 		rest = rest[end+len(closeTag):]
 	}
@@ -6058,6 +6134,60 @@ func isWordByte(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9') || b == '_'
 }
 
+// isBareVendorToken reports whether a mapping is a single bare vendor word such
+// as "omp" or "claude", as opposed to a composed entry like "claude.ai",
+// "Antigravity SDK" or ".gemini/CLAUDE.md". Only bare words are subject to the
+// URL/path rule below; a composed entry carries its own deliberate meaning and
+// is rewritten wherever it appears.
+func isBareVendorToken(match string) bool {
+	for i := range len(match) {
+		switch match[i] {
+		case '.', '-', '_', ' ', '/', '\\':
+			return false
+		}
+	}
+	return true
+}
+
+// inURLPathContext reports whether a match at [index, matchEnd) sits inside a
+// URL or filesystem path rather than in prose. A path delimiter immediately
+// before the match is the strong signal - "/omp/", "C:\omp\" - and a URL
+// scheme covers the rest. A bare word in ordinary prose is left alone even
+// when a sentence elsewhere contains a slash, so "Anthropic/Google" is still
+// masked as before.
+func inURLPathContext(value string, index, matchEnd int) bool {
+	if strings.Contains(value, "://") {
+		return true
+	}
+	if index == 0 {
+		return false
+	}
+	prev := value[index-1]
+	if prev == '/' || prev == '\\' {
+		return true
+	}
+	// Inside a real path element that starts with a dot: ".omp-backup/agent".
+	return prev == '.' && !isWordByte(value[index-2])
+}
+
+// isDotPrefixedPathSegment reports whether a bare vendor word begins a literal
+// dot-prefixed path segment, the only form whose rewrite is a real directory
+// remap: ".omp/agent", "C:\Users\u\.claude\settings.json". A dot-directory can
+// start right after prose punctuation, because tool-parameter help reads
+// "persist to .claude/scheduled_tasks.json on disk", so any non-word byte
+// before the dot begins the segment. "foo.omp" is excluded because the byte
+// before its dot is a word byte.
+func isDotPrefixedPathSegment(value string, index, matchEnd int) bool {
+	if index == 0 || value[index-1] != '.' {
+		return false
+	}
+	dot := index - 1
+	if dot != 0 && isWordByte(value[dot-1]) {
+		return false
+	}
+	return matchEnd == len(value) || value[matchEnd] == '/' || value[matchEnd] == '\\'
+}
+
 func replaceInsensitive(value, match, replacement string) (string, bool) {
 	return replaceInsensitiveOpt(value, match, replacement, false)
 }
@@ -6105,22 +6235,29 @@ func replaceInsensitiveOpt(value, match, replacement string, skipPath bool) (str
 		hasLeftBoundary := !firstIsWord || index == 0 || !isWordByte(value[index-1])
 		hasRightBoundary := !lastIsWord || matchEnd == len(value) || !isWordByte(value[matchEnd])
 		effectiveReplacement := replacement
-		if skipPath && index > 0 && value[index-1] == '.' {
-			dotIndex := index - 1
-			// A dot-directory can start right after prose punctuation, not just
-			// after a separator: tool parameter help reads "persist to
-			// .claude/scheduled_tasks.json on disk". Requiring '/' or '\' there
-			// made the segment fall through to the plain brand replacement and
-			// produce a dead .Antigravity path. Any non-word byte before the dot
-			// means the segment begins here; "foo.omp" is still excluded because
-			// the byte before its dot is a word byte.
-			leftSegmentBoundary := dotIndex == 0 || !isWordByte(value[dotIndex-1])
-			rightSegmentBoundary := matchEnd == len(value) || value[matchEnd] == '/' || value[matchEnd] == '\\'
-			if leftSegmentBoundary && rightSegmentBoundary {
+		// URL/path rule: inside a URL or filesystem path, a bare vendor word is
+		// rewritten only as a literal dot-prefixed directory segment, remapped
+		// onto the client's neutral equivalent. Every other position in a path
+		// is left byte-for-byte alone - "/omp/", "\omp\", "antigravity-cloak" and
+		// "omp.ai" are ordinary names there, and rewriting them yields a path
+		// that exists neither upstream nor on the way back. In prose nothing
+		// changes and the brand is still masked.
+		skip := false
+		if skipPath && isBareVendorToken(match) && inURLPathContext(value, index, matchEnd) {
+			if isDotPrefixedPathSegment(value, index, matchEnd) {
 				if remapped, ok := pathSegmentReplacements[lowerMatch]; ok {
 					effectiveReplacement = remapped
+				} else {
+					skip = true
 				}
+			} else {
+				skip = true
 			}
+		}
+		if skip {
+			builder.WriteString(value[start : index+1])
+			start = index + 1
+			continue
 		}
 
 		if hasLeftBoundary && hasRightBoundary {
@@ -6174,6 +6311,19 @@ func replaceInsensitiveWithPrev(value string, prevIsWord bool, match, replacemen
 			}
 		}
 		hasRightBoundary := !lastIsWord || matchEnd == len(value) || !isWordByte(value[matchEnd])
+		// Mirror of the forward URL/path rule, and the reason the round trip has
+		// to be symmetric: the model echoes back whatever it was shown, including
+		// a directory name the forward pass deliberately left alone because it
+		// sat in the user's own text. A blind case-insensitive reverse walk turns
+		// "F:/CodeBase/antigravity-cloak/" into "F:/CodeBase/omp-cloak/", and the
+		// client then reads a path that does not exist. Composed entries such as
+		// ".gemini/GEMINI.md" are exempt; only bare vendor words in a URL or path
+		// are held back. In prose the reverse runs as before.
+		if isBareVendorToken(match) && inURLPathContext(value, index, matchEnd) && !isDotPrefixedPathSegment(value, index, matchEnd) {
+			builder.WriteString(value[start : index+1])
+			start = index + 1
+			continue
+		}
 		if hasLeftBoundary && hasRightBoundary {
 			builder.WriteString(value[start:index])
 			builder.WriteString(replacement)
@@ -6288,7 +6438,7 @@ func applyBrandLaneSet(text string, lane *brandLane, table []rewriteMapping) (st
 		emitPart, newCarry = combined[:len(combined)-holdLen], combined[len(combined)-holdLen:]
 	}
 	out, changed := replaceInsensitiveSetWithPrev(emitPart, lane.lastIsWord, table)
-	lane.carry = newCarry
+	lane.setCarry(newCarry)
 	if out != "" {
 		lane.lastIsWord = isWordByte(out[len(out)-1])
 	}
@@ -6299,11 +6449,24 @@ func applyBrandLaneSet(text string, lane *brandLane, table []rewriteMapping) (st
 // token being matched inside it, so one block can carry one lane per mapping.
 const reverseBrandLaneSuffix = "\x00"
 
-// stampLaneArrival records the order in which a lane first held text, which is
-// the order its bytes appeared in the stream. It has to happen at the first
-// HOLD, not at lane creation: every lane of a content block is created on the
-// block's first chunk, in reverse-table order, so a creation-order stamp would
-// just re-encode the table order sortedCarryKeys is meant to stop depending on.
+// setCarry installs a lane's carry and keeps the arrival stamp consistent with
+// it: a lane that is not holding has no arrival order, so its stamp is cleared
+// and the next hold is stamped afresh. Without this a lane that held, drained
+// and held again kept its FIRST stamp, and sortedCarryKeys put its new text
+// ahead of a lane that genuinely began holding later.
+func (l *brandLane) setCarry(carry string) {
+	l.carry = carry
+	if carry == "" {
+		l.seq = 0
+	}
+}
+
+// stampLaneArrival records the order in which a lane took its CURRENT carry,
+// which is the order those bytes appeared in the stream. It has to happen at the
+// first HOLD, not at lane creation: every lane of a content block is created on
+// the block's first chunk, in reverse-table order, so a creation-order stamp
+// would just re-encode the table order sortedCarryKeys is meant to stop
+// depending on.
 func stampLaneArrival(sess *streamSession, lane *brandLane) {
 	if lane == nil || lane.seq != 0 || lane.carry == "" {
 		return
@@ -6312,22 +6475,25 @@ func stampLaneArrival(sess *streamSession, lane *brandLane) {
 	lane.seq = sess.laneSeq
 }
 
-// applyReverseBrandLanes runs every reverse-table entry for this session over a
-// streamed text fragment, one lane each.
-func applyReverseBrandLanes(sess *streamSession, laneKey, text string) (string, bool) {
+// applySemanticBrandLane runs the resolved client's whole reverse table over
+// ONE semantic carrier - a content block's prose, that block's tool arguments,
+// one OpenAI choice's text - in a SINGLE lane.
+//
+// One lane per reverse rule gave every rule its own carry INSIDE one carrier,
+// and the carries then flushed in the order the rules ran, not the order the
+// bytes arrived: a chunk ending "Antigravity .gemini/GEMINI.md" held "Antigravity "
+// in the brand lane and ".gemini/GEMINI.md" in the path lane, and the terminal
+// flush delivered them the wrong way round. One lane feeding the whole ordered
+// table keeps one carrier in one piece, and the separate carriers that really
+// are separate keep their own lanes (tool args, and each choice / tool call).
+func applySemanticBrandLane(sess *streamSession, laneKey, text string) (string, bool) {
 	if sess == nil || text == "" {
 		return text, false
 	}
-	out, changed := text, false
-	table := reverseBrandMappingsFor(sess.client)
-	for i, m := range table {
-		lane := getBrandLane(sess, laneKey+reverseBrandLaneSuffix+m.Match)
-		next, c := applyBrandLaneSet(out, lane, table[i:i+1])
-		stampLaneArrival(sess, lane)
-		out = next
-		changed = changed || c
-	}
-	return out, changed
+	lane := getBrandLane(sess, laneKey)
+	next, changed := applyBrandLaneSet(text, lane, brandReverseTableFor(sess.client))
+	stampLaneArrival(sess, lane)
+	return next, changed
 }
 
 type textSpanReplacement struct {

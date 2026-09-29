@@ -175,6 +175,42 @@ from a clean checkout inside the container, and verify embedded provenance and
 the artifact checksum. Do not substitute a floating-image host-bind build for
 that acceptance procedure.
 
+### Build and deploy traps that fail silently
+
+Both of these produced a wrong result with no error, and each one cost a full
+acceptance cycle on 2026-09-29. Neither is caught by reading the build output.
+
+1. **A container-internal `git clone` of the host repo carries only committed
+    state.** Cloning `/src` into `/build` and then running `git add -A && git
+    commit` inside `/build` commits *nothing*: the fresh clone is a clean tree
+    with no working-tree edits in it, so the build silently produces a binary
+    of `HEAD` and every uncommitted change is dropped. This is invisible when
+    the change under test is behavioural. To build dirty source, overlay the
+    host working tree onto the clone **before** committing:
+    `tar -C /src --exclude=.git --exclude=dist -cf - . | tar -C /build -xf -`.
+    Section 2 of the runbook only describes the committed-`$TargetCommit` path,
+    which is why this is easy to miss. Always assert the string you changed is
+    present in the source the build actually consumed, not just in the host
+    file.
+2. **Discover the Compose project name, do not guess it.** Using the wrong
+    `--project-name` makes `up -d --force-recreate` fail with a container-name
+    `Conflict` that reads like a transient retry, while the pre-existing
+    container keeps running the old binary. `CPA_FILTER_DEBUG` stays empty in
+    the live container, so the debug log stays 0 bytes and every live probe
+    appears to produce no evidence. Get the name from
+    `docker ps --format '{{.Label "com.docker.compose.project"}}'`, and treat
+    any `Conflict` as "the recreate did not happen".
+
+`env_file` is commented out in that compose file, so `${CPA_FILTER_DEBUG}` is
+interpolated from the invoking shell. Export it in the same shell that runs
+`up`; writing it into the host `.env` alone does nothing.
+
+**Never conclude a deploy succeeded from the command's output.** Assert, from
+inside the running container: `env | grep CPA_FILTER_DEBUG` is non-empty, the
+artifact sha256 matches what you built, and a string you just added is present
+in the installed `.so`. The log file's size and the newest request-log mtime
+are the cheapest way to catch a stale container.
+
 Local validation on Windows (gcc/mingw present, CGO works):
 
 ```powershell

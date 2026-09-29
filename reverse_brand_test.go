@@ -193,7 +193,9 @@ func TestReverseBrand_Anthropic_NonStream_OMP(t *testing.T) {
 	interceptPayload := makeIntegrationRequestInterceptPayload(t, reqID, "anthropic", "agy/model", []byte(reqBody))
 	handlePluginCall(pluginabi.MethodRequestInterceptBefore, interceptPayload)
 
-	respBody := `{"content":[{"type":"text","text":"We are Antigravity now"},{"type":"tool_use","id":"1","name":"view_file","input":{"path":"/tmp/Antigravity"}}]}`
+	respBody := `{"content":[{"type":"text","text":"We are Antigravity now"},` +
+		`{"type":"tool_use","id":"1","name":"view_file",` +
+		`"input":{"path":"/home/u/.gemini/agent/notes.md","plain":"/tmp/Antigravity"}}]}`
 	payload := responseInterceptRequestJSON(t, reqBody, respBody, "anthropic")
 	var reqMap map[string]any
 	json.Unmarshal(payload, &reqMap)
@@ -215,8 +217,17 @@ func TestReverseBrand_Anthropic_NonStream_OMP(t *testing.T) {
 	// reversed here exactly as the stream path reverses it.
 	toolBlock := content[1].(map[string]any)
 	input := toolBlock["input"].(map[string]any)
-	if input["path"] != "/tmp/omp" {
+	// The dot-prefixed configuration directory is a real operational identifier
+	// and is restored in the tool arguments, exactly as the stream path restores
+	// it. The forward pass produced it, so the reverse owns undoing it.
+	if input["path"] != "/home/u/.omp/agent/notes.md" {
 		t.Fatalf("tool arg not reversed, got %v", input["path"])
+	}
+	// A non-dot path element is never touched in either direction: the forward
+	// pass leaves "/tmp/omp" alone, so the reverse must not invent "/tmp/omp"
+	// out of a path the plugin never wrote.
+	if input["plain"] != "/tmp/Antigravity" {
+		t.Fatalf("a non-dot path must be left alone, got %v", input["plain"])
 	}
 	// tool name uncloaked
 	if toolBlock["name"] != "read" {
@@ -547,8 +558,10 @@ func TestReverseBrand_StandaloneJSON_OMP(t *testing.T) {
 	if !strings.Contains(txt, "omp") || strings.Contains(txt, "Antigravity") {
 		t.Fatalf("standalone OMP reverse failed, txt=%q", txt)
 	}
-	// Ensure tool args in same standalone chunk preserved - use spaced content to allow immediate rewrite
-	jsonChunk2 := `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command","arguments":"Antigravity"}}],"content":"Hi Antigravity there"}}]}`
+	// Tool arguments in the same standalone chunk are restored too, in their
+	// own carrier. The fragment carries interior boundaries so the token
+	// resolves in this chunk rather than being held for a terminal flush.
+	jsonChunk2 := `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command","arguments":"Antigravity home"}}],"content":"Hi Antigravity there"}}]}`
 	payload2 := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 1, []byte(jsonChunk2), nil)
 	raw2, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, payload2)
 	body2, _ := decodeStreamBody(t, raw2)
@@ -562,12 +575,21 @@ func TestReverseBrand_StandaloneJSON_OMP(t *testing.T) {
 			t.Fatalf("standalone content not rewritten: %q", txt2)
 		}
 	}
-	// tool args should stay
-	if tcs, ok := delta2["tool_calls"].([]any); ok {
-		args := tcs[0].(map[string]any)["function"].(map[string]any)["arguments"].(string)
-		if !strings.Contains(args, "Antigravity") {
-			t.Fatalf("standalone tool args mangled: %q", args)
-		}
+	// Tool arguments must be restored exactly like the prose, in their own
+	// carrier: a cloaked path or brand left here is what the model writes to
+	// disk. The tool NAME is untouched - that is exact uncloak authority.
+	tcs, ok := delta2["tool_calls"].([]any)
+	if !ok {
+		t.Fatal("tool_calls lost")
+	}
+	fn := tcs[0].(map[string]any)["function"].(map[string]any)
+	if args := fn["arguments"].(string); !strings.Contains(args, "omp") || strings.Contains(args, "Antigravity") {
+		t.Fatalf("standalone tool args not restored: %q", args)
+	}
+	// Exact uncloak owns the identity: run_command came from the client's own
+	// "bash" and goes back to "bash". The brand pass must not touch it.
+	if fn["name"] != "bash" {
+		t.Fatalf("tool identity did not round-trip: %v", fn["name"])
 	}
 }
 
@@ -635,13 +657,15 @@ func TestReverseBrand_Streaming_AnthropicToolArgsPreserved(t *testing.T) {
 	p2 := makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/model", 1, []byte(chunk2), nil)
 	raw2, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p2)
 	body2, _ := decodeStreamBody(t, raw2)
-	// input_json_delta must preserve Antigravity and return no Body (pass-through) since no text change
-	if body2 != nil && strings.Contains(string(body2), "omp") {
-		t.Fatalf("anthropic tool input incorrectly rewritten: %q", string(body2))
+	// input_json_delta is the Anthropic tool-argument carrier. It carries the
+	// same operational identifiers as the prose and the model writes it to
+	// disk, so it is restored like the prose - the protected pair applies
+	// (Issue #51).
+	if body2 == nil || !strings.Contains(string(body2), "omp") {
+		t.Fatalf("anthropic tool arguments were not restored: %v", body2)
 	}
-	// If body2 is nil, it means no modification (correct), otherwise it should still contain Antigravity
-	if body2 != nil && !strings.Contains(string(body2), "Antigravity") {
-		t.Fatalf("anthropic tool input lost: %q", string(body2))
+	if strings.Contains(string(body2), "Antigravity") {
+		t.Fatalf("anthropic tool arguments still cloaked: %q", string(body2))
 	}
 }
 
@@ -1227,7 +1251,7 @@ func TestIssue21_AnthropicSSE_ToolPayloadPreservedThroughNativeTermination(t *te
 		RequestID: "issue21-tool", SourceFormat: "anthropic", ChunkIndex: 0,
 		Body: []byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello Anti\"}}\n\n"),
 	}, "anthropic")
-	// Tool/input_json_delta with literal Antigravity must stay untouched, plus native termination.
+	// Tool arguments are restored like the prose, and hold their own lane.
 	term := "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" Antigravity \"}}\n\n" +
 		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
@@ -1236,21 +1260,18 @@ func TestIssue21_AnthropicSSE_ToolPayloadPreservedThroughNativeTermination(t *te
 		Body: []byte(term),
 	}, "anthropic")
 	body := string(resp.Body)
-	// Tool partial_json must retain literal Antigravity.
-	if !strings.Contains(body, "Antigravity") {
-		t.Fatalf("tool payload Antigravity should remain literal, body=%q", body)
+	// The argument carrier is restored, and it stays an argument carrier.
+	if !strings.Contains(body, "partial_json") || !strings.Contains(body, " omp ") {
+		t.Fatalf("tool arguments were not restored in their own carrier, body=%q", body)
 	}
 	// Flush text delta must be present before stop, but not corrupt tool payload.
 	if !strings.Contains(body, `"text":"Anti"`) {
 		t.Fatalf("text carry not flushed, body=%q", body)
 	}
-	// Ensure the input_json_delta block itself was not rewritten to omp.
-	if strings.Contains(body, `input_json_delta`) {
-		// locate the input_json_delta event line
-		for _, ev := range strings.Split(body, "\n\n") {
-			if strings.Contains(ev, "input_json_delta") && strings.Contains(ev, "omp") {
-				t.Fatalf("tool delta incorrectly rewritten, ev=%q", ev)
-			}
+	// The held prose carry still flushes as assistant text, on its own carrier.
+	for _, ev := range strings.Split(body, "\n\n") {
+		if strings.Contains(ev, "text_delta") && strings.Contains(ev, "partial_json") {
+			t.Fatalf("a prose carry was flushed through the argument carrier: %q", ev)
 		}
 	}
 }

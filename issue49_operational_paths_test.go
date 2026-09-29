@@ -127,14 +127,22 @@ func TestIssue49_OMPRemovesBlanketPreservePolicy(t *testing.T) {
 			t.Errorf("%s still preserved: %s", in, got)
 		}
 	}
+	// Only the literal dot-prefixed directory is a real operational identifier.
+	// A dot-element whose brand is glued to a suffix is a different path, and a
+	// brand behind a leading file name is prose: both are still masked.
 	for _, in := range []string{
-		`{"system":"at /home/user/.omp-backup/agent"}`,
 		`{"system":"at /home/user/profile.omp/agent"}`,
 	} {
 		got, changed, _ := rewriteRequestBodyWithClient([]byte(in), "openai", "oh_my_pi")
 		if !changed || !strings.Contains(string(got), ".Antigravity") {
 			t.Errorf("%s must still mask the brand: %s", in, got)
 		}
+	}
+	// ".omp-backup" is inside a real path element but is not the configuration
+	// directory, so it is left byte-for-byte alone.
+	bBackup, changedBackup, _ := rewriteRequestBodyWithClient([]byte(`{"system":"at /home/user/.omp-backup/agent"}`), "openai", "oh_my_pi")
+	if changedBackup {
+		t.Errorf(".omp-backup must be left alone: %s", bBackup)
 	}
 }
 

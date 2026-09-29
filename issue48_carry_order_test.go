@@ -196,14 +196,15 @@ func TestIssue48_PathCarryStillReassembles(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	sess := newBrandTestSession(t, "issue48-path", "claude_code")
 
-	if _, changed := applyReverseBrandLanes(sess, "anthropic:0", "config at /home/u/.gemini"); changed {
+	if _, changed := applySemanticBrandLane(sess, "anthropic:0", "config at /home/u/.gemini"); changed {
 		t.Fatal("holding a live prefix must not report a replacement yet")
 	}
-	lane := sess.brandCarries["anthropic:0\x00.gemini/GEMINI.md"]
+	// One lane per semantic carrier now, so the block's prose holds here.
+	lane := sess.brandCarries["anthropic:0"]
 	if lane == nil || lane.carry != ".gemini" {
 		t.Fatalf("expected the .gemini prefix to be held, got %+v", lane)
 	}
-	out, changed := applyReverseBrandLanes(sess, "anthropic:0", "/GEMINI.md done")
+	out, changed := applySemanticBrandLane(sess, "anthropic:0", "/GEMINI.md done")
 	if !changed {
 		t.Fatal("completing the path must report a change")
 	}
@@ -294,5 +295,81 @@ func TestIssue48_ProseAndArgumentHoldsFlushInArrivalOrder(t *testing.T) {
 	}
 	if order[0] != "args" || order[1] != "prose" {
 		t.Fatalf("flush order %v, want the arguments the model produced first", order)
+	}
+}
+
+// TestIssue48_ReheldLaneTakesItsNewArrivalOrder is the regression for a stale
+// arrival stamp. seq is assigned the first time a lane holds a carry; when that
+// carry later drained, seq kept its old value, so a lane that held AGAIN later
+// still sorted as if it had held first and flushed ahead of a lane that
+// genuinely began holding earlier. Current holds must be ordered by when THEIR
+// text arrived, not by a lane's history.
+//
+// The two lanes are a block's tool-argument lane and its prose lane: they are
+// separate carriers, so unlike two reverse-table rules they can hold at the
+// same time, which is the reachable form of this defect.
+func TestIssue48_ReheldLaneTakesItsNewArrivalOrder(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:issue48-rehold", "claude_code", ompUncloakCache(t))
+
+	heldCarry := func(label string) {
+		t.Helper()
+		sess := mgr.sessions["req:issue48-rehold"]
+		if sess == nil {
+			t.Fatal("session gone")
+		}
+		for k, l := range sess.brandCarries {
+			if l.carry != "" {
+				t.Logf("%s: %q carry=%q seq=%d", label, k, l.carry, l.seq)
+			}
+		}
+	}
+	step := func(i int, body string) *pluginapi.StreamChunkInterceptRequest {
+		return &pluginapi.StreamChunkInterceptRequest{
+			RequestID: "issue48-rehold", SourceFormat: "anthropic", ChunkIndex: i, Body: []byte(body),
+		}
+	}
+	argDelta := func(fragment string) string {
+		return "event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"` + fragment + `"}}` + "\n\n"
+	}
+	textDelta := func(text string) string {
+		return "event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"` + text + `"}}` + "\n\n"
+	}
+
+	// The ARGUMENT lane takes the first hold.
+	mgr.processChunk(step(0, argDelta(`{\"p\":\"/home/u/.gem`)), "anthropic")
+	heldCarry("after first arg hold")
+
+	// That carry completes and drains.
+	mgr.processChunk(step(1, argDelta(`x\"}`)), "anthropic")
+	heldCarry("after arg drain")
+
+	// The PROSE lane now takes a hold that stays open.
+	mgr.processChunk(step(2, textDelta("dir /home/u/.gem")), "anthropic")
+	heldCarry("after prose hold")
+
+	// The argument lane holds AGAIN, strictly after the prose lane.
+	mgr.processChunk(step(3, argDelta(`{\"q\":\"/home/u/.gem`)), "anthropic")
+	heldCarry("after second arg hold")
+
+	resp := mgr.processChunk(step(4,
+		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"), "anthropic")
+
+	var order []string
+	for _, f := range sseFrames(t, resp.Body) {
+		delta, _ := f.data["delta"].(map[string]any)
+		switch delta["type"] {
+		case "input_json_delta":
+			order = append(order, "args")
+		case "text_delta":
+			order = append(order, "prose")
+		}
+	}
+	if len(order) != 2 {
+		t.Fatalf("want both lanes flushed, got %v (body=%q)", order, resp.Body)
+	}
+	if order[0] != "prose" || order[1] != "args" {
+		t.Fatalf("flush order %v, want prose first: it began holding before the re-held argument lane", order)
 	}
 }

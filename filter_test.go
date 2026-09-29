@@ -1932,38 +1932,79 @@ func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 		})
 	}
 
+	// systemAfter runs a request through the real forward pass and returns the
+	// system text the upstream would receive, whether or not anything changed.
+	systemAfter := func(t *testing.T, client, in string) string {
+		t.Helper()
+		got, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"`+in+`"}`), "openai", client)
+		if !changed {
+			return in
+		}
+		return string(got)
+	}
+
 	// Bare brand mentions are still masked.
 	b, bc, _ := rewriteRequestBodyWithClient([]byte(`{"system":"You are omp."}`), "openai", "oh_my_pi")
 	if !bc || !strings.Contains(string(b), "Antigravity.") {
 		t.Fatalf("bare omp brand must still be masked: changed=%v body=%s", bc, b)
 	}
 
-	// Non-dot delimiters like /omp/ and \omp\ MUST be masked to Antigravity: the
-	// remap is scoped to a literal dot-prefixed path segment.
-	bSlash, bcSlash, _ := rewriteRequestBodyWithClient([]byte(`{"system":"binary at /omp/agent"}`), "openai", "oh_my_pi")
-	if !bcSlash || !strings.Contains(string(bSlash), "/Antigravity/agent") {
-		t.Fatalf("/omp/ must be masked to Antigravity: changed=%v body=%s", bcSlash, bSlash)
+	// A URL or path is only ever rewritten for a literal dot-prefixed directory
+	// segment. "/omp/" and "\omp\" are ordinary path names with nothing to do
+	// with any coding agent, so they are left byte-for-byte alone - masking them
+	// produced a path that existed neither upstream nor on the way back.
+	if got := systemAfter(t, "oh_my_pi", "binary at /omp/agent"); got != "binary at /omp/agent" {
+		t.Fatalf("/omp/ must never be rewritten: %q", got)
 	}
-	bBackslash, bcBackslash, _ := rewriteRequestBodyWithClient([]byte(`{"system":"binary at C:\\omp\\agent"}`), "openai", "oh_my_pi")
-	if !bcBackslash || !strings.Contains(string(bBackslash), `C:\\Antigravity\\agent`) {
-		t.Fatalf(`\omp\ must be masked to Antigravity: changed=%v body=%s`, bcBackslash, bBackslash)
+	if got := systemAfter(t, "oh_my_pi", `binary at C:\\omp\\agent`); got != `binary at C:\\omp\\agent` {
+		t.Fatalf(`\omp\ must never be rewritten: %q`, got)
 	}
 
-	// Other dot-prefixed brands are not in the remap table, so they mask.
+	// The same rule holds for every other coding agent's name, not just Oh My Pi.
+	for _, tc := range []struct{ client, in, keep string }{
+		{"claude_code", `{"system":"srv at /claude/agent"}`, "/claude/agent"},
+		{"codex", `{"system":"srv at /codex/agent"}`, "/codex/agent"},
+	} {
+		if got := systemAfter(t, tc.client, strings.TrimSuffix(strings.TrimPrefix(tc.in, `{"system":"`), `"}`)); got != strings.TrimSuffix(strings.TrimPrefix(tc.in, `{"system":"`), `"}`) {
+			t.Fatalf("%s: %q must never be rewritten: %q", tc.client, tc.keep, got)
+		}
+	}
+
+	// A composed mapping keeps its own deliberate meaning wherever it appears,
+	// so the dot-prefixed "oh-my-pi" is still masked even though the bare vendor
+	// words in a path are not.
 	bOther, bcOther, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.oh-my-pi"}`), "openai", "oh_my_pi")
 	if !bcOther || !strings.Contains(string(bOther), "/home/user/.Antigravity") {
-		t.Fatalf(".oh-my-pi must be masked to Antigravity: changed=%v body=%s", bcOther, bOther)
+		t.Fatalf(".oh-my-pi must still be masked: changed=%v body=%s", bcOther, bOther)
 	}
 
-	// Only an exact path segment is remapped; lookalike segments and files with
-	// a different leading name still mask the brand.
-	bSuffix, bcSuffix, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.omp-backup/agent"}`), "openai", "oh_my_pi")
-	if !bcSuffix || !strings.Contains(string(bSuffix), "/home/user/.Antigravity-backup/agent") {
-		t.Fatalf(".omp-backup must be masked to Antigravity: changed=%v body=%s", bcSuffix, bSuffix)
+	// A dot-element whose brand is glued to a suffix by a hyphen is a different
+	// path element, not the configuration directory.
+	if got := systemAfter(t, "oh_my_pi", "config at /home/user/.omp-backup/agent"); got != "config at /home/user/.omp-backup/agent" {
+		t.Fatalf(".omp-backup must be left alone: %q", got)
 	}
+	// A brand glued onto a leading file name is prose, not a segment, and is
+	// still masked as before.
 	bExtension, bcExtension, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/profile.omp/agent"}`), "openai", "oh_my_pi")
 	if !bcExtension || !strings.Contains(string(bExtension), "/home/user/profile.Antigravity/agent") {
-		t.Fatalf("profile.omp must be masked to Antigravity: changed=%v body=%s", bcExtension, bExtension)
+		t.Fatalf("profile.omp must be masked: changed=%v body=%s", bcExtension, bExtension)
+	}
+
+	// A directory name that merely contains the brand word is an ordinary path.
+	// Rewriting it round-tripped "antigravity-cloak" into "omp-cloak" and the
+	// client then read a path that did not exist.
+	if got := systemAfter(t, "oh_my_pi", "cwd F:/CodeBase/antigravity-cloak/main.go"); got != "cwd F:/CodeBase/antigravity-cloak/main.go" {
+		t.Fatalf("antigravity-cloak must be left alone: %q", got)
+	}
+
+	// A URL host is prose about a product, not a coding-agent directory, and the
+	// composed domain mappings keep working: only bare words are held back.
+	bURL, bcURL, _ := rewriteRequestBodyWithClient([]byte(`{"system":"docs at https://claude.ai/docs"}`), "openai", "claude_code")
+	if !bcURL || !strings.Contains(string(bURL), "antigravity.google") {
+		t.Fatalf("claude.ai must still cloaks: changed=%v body=%s", bcURL, bURL)
+	}
+	if got := systemAfter(t, "oh_my_pi", "see https://omp.ai/pricing"); got != "see https://omp.ai/pricing" {
+		t.Fatalf("bare omp in a URL must be left alone: %q", got)
 	}
 }
 
@@ -2005,13 +2046,25 @@ func TestRewriteMasksBareClaudeAndRemapsClaudeHomePath(t *testing.T) {
 		// model is not handed a dead .Antigravity path.
 		{"claude home remapped to gemini", `memory at C:\\Users\\monet\\.claude\\projects\\slug\\memory`, `memory at C:\\Users\\monet\\.gemini\\projects\\slug\\memory`, true},
 		{"unix claude home remapped", `memory at /home/user/.claude/projects/slug`, `memory at /home/user/.gemini/projects/slug`, true},
-		// Not a path segment, so the brand still masks.
-		{"claude-backup is not a path segment", `/home/user/.claude-backup/x`, `/home/user/.Antigravity-backup/x`, true},
+		// A path element that merely starts with a dot is still not the
+		// configuration directory, so it is left byte-for-byte alone.
+		{"claude-backup is not a path segment", `/home/user/.claude-backup/x`, `/home/user/.claude-backup/x`, false},
+		// A non-dot path element has nothing to do with the coding agent either.
+		{"slash-claude is never rewritten", `/opt/claude/bin`, `/opt/claude/bin`, false},
+		{"backslash-claude is never rewritten", `C:\\claude\\bin`, `C:\\claude\\bin`, false},
+		// The repo directory name contains the brand word; rewriting it made the
+		// model read a path that did not exist.
+		{"brand inside a directory name", `cwd F:/CodeBase/antigravity-cloak/main.go`, `cwd F:/CodeBase/antigravity-cloak/main.go`, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":`+strconv.Quote(tc.in)+`}`), "anthropic", "claude_code")
-			got := systemText(t, body)
+			// An unchanged pass returns no body at all, which is exactly the
+			// upstream bytes: the original.
+			got := tc.in
+			if changed {
+				got = systemText(t, body)
+			}
 			if changed != tc.changed {
 				t.Fatalf("changed = %v, want %v (body=%s)", changed, tc.changed, body)
 			}
