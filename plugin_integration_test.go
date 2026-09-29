@@ -551,6 +551,7 @@ func TestIntegration_OfflineMockServer_HTTPRoundtrip(t *testing.T) {
 		t.Errorf("stream uncloak to Claude Code Bash failed: %s", clientFinal)
 	}
 }
+
 // TestIntegration_OfflineMockServer_CloakToStreamRoundtrip proves ONE path carries
 // the rewritten client request into a local mock upstream and then its streamed
 // response back through the plugin to the simulated client. The mock verifies the
@@ -819,7 +820,7 @@ func TestIntegration_OfflineMockServer_MalformedPayload(t *testing.T) {
 	reqID := "omp-malformed-009"
 	model := "agy/gemini-3.7-flash"
 	clientReq := map[string]any{
-		"model": model,
+		"model":    model,
 		"messages": []any{map[string]any{"role": "user", "content": "x"}},
 		"tools": []any{
 			map[string]any{"type": "function", "function": map[string]any{"name": "read"}},
@@ -855,7 +856,7 @@ func TestIntegration_OfflineMockServer_UnexpectedMockRequest(t *testing.T) {
 	reqID := "omp-unexpected-010"
 	model := "agy/gemini-3.7-flash"
 	clientReq := map[string]any{
-		"model": model,
+		"model":    model,
 		"messages": []any{map[string]any{"role": "user", "content": "x"}},
 		"tools": []any{
 			map[string]any{"type": "function", "function": map[string]any{"name": "bash"}},
