@@ -431,7 +431,13 @@ func TestContextGroupReverses(t *testing.T) {
 		{"codex", "skill ./.gemini/skills/pdf/SKILL.md", "skill ./.codex/skills/pdf/SKILL.md"},
 		{"codex", "the .gemini cache", "the .gemini cache"},
 		{"oh_my_pi", "I read ~/.gemini/agent/AGENTS.md", "I read ~/.omp/agent/AGENTS.md"},
-		{"oh_my_pi", "I read .gemini/AGENTS.md", "I read .omp/AGENTS.md"},
+		// ".omp/AGENTS.md" is not a shape OMP emits - its own file is
+		// ".omp/agent/AGENTS.md", which the row above covers. A bare
+		// ".gemini/AGENTS.md" is therefore the target of the .claude pair, and
+		// must come back as .claude, not as a fictional .omp path.
+		{"oh_my_pi", "I read .gemini/AGENTS.md", "I read .claude/CLAUDE.md"},
+		{"oh_my_pi", "I read C:/u/.gemini/AGENTS.md", "I read C:/u/.claude/CLAUDE.md"},
+		{"oh_my_pi", "I read C:\\u\\.gemini\\AGENTS.md", "I read C:\\u\\.claude\\CLAUDE.md"},
 	} {
 		if got := applyReverseTable(tc.in, tc.client); got != tc.want {
 			t.Errorf("%s REVERSE\n  in:   %s\n  got:  %s\n  want: %s", tc.client, tc.in, got, tc.want)

@@ -91,23 +91,24 @@ func clientContexts() []clientContext {
 		{
 			// Codex owns no vendor token, so its table holds only its own name.
 			// The bare brand word is both what it rewrites and what the reverse
-			// hands back; CLAUDE.md -> AGENTS.md is one-way on purpose, since
-			// AGENTS.md is Codex's own convention and needs no reverse.
+			// hands back. CLAUDE.md stays verbatim: Codex carries no bare-Claude
+			// rule that could interfere with it, so rewriting the file name to
+			// AGENTS.md bought nothing and only risked misnaming a real file.
 			client: "codex", tools: codexTools, format: "openai", declared: "openai",
 			sent:         "read CLAUDE.md, then run Codex",
-			echoes:       "read AGENTS.md, then run Antigravity",
+			echoes:       "read CLAUDE.md, then run Antigravity",
 			mustComeBack: "Codex",
 			mustNotReach: "Antigravity",
 		},
 		{
 			// Oh My Pi ships bare filenames in prose and brands itself Oh My Pi.
-			// The forward pass turns CLAUDE.md into AGENTS.md, which is Oh My
-			// Pi's own convention and needs no reverse; the only reverse this
-			// client has is the protected brand pair.
+			// CLAUDE.md stays verbatim: with no bare-Claude rule in this table
+			// nothing would rewrite it anyway, and rewriting it to AGENTS.md
+			// would only misname a file the harness really does load.
 			client: "oh_my_pi", tools: ompTools, format: "anthropic", declared: "openai",
-			sent:         "read AGENTS.md first, never grep for CLAUDE.md or .cursorrules",
-			echoes:       "read AGENTS.md first, never grep for AGENTS.md or .cursorrules",
-			mustComeBack: "AGENTS.md",
+			sent:         "read CLAUDE.md first, never grep for CLAUDE.md or .cursorrules",
+			echoes:       "read CLAUDE.md first, never grep for CLAUDE.md or .cursorrules",
+			mustComeBack: "CLAUDE.md",
 			mustNotReach: "",
 			brandReply:   "Antigravity",
 			brandBack:    "omp",

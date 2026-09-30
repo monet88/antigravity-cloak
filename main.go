@@ -3267,13 +3267,24 @@ const (
 // protected pair share one carry instead of deadlocking each other.
 var ompProtectedReverseTable = []rewriteMapping{
 	{Match: reverseBrandMatch, Replacement: reverseBrandReplacement},
+	// Must precede the .gemini rules below, which would otherwise consume the
+	// directory first and leave "AGENTS.md" attached to the wrong root. The
+	// "/AGENTS.md" right after ".gemini/" is what makes this reversible: no
+	// .omp path carries that shape, because OMP's own is ".omp/agent/AGENTS.md".
+	// Only the file is remapped this way, never the .claude directory itself -
+	// a blanket .claude -> .gemini would land on the same target as .omp and
+	// leave the reverse unable to tell the two apart.
+	{Match: ".gemini/AGENTS.md", Replacement: ".claude/CLAUDE.md"},
+	{Match: ".gemini\\AGENTS.md", Replacement: ".claude\\CLAUDE.md"},
 	{Match: ".gemini/", Replacement: ".omp/"},
 	{Match: ".gemini\\", Replacement: ".omp\\"},
 	// The bare form, matching the forward remap's end-of-string case.
 	{Match: ".gemini", Replacement: ".omp"},
-	// Repairs the same damage the protected pair causes above, for the same
-	// reason as the codex rule: Oh My Pi's forward pass never introduces this
-	// domain, so the host has to come back exactly as it arrived.
+	// Pins the domain against the protected pair above. "Antigravity" is
+	// word-bounded, and a dot is a non-word byte, so the bare rule matches
+	// inside "antigravity.google" and would hand the client the dead host
+	// "omp.google". The forward pass turns a typed "omp.google" into
+	// "antigravity.google", so that is the spelling this repair must restore.
 	{Match: "omp.google", Replacement: "antigravity.google"},
 }
 
@@ -4365,7 +4376,12 @@ var claudeCodeBrandMappings = slices.Concat(
 	},
 	claudeContextMappings,
 	[]rewriteMapping{
-		claudeMdBrandMapping,
+		// Only claude_code needs this: its table also carries the bare "Claude"
+		// rule, which would otherwise consume the vendor prefix inside CLAUDE.md
+		// and produce Antigravity.md - which the reverse can only restore to
+		// Claude.md, corrupting the file name's case. Codex and Oh My Pi have no
+		// bare-Claude rule, so their CLAUDE.md passes through untouched already.
+		{Match: "CLAUDE.md", Replacement: "AGENTS.md"},
 		// Official product/URL names, taken from antigravity.google and its docs.
 		// The product is "Antigravity SDK" (pip install google-antigravity); the
 		// platform lives on antigravity.google.
@@ -4400,7 +4416,7 @@ var claudeCodeBrandMappings = slices.Concat(
 )
 
 var codexBrandMappings = slices.Concat(
-	[]rewriteMapping{claudeMdBrandMapping},
+
 	// Codex keeps its file names; only the home directory is rewritten. See
 	// pathRules for why the match is not anchored to a ~/ or ./ spelling.
 	codexContextMappings,
@@ -4416,7 +4432,14 @@ var codexBrandMappings = slices.Concat(
 )
 
 var ompBrandMappings = []rewriteMapping{
-	claudeMdBrandMapping,
+	// Oh My Pi discovers the competitor context file at <user home>/.claude/
+	// CLAUDE.md (discovery/claude.ts:74,177) while its own root file is a
+	// neutral AGENTS.md (discovery/agents-md.ts:21). Only the file is remapped
+	// here - the .claude directory stays verbatim, because a blanket
+	// .claude -> .gemini would collide with .omp -> .gemini and make the
+	// reverse ambiguous. ompProtectedReverseTable inverts this pair.
+	{Match: ".claude/CLAUDE.md", Replacement: ".gemini/AGENTS.md"},
+	{Match: ".claude\\CLAUDE.md", Replacement: ".gemini\\AGENTS.md"},
 	// Oh My Pi coding agent & harness. On the protected route these go through
 	// the sentinel path instead; these entries cover an OMP marker that did not
 	// take the protected branch.
@@ -4424,13 +4447,6 @@ var ompBrandMappings = []rewriteMapping{
 	{Match: "oh-my-pi", Replacement: "Antigravity"},
 	{Match: "omp", Replacement: "Antigravity"},
 }
-
-// claudeMdBrandMapping is the one rule every client shares: each supported
-// client reads a CLAUDE.md as a context source, and its target (AGENTS.md) is
-// never inverted, so it cannot make any reverse ambiguous. It is referenced by
-// each table rather than declared globally, because the tables are the single
-// place where a client's rewriting is declared.
-var claudeMdBrandMapping = rewriteMapping{Match: "CLAUDE.md", Replacement: "AGENTS.md"}
 
 // brandMappingsByClient is the whole forward surface. A resolved client with no
 // entry has no forward brand table, so its request body is left untouched.
