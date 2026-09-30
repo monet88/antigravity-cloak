@@ -763,6 +763,17 @@ var mandatoryProtectedOMPAliases = []string{
 	"omp",
 }
 
+// ompIdentityLines rewrite Oh My Pi's opening sentence whole, rather than
+// substituting the bare alias inside it. The harness ships the sentence
+// verbatim ("You are omp's trusted coding assistant."), so the bare-alias pass
+// would otherwise turn it into "You are Antigravity's trusted coding
+// assistant." and leave a sentence that names no product and no vendor. These
+// must run BEFORE mandatoryProtectedOMPAliases: that pass swaps the "omp" for
+// the sentinel, after which the sentence no longer exists to match.
+var ompIdentityLines = []rewriteMapping{
+	{Match: "You are omp's trusted coding assistant.", Replacement: antigravityIdentity},
+}
+
 func isOMPAlias(match string) bool {
 	m := strings.ToLower(strings.TrimSpace(match))
 	return m == "omp" || m == "oh-my-pi" || m == "oh my pi"
@@ -775,6 +786,17 @@ func rewriteProtectedBrandText(text string, cfg *filterConfig, client string) (s
 	current := text
 	lowerCurrent := strings.ToLower(current)
 	changed := false
+	// Whole-sentence first: the sentinel pass below swaps the "omp" inside
+	// these lines for the sentinel, after which the sentence cannot match.
+	if client == "oh_my_pi" {
+		for _, m := range ompIdentityLines {
+			if next, rep := replaceInsensitive(current, m.Match, m.Replacement); rep {
+				current = next
+				lowerCurrent = strings.ToLower(current)
+				changed = true
+			}
+		}
+	}
 	for _, alias := range mandatoryProtectedOMPAliases {
 		if !strings.Contains(lowerCurrent, strings.ToLower(alias)) {
 			continue
@@ -4432,6 +4454,9 @@ var codexBrandMappings = slices.Concat(
 )
 
 var ompBrandMappings = []rewriteMapping{
+	// Same whole-sentence rewrite as the protected route, for an OMP marker
+	// that did not take the protected branch. See ompIdentityLines.
+	ompIdentityLines[0],
 	// Oh My Pi reads the user's GLOBAL Claude memory, ~/.claude/CLAUDE.md
 	// (discovery/claude.ts:65-69,163-188), while its own root context file is a
 	// neutral AGENTS.md (discovery/agents-md.ts:21). That global file exists on

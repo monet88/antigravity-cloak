@@ -122,6 +122,46 @@ func TestIssue49_OMPRootAGENTSmdUntouched(t *testing.T) {
 	}
 }
 
+// TestIssue49_OMPIdentityLineRewrittenWhole proves the opening sentence is
+// replaced whole, not by substituting the bare alias inside it. The bare-alias
+// pass alone yields "You are Antigravity's trusted coding assistant.", a
+// sentence that names no product and no vendor. Also proves the ordering: the
+// sentinel pass swaps "omp" for a marker, so the sentence rule has to land
+// first or it never matches.
+func TestIssue49_OMPIdentityLineRewrittenWhole(t *testing.T) {
+	const in = "You are omp's trusted coding assistant."
+	cfg := activeFilterConfig()
+
+	got, changed := rewriteProtectedBrandText(in, cfg, "oh_my_pi")
+	if !changed || got != antigravityIdentity {
+		t.Fatalf("protected route: changed=%v out=%q", changed, got)
+	}
+	for _, alias := range mandatoryProtectedOMPAliases {
+		if _, rep := replaceBrandKeyword(got, alias, protectedBrandSentinel); rep {
+			t.Errorf("sentinel still matches %q in %q", alias, got)
+		}
+	}
+	if tbl := applyTable(in, ompBrandMappings); tbl != antigravityIdentity {
+		t.Errorf("forward table = %q", tbl)
+	}
+}
+
+// TestIssue49_OMPIdentityLineLeavesProseAlone keeps the rule a sentence rule.
+// A bare "omp" in ordinary prose still takes the alias path, and text that is
+// not the shipped sentence is untouched.
+func TestIssue49_OMPIdentityLineLeavesProseAlone(t *testing.T) {
+	for _, in := range []string{
+		"You are a trusted coding assistant.",
+		"Run the omp binary to start.",
+		"you are OMP's trusted coding assistant.",
+	} {
+		got, _ := rewriteProtectedBrandText(in, activeFilterConfig(), "oh_my_pi")
+		if got == antigravityIdentity && in != "you are OMP's trusted coding assistant." {
+			t.Errorf("%q unexpectedly became the identity line", in)
+		}
+	}
+}
+
 // TestIssue49_ClaudeMdRewrittenOnlyByClaudeCode is the case-safety proof for
 // the CLAUDE.md rule. claude_code also carries the bare "Claude" rule, so
 // without this rule CLAUDE.md becomes Antigravity.md and the reverse can only
