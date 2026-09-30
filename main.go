@@ -4432,10 +4432,13 @@ var codexBrandMappings = slices.Concat(
 )
 
 var ompBrandMappings = []rewriteMapping{
-	// Oh My Pi discovers the competitor context file at <user home>/.claude/
-	// CLAUDE.md (discovery/claude.ts:74,177) while its own root file is a
-	// neutral AGENTS.md (discovery/agents-md.ts:21). Only the file is remapped
-	// here - the .claude directory stays verbatim, because a blanket
+	// Oh My Pi reads the user's GLOBAL Claude memory, ~/.claude/CLAUDE.md
+	// (discovery/claude.ts:65-69,163-188), while its own root context file is a
+	// neutral AGENTS.md (discovery/agents-md.ts:21). That global file exists on
+	// disk, so its path is a real operational identifier on this route. The
+	// match is unanchored, so it covers the ~/ and absolute spellings alike -
+	// there is no project-local .claude/CLAUDE.md in play. Only the file is
+	// remapped: the .claude directory stays verbatim, because a blanket
 	// .claude -> .gemini would collide with .omp -> .gemini and make the
 	// reverse ambiguous. ompProtectedReverseTable inverts this pair.
 	{Match: ".claude/CLAUDE.md", Replacement: ".gemini/AGENTS.md"},

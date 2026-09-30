@@ -76,9 +76,11 @@ func TestIssue49_CompetitorDirsLeftAlone(t *testing.T) {
 	}
 }
 
-// TestIssue49_OMPClaudeMdPairIsReversible pins the OMP-only pair
-// <user home>/.claude/CLAUDE.md -> <user home>/.gemini/AGENTS.md in both
-// directions, for POSIX and Windows spellings. The file-level scope is the
+// TestIssue49_OMPClaudeMdPairIsReversible pins the OMP-only pair for the
+// user's GLOBAL Claude memory, ~/.claude/CLAUDE.md -> ~/.gemini/AGENTS.md, in
+// both directions and for POSIX and Windows spellings. There is no
+// project-local .claude/CLAUDE.md; the match is unanchored so the ~/ and
+// absolute spellings both hit it. The file-level scope is the
 // whole point: a blanket .claude -> .gemini would land on the same target as
 // the existing .omp -> .gemini and leave the reverse unable to tell them
 // apart. Reversibility survives because "/AGENTS.md" directly after
