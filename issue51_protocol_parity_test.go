@@ -78,14 +78,15 @@ func TestIssue51_AliasTablesAreEquivalentAcrossCarriers(t *testing.T) {
 // fragmented carriage.
 func TestIssue51_StreamToolArgumentsRestoreLikeNonStream(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
-	const wire = `{\"path\":\"/home/u/.gemini/agent\",\"url\":\"https://antigravity.google/docs\"}`
+	const wire = `{\"path\":\"~/.gemini/rules/style.md\",\"url\":\"https://antigravity.google/docs\"}`
 
 	for _, format := range []string{"openai", "anthropic"} {
 		mgr := newStreamSessionManager()
 		reqID := "issue51-args-" + format
 		mgr.resetSession("req:"+reqID, "claude_code", ompUncloakCache(t))
 
-		first, second := wire[:40], wire[40:]
+		// Split inside the path, so the carry has to survive the fragment.
+		first, second := wire[:20], wire[20:]
 		frames := []string{
 			streamToolArgumentEvent(format, 0, 0, first),
 			streamToolArgumentEvent(format, 0, 0, second),
@@ -101,7 +102,7 @@ func TestIssue51_StreamToolArgumentsRestoreLikeNonStream(t *testing.T) {
 		if strings.Contains(got, ".gemini") || strings.Contains(got, "antigravity.google") {
 			t.Fatalf("%s: streamed arguments kept cloaked text: %q", format, got)
 		}
-		if !strings.Contains(got, "/home/u/.claude/agent") {
+		if !strings.Contains(got, "~/.claude/rules/style.md") {
 			t.Fatalf("%s: streamed arguments lost the path: %q", format, got)
 		}
 		if !strings.Contains(got, "https://claude.ai/docs") {
@@ -220,14 +221,14 @@ func TestIssue51_OMPMachineGeneratedProseUsesRequestScopedAliases(t *testing.T) 
 func TestIssue51_NonStreamToolArgumentsMatchStream(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
-	const cloakedArgs = `{\"path\":\"/home/u/.gemini/agent\",\"url\":\"https://antigravity.google/docs\"}`
+	const cloakedArgs = `{\"path\":\"~/.gemini/rules/style.md\",\"url\":\"https://antigravity.google/docs\"}`
 	for _, format := range []string{"openai", "anthropic"} {
 		var respBody string
 		if format == "openai" {
 			respBody = `{"choices":[{"message":{"content":"done","tool_calls":[{"function":{"name":"view_file","arguments":"` +
 				jsonEscape(t, cloakedArgs) + `"}}]}}]}`
 		} else {
-			respBody = `{"content":[{"type":"text","text":"done"},{"type":"tool_use","id":"1","name":"view_file","input":{"path":"/home/u/.gemini/agent","url":"https://antigravity.google/docs"}}]}`
+			respBody = `{"content":[{"type":"text","text":"done"},{"type":"tool_use","id":"1","name":"view_file","input":{"path":"~/.gemini/rules/style.md","url":"https://antigravity.google/docs"}}]}`
 		}
 		reqID := "issue51-nonstream-" + format
 		reqBody := declaredToolsFor(format, "Read", "Bash")
@@ -250,7 +251,7 @@ func TestIssue51_NonStreamToolArgumentsMatchStream(t *testing.T) {
 		if strings.Contains(out, ".gemini") || strings.Contains(out, "antigravity.google") {
 			t.Fatalf("%s: non-stream response kept cloaked operational text: %s", format, out)
 		}
-		if !strings.Contains(out, "/home/u/.claude/agent") || !strings.Contains(out, "https://claude.ai/docs") {
+		if !strings.Contains(out, "~/.claude/rules/style.md") || !strings.Contains(out, "https://claude.ai/docs") {
 			t.Fatalf("%s: non-stream response lost the client spelling: %s", format, out)
 		}
 	}
@@ -279,7 +280,7 @@ func TestIssue51_HeldToolArgumentFlushesIntoTheArgumentCarrier(t *testing.T) {
 		// The tail of the path is a live prefix, so it is held.
 		resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 			RequestID: "issue51-hold-openai", SourceFormat: "openai", ChunkIndex: 0,
-			Body: []byte(streamToolArgumentEvent("openai", 0, 0, `{\"path\":\"/home/u/.gem`)),
+			Body: []byte(streamToolArgumentEvent("openai", 0, 0, `{\"path\":\"~/.gem`)),
 		}, "openai")
 		_ = resp
 		done := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
@@ -302,7 +303,7 @@ func TestIssue51_HeldToolArgumentFlushesIntoTheArgumentCarrier(t *testing.T) {
 		mgr.resetSession("req:issue51-hold-anthropic", "claude_code", ompUncloakCache(t))
 		mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 			RequestID: "issue51-hold-anthropic", SourceFormat: "anthropic", ChunkIndex: 0,
-			Body: []byte(streamToolArgumentEvent("anthropic", 0, 0, `{\"path\":\"/home/u/.gem`)),
+			Body: []byte(streamToolArgumentEvent("anthropic", 0, 0, `{\"path\":\"~/.gem`)),
 		}, "anthropic")
 		done := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 			RequestID: "issue51-hold-anthropic", SourceFormat: "anthropic", ChunkIndex: 1,

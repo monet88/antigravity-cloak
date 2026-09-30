@@ -400,6 +400,83 @@ and recreate with the same explicit Compose mounts and image. Verify the old
 version/path is registered and the gateway is healthy. Report the failed new
 deployment separately; never label a rollback as new-version acceptance.
 
+## Live acceptance record - 2026-09-30 (client path scope)
+
+Claude Code live acceptance for the client-home-path scope change, run on this
+workstation against the local gateway with the default `cpa` provider. This is
+a working-tree acceptance, not a release claim - no tag exists, and the source
+is a dirty snapshot.
+
+### Pinned run
+
+| | |
+| :--- | :--- |
+| Host commit | `e2c7157` plus the uncommitted working tree |
+| `git diff` sha256 | `23abcdaa01048a720d78d063ef3f5b734b95ebcaf1e787e7600aa013ab349407` |
+| Built artifact sha256 | `33f1296f46bfbeddc58ba44c96313512b124d0e3baa3d911a79f3758eed5796d` |
+| Previous artifact sha256 | `ecb761e9e09085f5532614bb9a7b62cd141758c191b31e27f09257de4fc69caf` |
+| Build image | `golang:1.26.0-bookworm` (`golang@sha256:2a0ba12e…6677c`), gateway glibc 2.36 |
+| Plugin version | 0.6.0, `registered=true`, `effective_enabled=true` |
+| Client under test | `X-Cloak-Client: claude_code`, `User-Agent: claude-cli/2.1.284` |
+| Evidence | `.git/local-acceptance-20260929-205449/` (not in the repository) |
+
+The build used the dirty-tree overlay from step 2, asserted by the presence of
+`claudeReverseContextMappings` and `func pathRules` in the consumed source. The
+installed binary was proved from inside the running container rather than from
+command output: `env | grep CPA_FILTER_DEBUG` returned `1`, and the in-container
+`sha256sum` equalled the built hash.
+
+### What the measurement changed
+
+The scope was first narrowed to a home spelling (`~/`, `./`, `~\`, `.\`) on the
+reasoning that a harness advertises its instruction file in that form, so `~`-form
+rules would cover the injected context. The unit suite was green. Live traffic
+showed the premise was wrong on this platform:
+
+| token | `=== REQUEST BODY ===` (from Claude Code) | `=== API REQUEST 1 ===` (upstream) |
+| :--- | :--- | :--- |
+| `Claude Code` | 15 | 0 |
+| `CLAUDE.md` | 8 | 0 |
+| `Anthropic` | 8 | 1 |
+| `C:\Users\monet\.claude\…` | **114** | **114** |
+
+Claude Code on Windows puts absolute client-home paths in its system context
+and never uses the tilde form: `transcripts` 97, `plugins` 7, the instruction
+file 6, `lsp-shims` 3, `projects` 1. All 114 reached the model uncloaked. The
+rules are therefore matched as a whole segment at any position, in both
+directions, and are asserted against observed traffic rather than against
+documentation.
+
+### Per-case results - Claude Code
+
+| case | result |
+| :--- | :--- |
+| absolute client-home path to upstream | 114 -> **0** |
+| `Claude Code` to upstream | 15 -> **0** |
+| `You are Claude` to upstream | 1 -> **0** |
+| tool call `C:/Users/monet/.claude` -> client | `C:/Users/monet/.claude` (cloaked, then restored) |
+
+### Honest gaps
+
+- **The residual `.claude`, `CLAUDE.md` and `Anthropic` counts in the upstream
+  request are the operator's own text and file contents, not injected context.**
+  The session had Claude Code reading this repository's `main.go`, which
+  contains `pathRules(".claude", ".gemini", …)` in its own source, and the
+  operator's prompt text sat in the conversation history. Rewriting those would
+  corrupt code and misquote the operator, so they are correctly left alone.
+- **A model-invented `.gemini` at end of string is not reversed.** The model had
+  seen the cloaked directory in context and emitted `C:/Users/monet/.gemini`
+  with no trailing separator; the segment rule requires one, so the client
+  received the cloaked spelling. This is the accepted residual of the
+  over-remap design - the reverse pass cannot distinguish a name the model
+  echoes from one the forward pass produced.
+- **A `.claude` belonging to a different project is rewritten too.** The plugin
+  cannot tell which home directory is the client's own. Accepted deliberately:
+  that costs one path the model may wander into, where the narrow form cost 114
+  on every request.
+- Oh My Pi and Codex were not exercised in this run. `pathRules` covers both and
+  both are unit-tested, but neither has a live record for this change.
+
 ## Live acceptance record - 2026-09-29
 
 Oh My Pi live acceptance for the PR #46 streaming/reverse remediation, plus the

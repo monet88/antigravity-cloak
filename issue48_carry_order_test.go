@@ -51,20 +51,20 @@ func reverseReplacementFor(t *testing.T, match string) string {
 }
 
 // TestIssue48_HeldTokensFlushInSourceOrderNotMappingOrder is the core
-// regression: "GEMINI.md" is declared BEFORE "Google Deepmind" in claude_code's
-// reverse table, so the old key-string tie-break emitted the GEMINI.md carry
-// first even when the model produced Google Deepmind first. The client read the
-// two tokens transposed.
+// regression: ".gemini/GEMINI.md" is declared BEFORE "Google Deepmind" in
+// claude_code's reverse table, so the old key-string tie-break emitted that
+// carry first even when the model produced Google Deepmind first. The client
+// read the two tokens transposed.
 func TestIssue48_HeldTokensFlushInSourceOrderNotMappingOrder(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	sess := newBrandTestSession(t, "issue48-order", "claude_code")
 
-	// Model order: "Google Deepmind" first, "GEMINI.md" second.
+	// Model order: "Google Deepmind" first, the path second.
 	holdOneLane(t, sess, "anthropic:0", "Google Deepmind", "made by Google Deepmind")
-	holdOneLane(t, sess, "anthropic:0", "GEMINI.md", " per GEMINI.md")
+	holdOneLane(t, sess, "anthropic:0", ".gemini/GEMINI.md", " per .gemini/GEMINI.md")
 
 	// Reverse-table order is the opposite, so a key tie-break is detectable.
-	first, second := "anthropic:0"+reverseBrandLaneSuffix+"GEMINI.md", "anthropic:0"+reverseBrandLaneSuffix+"Google Deepmind"
+	first, second := "anthropic:0"+reverseBrandLaneSuffix+".gemini/GEMINI.md", "anthropic:0"+reverseBrandLaneSuffix+"Google Deepmind"
 	if !(first < second) {
 		t.Fatalf("fixture is not discriminating: %q already sorts before %q", first, second)
 	}
@@ -79,7 +79,7 @@ func TestIssue48_HeldTokensFlushInSourceOrderNotMappingOrder(t *testing.T) {
 	if flushes[1].key != first {
 		t.Fatalf("second flush key = %q, want the token the model produced second", flushes[1].key)
 	}
-	if got := flushes[0].text + flushes[1].text; got != "AnthropicCLAUDE.md" {
+	if got := flushes[0].text + flushes[1].text; got != "Anthropic.claude/CLAUDE.md" {
 		t.Fatalf("reassembled carries = %q, want original data order", got)
 	}
 }
@@ -96,7 +96,7 @@ func TestIssue48_FlushEventsCarryHeldTokensInSourceOrder(t *testing.T) {
 	sess.updatedAt = time.Now()
 
 	holdOneLane(t, sess, "anthropic:0", "Google Deepmind", "by Google Deepmind")
-	holdOneLane(t, sess, "anthropic:0", "GEMINI.md", " per GEMINI.md")
+	holdOneLane(t, sess, "anthropic:0", ".gemini/GEMINI.md", " per .gemini/GEMINI.md")
 
 	var out string
 	for _, ev := range strings.Split(strings.TrimRight(string(mgr.reverseFlushCloakedBrandLanes(sess, "anthropic", "anthropic:0", false)), "\n\n"), "\n\n") {
@@ -105,8 +105,8 @@ func TestIssue48_FlushEventsCarryHeldTokensInSourceOrder(t *testing.T) {
 		s, _ := delta["text"].(string)
 		out += s
 	}
-	if out != "AnthropicCLAUDE.md" {
-		t.Fatalf("flushed %q, want Anthropic before CLAUDE.md", out)
+	if out != "Anthropic.claude/CLAUDE.md" {
+		t.Fatalf("flushed %q, want Anthropic before the restored path", out)
 	}
 }
 
@@ -119,7 +119,7 @@ func TestIssue48_FlushOrderIsStableAcrossMapIteration(t *testing.T) {
 	for i := range 50 {
 		sess := newBrandTestSession(t, "issue48-stable", "claude_code")
 		holdOneLane(t, sess, "anthropic:0", "Google Deepmind", "by Google Deepmind")
-		holdOneLane(t, sess, "anthropic:0", "GEMINI.md", " per GEMINI.md")
+		holdOneLane(t, sess, "anthropic:0", ".gemini/GEMINI.md", " per .gemini/GEMINI.md")
 		var got string
 		for _, f := range orderedBrandFlushes(sess, brandReverseTableFor("claude_code")) {
 			got += f.key + "=" + f.text + "|"
@@ -189,14 +189,14 @@ func TestIssue48_NoHoldWhenMatchIsAlreadyBoundaryValid(t *testing.T) {
 	}
 }
 
-// TestIssue48_PathCarryStillReassembles covers the path-mapping case: a lone
-// "." IS a live prefix of ".gemini/GEMINI.md", so it stays held across the
-// chunk split and the two halves must come back as one token.
+// TestIssue48_PathCarryStillReassembles covers the path-mapping case: the
+// partial ".gemini" IS a live prefix of ".gemini/GEMINI.md", so it stays
+// held across the chunk split and the two halves must come back as one token.
 func TestIssue48_PathCarryStillReassembles(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	sess := newBrandTestSession(t, "issue48-path", "claude_code")
 
-	if _, changed := applySemanticBrandLane(sess, "anthropic:0", "config at /home/u/.gemini"); changed {
+	if _, changed := applySemanticBrandLane(sess, "anthropic:0", "config at .gemini"); changed {
 		t.Fatal("holding a live prefix must not report a replacement yet")
 	}
 	// One lane per semantic carrier now, so the block's prose holds here.
@@ -242,14 +242,14 @@ func TestIssue48_StreamDeliversEveryHeldToken(t *testing.T) {
 	}, "anthropic"))
 	collect(mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID: "issue48-stream", SourceFormat: "anthropic", ChunkIndex: 1,
-		Body: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"d per GEMINI.md\"}}\n\n"),
+		Body: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"d per .gemini/GEMINI.md\"}}\n\n"),
 	}, "anthropic"))
 	collect(mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID: "issue48-stream", SourceFormat: "anthropic", ChunkIndex: 2,
 		Body: []byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"),
 	}, "anthropic"))
 
-	if got := delivered.String(); got != "by Anthropic per CLAUDE.md" {
+	if got := delivered.String(); got != "by Anthropic per .claude/CLAUDE.md" {
 		t.Fatalf("stream delivered %q, want the fully reversed sentence", got)
 	}
 }
@@ -269,11 +269,11 @@ func TestIssue48_ProseAndArgumentHoldsFlushInArrivalOrder(t *testing.T) {
 	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID: "issue48-prose-args", SourceFormat: "anthropic", ChunkIndex: 0,
 		Body: []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"view_file\",\"input\":{}}}\n\n" +
-			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"p\\\":\\\"/home/u/.gem\"}}\n\n"),
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"p\\\":\\\"~/.gem\"}}\n\n"),
 	}, "anthropic")
 	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID: "issue48-prose-args", SourceFormat: "anthropic", ChunkIndex: 1,
-		Body: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"dir /home/u/.gem\"}}\n\n"),
+		Body: []byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"dir ~/.gem\"}}\n\n"),
 	}, "anthropic")
 	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID: "issue48-prose-args", SourceFormat: "anthropic", ChunkIndex: 2,
@@ -338,7 +338,7 @@ func TestIssue48_ReheldLaneTakesItsNewArrivalOrder(t *testing.T) {
 	}
 
 	// The ARGUMENT lane takes the first hold.
-	mgr.processChunk(step(0, argDelta(`{\"p\":\"/home/u/.gem`)), "anthropic")
+	mgr.processChunk(step(0, argDelta(`{\"p\":\"~/.gem`)), "anthropic")
 	heldCarry("after first arg hold")
 
 	// That carry completes and drains.
@@ -346,11 +346,11 @@ func TestIssue48_ReheldLaneTakesItsNewArrivalOrder(t *testing.T) {
 	heldCarry("after arg drain")
 
 	// The PROSE lane now takes a hold that stays open.
-	mgr.processChunk(step(2, textDelta("dir /home/u/.gem")), "anthropic")
+	mgr.processChunk(step(2, textDelta("dir ~/.gem")), "anthropic")
 	heldCarry("after prose hold")
 
 	// The argument lane holds AGAIN, strictly after the prose lane.
-	mgr.processChunk(step(3, argDelta(`{\"q\":\"/home/u/.gem`)), "anthropic")
+	mgr.processChunk(step(3, argDelta(`{\"q\":\"~/.gem`)), "anthropic")
 	heldCarry("after second arg hold")
 
 	resp := mgr.processChunk(step(4,

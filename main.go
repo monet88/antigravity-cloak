@@ -47,6 +47,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1696,7 +1697,7 @@ func lookupProtectedOMPTarget(base string, cloakTable map[string]string) (string
 	return target, ok
 }
 
-// lookupCloak maps a tool name (with or without namespace prefix) to its cloaked equivalent.
+// lookupCloak maps a bare or namespaced tool name to its cloaked target.
 func lookupCloak(name string, cloakTable map[string]string) (string, bool) {
 	if target, exists := cloakTable[name]; exists {
 		return target, true
@@ -4334,68 +4335,85 @@ const antigravityIdentity = "You are Antigravity, a powerful agentic AI coding a
 // A client's forward and reverse table are declared together, because they are
 // two halves of one identity: whatever that client's own words are rewritten to
 // must be rewritten back to that same client's words, and nothing else.
-var claudeCodeBrandMappings = []rewriteMapping{
-	// Opening identity lines. Each names the vendor twice, so token substitution
-	// alone yields nonsense ("Antigravity, Google's official CLI for
-	// Antigravity"). The replacements are the verbatim <identity> lines used by
-	// the real Antigravity CLI, for both its main session and its subagents, so a
-	// cloaked request is indistinguishable from native traffic.
-	// Must precede every other "Claude"/"Anthropic" rule.
-	{Match: "You are Claude Code, Anthropic's official CLI for Claude.", Replacement: antigravityIdentity},
-	{Match: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", Replacement: antigravityIdentity},
-	{Match: "Claude Code", Replacement: "Antigravity"},
-	// Vendor phrase: keeps "official CLI for Antigravity" coherent, and Google is
-	// the actual vendor of the Antigravity surface this plugin impersonates.
-	// Must precede any bare vendor mapping.
-	{Match: "Anthropic's official CLI", Replacement: "Google's official CLI"},
-	// The client home instruction file. Claude Code injects ~/.claude/CLAUDE.md
-	// as the user's private global instructions; Antigravity carries the mirror
-	// image at ~/.gemini/GEMINI.md. The whole path is matched (both separators)
-	// so it fires ahead of the bare CLAUDE.md rule below.
-	{Match: ".claude/CLAUDE.md", Replacement: ".gemini/GEMINI.md"},
-	{Match: ".claude\\CLAUDE.md", Replacement: ".gemini\\GEMINI.md"},
-	claudeMdBrandMapping,
-	// Official product/URL names, taken from antigravity.google and its docs.
-	// The product is "Antigravity SDK" (pip install google-antigravity); the
-	// platform lives on antigravity.google.
-	{Match: "Anthropic SDK", Replacement: "Antigravity SDK"},
-	{Match: "Claude Agent SDK", Replacement: "Antigravity SDK"},
-	{Match: "claude.ai", Replacement: "antigravity.google"},
-	// Model IDs advertised by the client system prompt, mapped onto Antigravity
-	// routes the gateway actually serves. Those IDs exist only on the client, so
-	// leaving them in place is itself a fingerprint. Ordered before the bare
-	// "Claude" rule, which would otherwise consume the vendor prefix first.
-	{Match: "claude-fable-5-1", Replacement: "gemini-3.1-pro-low"},
-	{Match: "claude-opus-5-5", Replacement: "gemini-3.1-pro-low"},
-	{Match: "claude-sonnet-5", Replacement: "gemini-3.8-flash"},
-	{Match: "claude-haiku-4-5-20251001", Replacement: "gemini-3.5-flash-lite"},
-	// Claude Code's multi-agent workflow tool. Antigravity ships the same
-	// capability as teamwork_preview_layer, so a cloaked request names the tool
-	// Antigravity traffic would actually use. It is a client-specific surface,
-	// not a brand token.
-	{Match: "Workflow", Replacement: "teamwork_preview_layer"},
-	// Plural of the tool name above. Matching is word-bounded, so "Workflows" in
-	// prose is a distinct token and would otherwise survive. Grammar is
-	// deliberately not repaired, same policy as the bare-brand rules below.
-	{Match: "Workflows", Replacement: "teamwork_preview_layer"},
-	// Bare vendor name. Mapped to "Google Deepmind" rather than a plain "Google"
-	// so the reverse pass has a token specific enough to match safely: a bare
-	// "Google" would fire on ordinary response prose, while "Google Deepmind" is
-	// exactly the vendor's own name and nothing else.
-	{Match: "Anthropic", Replacement: "Google Deepmind"},
-	// Catch-all. Must stay after every longer "Claude" form above.
-	{Match: "Claude", Replacement: "Antigravity"},
-}
+var claudeCodeBrandMappings = slices.Concat(
+	[]rewriteMapping{
+		// Opening identity lines. Each names the vendor twice, so token substitution
+		// alone yields nonsense ("Antigravity, Google's official CLI for
+		// Antigravity"). The replacements are the verbatim <identity> lines used by
+		// the real Antigravity CLI, for both its main session and its subagents, so a
+		// cloaked request is indistinguishable from native traffic.
+		// Must precede every other "Claude"/"Anthropic" rule.
+		{Match: "You are Claude Code, Anthropic's official CLI for Claude.", Replacement: antigravityIdentity},
+		{Match: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", Replacement: antigravityIdentity},
+		{Match: "Claude Code", Replacement: "Antigravity"},
+		// Vendor phrase: keeps "official CLI for Antigravity" coherent, and Google is
+		// the actual vendor of the Antigravity surface this plugin impersonates.
+		// Must precede any bare vendor mapping.
+		{Match: "Anthropic's official CLI", Replacement: "Google's official CLI"},
+		// The context group Claude Code injects into the system context, global
+		// and project-local alike, per its documented memory hierarchy:
+		//
+		//   ~/.claude/CLAUDE.md        user's private global instructions
+		//   ~/.claude/rules/*.md      user rules
+		//   ~/.claude/projects/<slug>/memory/   per-project auto memory
+		//   ./.claude/CLAUDE.md        project instructions
+		//   ./.claude/rules/*.md       project rules
+		//
+		// Built by claudeContextMappings, which matches the home directory as a
+		// whole segment at any position because that is the only spelling Claude
+		// Code actually emits on Windows. See pathRules.
+	},
+	claudeContextMappings,
+	[]rewriteMapping{
+		claudeMdBrandMapping,
+		// Official product/URL names, taken from antigravity.google and its docs.
+		// The product is "Antigravity SDK" (pip install google-antigravity); the
+		// platform lives on antigravity.google.
+		{Match: "Anthropic SDK", Replacement: "Antigravity SDK"},
+		{Match: "Claude Agent SDK", Replacement: "Antigravity SDK"},
+		{Match: "claude.ai", Replacement: "antigravity.google"},
+		// Model IDs advertised by the client system prompt, mapped onto Antigravity
+		// routes the gateway actually serves. Those IDs exist only on the client, so
+		// leaving them in place is itself a fingerprint. Ordered before the bare
+		// "Claude" rule, which would otherwise consume the vendor prefix first.
+		{Match: "claude-fable-5-1", Replacement: "gemini-3.1-pro-low"},
+		{Match: "claude-opus-5-5", Replacement: "gemini-3.1-pro-low"},
+		{Match: "claude-sonnet-5", Replacement: "gemini-3.8-flash"},
+		{Match: "claude-haiku-4-5-20251001", Replacement: "gemini-3.5-flash-lite"},
+		// Claude Code's multi-agent workflow tool. Antigravity ships the same
+		// capability as teamwork_preview_layer, so a cloaked request names the tool
+		// Antigravity traffic would actually use. It is a client-specific surface,
+		// not a brand token.
+		{Match: "Workflow", Replacement: "teamwork_preview_layer"},
+		// Plural of the tool name above. Matching is word-bounded, so "Workflows" in
+		// prose is a distinct token and would otherwise survive. Grammar is
+		// deliberately not repaired, same policy as the bare-brand rules below.
+		{Match: "Workflows", Replacement: "teamwork_preview_layer"},
+		// Bare vendor name. Mapped to "Google Deepmind" rather than a plain "Google"
+		// so the reverse pass has a token specific enough to match safely: a bare
+		// "Google" would fire on ordinary response prose, while "Google Deepmind" is
+		// exactly the vendor's own name and nothing else.
+		{Match: "Anthropic", Replacement: "Google Deepmind"},
+		// Catch-all. Must stay after every longer "Claude" form above.
+		{Match: "Claude", Replacement: "Antigravity"},
+	},
+)
 
-var codexBrandMappings = []rewriteMapping{
-	claudeMdBrandMapping,
-	// Codex's own prompts carry no vendor token, so the client name is the
-	// entire forward surface. Verified against codex-rs/core/gpt_5*.md:
-	// AGENTS.md eleven times, anthropic/claude/gemini/CLAUDE.md zero times.
-	{Match: "OpenAI Codex", Replacement: "Antigravity"},
-	{Match: "Codex CLI", Replacement: "Antigravity"},
-	{Match: "Codex", Replacement: "Antigravity"},
-}
+var codexBrandMappings = slices.Concat(
+	[]rewriteMapping{claudeMdBrandMapping},
+	// Codex keeps its file names; only the home directory is rewritten. See
+	// pathRules for why the match is not anchored to a ~/ or ./ spelling.
+	codexContextMappings,
+	[]rewriteMapping{
+		// Codex's own prompts carry no vendor token, so the client name is
+		// the entire forward surface. Verified against
+		// codex-rs/core/gpt_5*.md: AGENTS.md eleven times,
+		// anthropic/claude/gemini/CLAUDE.md zero times.
+		{Match: "OpenAI Codex", Replacement: "Antigravity"},
+		{Match: "Codex CLI", Replacement: "Antigravity"},
+		{Match: "Codex", Replacement: "Antigravity"},
+	},
+)
 
 var ompBrandMappings = []rewriteMapping{
 	claudeMdBrandMapping,
@@ -4429,63 +4447,101 @@ var brandMappingsByClient = map[string][]rewriteMapping{
 //
 // Oh My Pi has no entry here: it runs the protected brand lane, whose
 // Antigravity -> omp pair is its own reverse authority.
-var claudeCodeReverseBrandMappings = []rewriteMapping{
-	{Match: ".gemini/GEMINI.md", Replacement: ".claude/CLAUDE.md"},
-	{Match: ".gemini\\GEMINI.md", Replacement: ".claude\\CLAUDE.md"},
+var claudeCodeReverseBrandMappings = slices.Concat(
 	// The same Windows path as it appears inside streamed tool-call arguments.
 	// Anthropic streams those as raw JSON fragments, so a backslash that is one
-	// character in prose is written twice on the wire
-	// (C:\\Users\\dev\\.gemini\\GEMINI.md). Without this variant the whole-path
-	// rule misses and only the bare GEMINI.md rule below fires, handing the
-	// client a .gemini path that does not exist on disk.
-	{Match: `.gemini\\GEMINI.md`, Replacement: `.claude\\CLAUDE.md`},
-	{Match: "GEMINI.md", Replacement: "CLAUDE.md"},
-	// The bare home directory, for every other file under it. Declared after
-	// the whole-path forms above so they win the longer match. The backslash
-	// form is what a JSON-escaped Windows path looks like on the wire, and one
-	// rule covers both spellings because ".gemini\\" contains ".gemini\".
-	{Match: ".gemini/", Replacement: ".claude/"},
-	{Match: ".gemini\\", Replacement: ".claude\\"},
-	// The bare form, which the forward path-segment remap produces too: a tool
-	// argument that IS the home directory ends the text with no separator. The
-	// separator rules above win the longer match; this one is what covers
-	// end-of-string.
-	{Match: ".gemini", Replacement: ".claude"},
-	// Inverse of the forward domain rule. It has to precede the bare brand word
-	// below, or "Antigravity" would match inside "antigravity.google" and the
-	// client would receive "Claude.google".
-	{Match: "antigravity.google", Replacement: "claude.ai"},
-	// Inverse of the bare vendor rule. Safe to reverse precisely because the
-	// replacement is the two-word vendor name and not the bare "Google", which
-	// would collide with ordinary prose in model output.
-	{Match: "Google Deepmind", Replacement: "Anthropic"},
-	// A client-declared identifier, like a tool name: the skill slug lives in the
-	// client's own registry, so the response has to hand back a slug the client
-	// can actually resolve. Without this the model calls Skill("Antigravity-api")
-	// and the client answers "Unknown skill".
-	{Match: "Antigravity-api", Replacement: "claude-api"},
-	{Match: "Antigravity SDK", Replacement: "Anthropic SDK"},
-	// The bare brand word, listed last so the two longer "Antigravity" tokens
-	// above win the prefix. This client's forward pass produced that word only
-	// from its own name, so inverting it here is unambiguous.
-	{Match: "Antigravity", Replacement: "Claude"},
+	// character in prose is written twice on the wire. These come FIRST: they
+	// are the longer match, and the plain segment rule below would otherwise
+	// claim the directory and leave the file name behind.
+	[]rewriteMapping{
+		{Match: `~\\.gemini\\GEMINI.md`, Replacement: `~\\.claude\\CLAUDE.md`},
+		{Match: `.\\.gemini\\GEMINI.md`, Replacement: `.\\.claude\\CLAUDE.md`},
+	},
+	claudeReverseContextMappings,
+	[]rewriteMapping{
+		// Deliberately no bare "GEMINI.md" rule: the forward pass always
+		// rewrites the directory with it, so matching the file name alone would
+		// invert a path the forward pass never produced. That drift is what
+		// collapsed a README edit into a no-op during live acceptance.
+		// Inverse of the forward domain rule. It has to precede the bare brand
+		// word below, or "Antigravity" would match inside "antigravity.google"
+		// and the client would receive "Claude.google".
+		{Match: "antigravity.google", Replacement: "claude.ai"},
+		// Inverse of the bare vendor rule. Safe to reverse precisely because the
+		// replacement is the two-word vendor name and not the bare "Google", which
+		// would collide with ordinary prose in model output.
+		{Match: "Google Deepmind", Replacement: "Anthropic"},
+		// A client-declared identifier, like a tool name: the skill slug lives in
+		// the client's own registry, so the response has to hand back a slug the
+		// client can actually resolve. Without this the model calls
+		// Skill("Antigravity-api") and the client answers "Unknown skill".
+		{Match: "Antigravity-api", Replacement: "claude-api"},
+		{Match: "Antigravity SDK", Replacement: "Anthropic SDK"},
+		// The bare brand word, listed last so the two longer "Antigravity" tokens
+		// above win the prefix. This client's forward pass produced that word only
+		// from its own name, so inverting it here is unambiguous.
+		{Match: "Antigravity", Replacement: "Claude"},
+	},
+)
+
+// pathRules builds one direction of a client context group. The home directory
+// is matched as a whole segment at ANY position, not only in a ~/ or ./
+// spelling. That is not a preference: live acceptance measured 114 absolute
+// paths per request going to the model uncloaked, because Claude Code on
+// Windows puts C:\Users\<name>\.claude\transcripts and friends in its system
+// context and never uses the tilde form at all. A home-prefixed match misses
+// every one of them.
+//
+// Both pairs are passed in MATCH-then-REPLACE order, so a reverse table is this
+// same call with both pairs swapped, and TestContextGroupsAreExactInverses is
+// what holds that true. The file-specific rule precedes the bare segment rule
+// in each direction so its longer match wins the prefix.
+//
+// The segment rule over-remaps a .claude that belongs to another project. That
+// is the accepted trade: it costs a path the plugin cannot distinguish, while
+// the narrow form cost 114 brand-revealing paths on every request.
+func pathRules(fromDir, toDir, fromFile, toFile string) []rewriteMapping {
+	rules := make([]rewriteMapping, 0, 4)
+	for _, sep := range []string{"/", `\`} {
+		rules = append(rules,
+			rewriteMapping{
+				Match:       fromDir + sep + strings.ReplaceAll(fromFile, "/", sep),
+				Replacement: toDir + sep + strings.ReplaceAll(toFile, "/", sep),
+			},
+			rewriteMapping{Match: fromDir + sep, Replacement: toDir + sep},
+		)
+	}
+	return rules
 }
 
-var codexReverseBrandMappings = []rewriteMapping{
-	// Codex's own home directory, the exact inverse of the .codex path-segment
-	// remap in the forward pass, for both separators.
-	{Match: ".gemini/", Replacement: ".codex/"},
-	{Match: ".gemini\\", Replacement: ".codex\\"},
-	// The bare form, matching the forward remap's end-of-string case.
-	{Match: ".gemini", Replacement: ".codex"},
-	{Match: "Antigravity", Replacement: "Codex"},
-	// Codex's forward pass never introduces this domain, so there is nothing to
-	// restore. The bare rule above would still match inside it - the dot is a
-	// non-word byte, so the right boundary passes - and hand the client the
-	// dead host "Codex.google". This repairs exactly that damage, and is inert
-	// unless it happened.
-	{Match: "Codex.google", Replacement: "antigravity.google"},
-}
+// Claude Code keeps its file name too, because CLAUDE.md is brand-bearing
+// prose the model would otherwise quote straight back.
+var claudeContextMappings = pathRules(".claude", ".gemini", "CLAUDE.md", "GEMINI.md")
+
+var claudeReverseContextMappings = pathRules(".gemini", ".claude", "GEMINI.md", "CLAUDE.md")
+
+// Codex keeps its file names, per codex-rs/core/src/agents_md.rs: AGENTS.md is
+// already the neutral name Codex reads, so there is no brand in the file name to
+// hide and none is invented. Only the directory is rewritten.
+var codexContextMappings = pathRules(".codex", ".gemini", "AGENTS.md", "AGENTS.md")
+
+var codexReverseContextMappings = pathRules(".gemini", ".codex", "AGENTS.md", "AGENTS.md")
+
+var codexReverseBrandMappings = slices.Concat(
+	// The exact inverse of the forward context group. Not a blanket ".gemini/"
+	// -> ".codex/": the forward pass never introduced one, so a blanket here
+	// would rewrite a ".gemini" the user typed.
+	codexReverseContextMappings,
+	[]rewriteMapping{{Match: "Antigravity", Replacement: "Codex"}},
+	[]rewriteMapping{
+		// Codex's forward pass never introduces this domain, so there is
+		// nothing to restore. The bare rule above would still match inside it -
+		// the dot is a non-word byte, so the right boundary passes - and hand
+		// the client the dead host "Codex.google". This repairs exactly that
+		// damage, and is inert unless it happened.
+		{Match: "Codex.google", Replacement: "antigravity.google"},
+	},
+)
 
 var reverseBrandMappingsByClient = map[string][]rewriteMapping{
 	"claude_code": claudeCodeReverseBrandMappings,
@@ -6156,9 +6212,6 @@ func isBareVendorToken(match string) bool {
 // when a sentence elsewhere contains a slash, so "Anthropic/Google" is still
 // masked as before.
 func inURLPathContext(value string, index, matchEnd int) bool {
-	if strings.Contains(value, "://") {
-		return true
-	}
 	if index == 0 {
 		return false
 	}
@@ -6167,7 +6220,25 @@ func inURLPathContext(value string, index, matchEnd int) bool {
 		return true
 	}
 	// Inside a real path element that starts with a dot: ".omp-backup/agent".
-	return prev == '.' && !isWordByte(value[index-2])
+	if prev == '.' && (index == 1 || !isWordByte(value[index-2])) {
+		return true
+	}
+	// A URL scheme counts only when it sits in the SAME whitespace-free token as
+	// the match. Testing the whole value for "://" suppressed every brand token
+	// in a 200KB system prompt that mentions a URL anywhere - which is every
+	// Claude Code system prompt, so the forward rewrite silently became a no-op
+	// on the largest surface the plugin has. Live acceptance caught it: Claude
+	// Code's own system prompt reached upstream with 63 "Claude" and 8
+	// "Anthropic" still in it.
+	for i := index - 1; i >= 0; i-- {
+		switch c := value[i]; c {
+		case ' ', '\t', '\n', '\r', '"', '\'', '<', '>', '(', ')', ',', ';', '|', '{', '}', '[':
+			return false
+		case ':':
+			return i >= 2 && value[i-1] == '/' && value[i-2] == '/'
+		}
+	}
+	return false
 }
 
 // isDotPrefixedPathSegment reports whether a bare vendor word begins a literal
@@ -6197,14 +6268,18 @@ func replaceInsensitive(value, match, replacement string) (string, bool) {
 // does not exist on disk.
 
 // pathSegmentReplacements map a client home directory onto the Antigravity
-// equivalent, so ~/.claude/projects/<slug>/memory becomes
-// ~/.gemini/projects/<slug>/memory rather than a dead .Antigravity path. Every
-// supported client remaps: these are operational identifiers, not brand prose,
-// and each one is inverted by that client's own reverse table.
+// equivalent, so ~/.omp/agent becomes ~/.gemini/agent rather than a dead
+// .Antigravity path, inverted by ompProtectedReverseTable.
+//
+// Only Oh My Pi is listed. Claude Code and Codex go through pathRules instead,
+// which can also rewrite the file name (CLAUDE.md -> GEMINI.md) that this map
+// has no way to express. Rewriting a bare vendor token in a path also rewrote a
+// user's own text during live acceptance: Claude Code wrote ".gemini" over
+// ".claude" in a README edit where the remap had collapsed the two sides into
+// identical bytes, so the edit silently became a no-op. The path tables avoid
+// that because the reverse half is their exact mirror.
 var pathSegmentReplacements = map[string]string{
-	"claude": "gemini",
-	"codex":  "gemini",
-	"omp":    "gemini",
+	"omp": "gemini",
 }
 
 // replaceInsensitiveOpt is the shared case-insensitive word-boundary matcher.

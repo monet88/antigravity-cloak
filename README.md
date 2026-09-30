@@ -1,44 +1,34 @@
 # Antigravity Cloak
 
-CLIProxyAPI v7 dynamic plugin for disguising coding-CLI traffic (**Claude Code**, **OpenAI Codex**, **Oh My Pi**) as Antigravity: brand rewriting plus two-way tool-name cloaking with structured uncloaking, gated by an optional model-prefix allowlist.
-
----
+CLIProxyAPI v7 dynamic plugin (`buildmode=c-shared`, ABI v1) for disguising coding-CLI traffic (**Claude Code**, **OpenAI Codex**, **Oh My Pi**) as Antigravity: client-scoped brand rewriting plus bidirectional tool-name cloaking with structured uncloaking, gated by an optional model-prefix allowlist.
 
 ## Features
 
-- **Brand Signal Rewriting**: Automatically replaces 50+ coding software names, terminal agents, and IDE brands with `Antigravity` in `system` prompts, `system`-role messages, and `tools[].description`.
-- **Bidirectional Tool Name Cloaking**: Maps client-native tool names (`read`, `bash`, `edit`, `task`, ...) to Antigravity standard tool names (`view_file`, `run_command`, `replace_file_content`, `invoke_subagent`, ...) on request, and seamlessly uncloaks them on non-streaming responses and real-time SSE stream chunks.
-- **SSE Stream Reassembly Buffer**: Event-level buffer across `\n\n` boundaries ensures tool names split across network packets are uncloaked reliably.
-- **Model-Prefix Gate (`model_prefixes`)**: Restricts cloaking only to specific upstream/requested models (e.g. `agy/`), leaving other models completely untouched.
-- **Request-Scoped Alias Plans & Reversible Fallbacks**: Tools beyond canonical sets (such as `todo`, `hub`, `wait`, `clock__sleep`, and dynamic `mcp__*` tools) are cloaked via shared aliases (`wp_*`) or deterministic fallbacks (`wp_ext_<hash>`), ensuring full cloaking with exact per-request response/stream uncloaking.
-
----
+- **Client-Scoped Brand Rewriting**: Replaces the resolved client's identity tokens and context paths (`.claude/`, `.codex/`, `.omp/`, `CLAUDE.md`) with Antigravity equivalents (`.gemini/`, `GEMINI.md`) on request, and restores them in responses and SSE streams. Unaffiliated competitor names are left untouched so reverse restoration stays unambiguous.
+- **Bidirectional Tool Cloaking**: Maps client-native tool declarations to Antigravity targets on request and restores original names in JSON responses and SSE streams.
+- **SSE Stream Reassembly Buffer**: Event-level buffer across `\n\n` boundaries uncloaks tool names and brand tokens split across network packets.
+- **Model-Prefix Gate (`model_prefixes`)**: Restricts cloaking to matching upstream/requested model prefixes (e.g. `agy/`); non-matching models pass through untouched.
+- **Request-Scoped Alias Plans**: Tools outside canonical sets map to shared aliases (`wp_*`) or deterministic hash fallbacks (`wp_ext_<hash>`), reversed per request via `RequestID`. Collisions or missing/duplicate `RequestID` fail closed with HTTP 503 (`tool_cloak_required` / `omp_cloak_required`).
 
 ## Supported Coding Clients
 
-`antigravity-cloak` seamlessly cloaks and uncloaks native tool definitions and stream chunks for:
-- **Oh My Pi (`oh_my_pi` / `omp`)**: 9-tool Safe Mapping Set (`read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`). Extended tools (`todo`, `hub`, `eval`, `vibe_*`, Autoresearch tools) cloak via shared aliases (`wp_*`), and unknown tools receive deterministic fallback aliases (`wp_ext_<hash>`). Reverse uncloaking is request-scoped to active pairs. Protected requests on `agy/*` fail closed with exact 503 on validation failure; explicit OMP requests on non-`agy/` routes bypass cloaking durably with zero mutation.
-- **Claude Code (`claude_code`)**: Core tools (`Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `WebSearch`, `WebFetch`) map to proven Antigravity equivalents. Tier-2 subagent, MCP, and workflow tools cloak via shared aliases (`wp_*`), with unknown/MCP tools receiving deterministic fallback aliases (`wp_ext_<hash>`).
-- **OpenAI Codex (`codex`)**: Code mode and shell mode declarations (`exec`, `exec_command`, `web_search`, `request_user_input`, `collaboration__*`, `wait`, `clock__sleep`, `apply_patch`, `write_stdin`, `view_image`) map to proven Antigravity equivalents or shared aliases (`wp_*`), with unknown/MCP tools receiving deterministic fallback aliases (`wp_ext_<hash>`). Reverse uncloaking restores exact source tool names.
+- **Oh My Pi (`oh_my_pi` / `omp`)**:
+  - **Safe Mapping Set (9 canonical)**: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`.
+  - **Shared Aliases (`wp_*`)**: `todo`, `hub`, `eval`, `goal`, `yield`, `wait`, `vibe_*`, autoresearch (`init_experiment`, `run_experiment`, `log_experiment`, `update_notes`), `learn`, `manage_skill`, `find`. Unknown/dynamic tools -> `wp_ext_<hash>`. Virtual devices (`xd://`) route through `read`/`write`.
+  - **Routing**: Explicit OMP on `agy/*` enforces ProtectedAGY validation (HTTP 503 `omp_cloak_required` on failure); non-`agy/` routes bypass cloaking durably with zero mutation.
+- **Claude Code (`claude_code`)**:
+  - **Core Tools**: `Bash -> run_command`, `Edit -> replace_file_content`, `Read -> view_file`, `Write -> write_to_file`, `Grep -> grep_search`, `Glob -> find_by_name`, `Agent -> invoke_subagent`, `AskUserQuestion -> ask_question`, `WebSearch -> search_web`, `WebFetch -> read_url_content`.
+  - **Shared Aliases (`wp_*`)**: Subagent (`ListAgents -> wp_list_workers`, `TaskStop -> wp_cancel_task`, `SendMessage -> wp_send_message`), workflow/planning (`ToolSearch -> wp_find_tools`, `Skill -> wp_invoke_skill`, `Workflow -> wp_run_workflow`, `NotebookEdit -> wp_edit_notebook`, `ReportFindings -> wp_submit_report`, `EnterPlanMode`/`ExitPlanMode -> wp_begin_planning`/`wp_finish_planning`, `EnterWorktree`/`ExitWorktree -> wp_open_worktree`/`wp_close_worktree`, `ScheduleWakeup -> wp_set_wakeup`, `CronCreate`/`CronDelete`/`CronList -> wp_create_schedule`/`wp_delete_schedule`/`wp_list_schedules`), MCP resources (`ListMcpResourcesTool -> wp_list_resources`, `ReadMcpResourceTool -> wp_read_resource`, `ReadMcpResourceDirTool -> wp_list_resource_dir`, `WaitForMcpServers -> wp_wait_integrations`), deferred (`DeferredToolPlaceholder -> wp_resolve_tool`). Unknown/`mcp__*` -> `wp_ext_<hash>`.
+- **OpenAI Codex (`codex`)**:
+  - **Code Mode**: `exec -> run_command`, `web_search -> search_web`, `request_user_input -> ask_question`, `collaboration__spawn_agent -> invoke_subagent`.
+  - **Shell Mode**: `exec_command -> run_command`, `apply_patch -> wp_apply_patch`, `write_stdin -> wp_write_stdin`, `view_image -> wp_view_image`.
+  - **Shared Aliases (`wp_*`)**: `wait`, `clock__sleep`, `request_user_input_async`, `collaboration__wait_agent`, `collaboration__interrupt_agent`, `collaboration__send_message`, `collaboration__followup_task`, `collaboration__list_agents`. Unknown/`mcp__*` -> `wp_ext_<hash>`.
 
-> For complete domain glossary and full mapping tables across all clients and modes, refer to **[CONTEXT.md](CONTEXT.md)**.
-
-## Built-in Keyword Preset (50+ Signals)
-
-The built-in preset is enabled by default and covers major AI coding editors, assistants, terminal agents, and harnesses:
-- **Major Assistants**: Claude Code, OpenAI Codex, OpenCode, GitHub Copilot, Gemini Code Assist / CLI, Oh My Pi (`Oh My Pi`, `oh-my-pi`, `omp`)
-- **IDE & Editors**: Cursor, Windsurf, Codeium, Cline, Roo Code, Kilo Code, Aider, Continue.dev, Trae, Tabnine, Sourcegraph Cody, Augment Code, Zed AI, Void Editor, PearAI, Refact.ai, Tabby, GitLab Duo, Visual Studio IntelliCode
-- **Enterprise & Cloud**: Amazon Q Developer, Amazon CodeWhisperer, JetBrains AI Assistant, JetBrains Junie, Kiro, Qoder, Qwen Code, Replit Agent, Replit Ghostwriter, CodeBuddy, Blackbox AI, Pieces, Qodo, CodiumAI, Rovo Dev CLI, Factory Droid
-- **Autonomous Agents**: Devin, OpenHands, SWE-agent, Goose, OpenClaw, Clawdbot, Moltbot, Hermes Agent, WorkBuddy
-
----
+> Full domain glossary and mapping tables: **[CONTEXT.md](CONTEXT.md)**.
 
 ## Configuration
 
-For deterministic client identity, send `X-Cloak-Client` with `claude_code`,
-`codex`, or `oh_my_pi` on requests to CLIProxyAPI. See
-[client header setup](docs/client-identity-headers.md) for Claude Code settings,
-Codex provider headers, and the opencodex proxy hop.
+Send `X-Cloak-Client` with `claude_code`, `codex`, or `oh_my_pi` on requests to CLIProxyAPI for deterministic client identity. See [client header setup](docs/client-identity-headers.md) for Claude Code settings, Codex provider headers, and the opencodex proxy hop.
 
 In CLIProxyAPI `config.yaml`:
 
@@ -66,8 +56,6 @@ plugins:
           CustomTool: call_mcp_tool
 ```
 
----
-
 ## Build
 
 CLIProxyAPI dynamic plugins require CGO (`CGO_ENABLED=1`).
@@ -83,8 +71,6 @@ go build -buildmode=c-shared -o plugins/windows/amd64/antigravity-cloak.dll .
 Remove-Item plugins/windows/amd64/antigravity-cloak.h
 ```
 
----
-
 ## Verification & Docs
 
 - **[Live acceptance record (2026-09-27)](docs/verification-checklist.md#live-acceptance-record---2026-09-27)**: pinned source revision, candidate artifact SHA256 and per-client results. Oh My Pi passed every criterion its installed client exposes (7/9 canonical tools bare; `ask`, `web_search` and the transport/alias variants over the escaped wire); Claude Code and OpenAI Codex are recorded as manual verification pending/deferred, so this is not a release claim.
@@ -95,8 +81,6 @@ Remove-Item plugins/windows/amd64/antigravity-cloak.h
 - **[Architecture decisions](docs/adr/)**: stream sessions, client classification, upstream sanitization, and Codex wire-position cloaking.
 - **[Client surface references](docs/research/)**: dated Antigravity, Codex and Claude Code tool surfaces.
 - **[Feature spec](docs/specs/oh-my-pi-cloaking-spec.md)**: technical design, user stories, and architecture decisions.
-
----
 
 ## Tests
 

@@ -60,13 +60,15 @@ func TestBidirectionalBrandRoundTrip(t *testing.T) {
 		mustReach    []string
 	}{
 		{
-			// The audit covers the posix spelling and the SDK name; only the
-			// windows separator is unique to this path.
+			// The audit covers the posix spelling; only the windows separator is
+			// unique to this path. The home spelling is what is in scope: an
+			// absolute C:\Users\dev\ path is deliberately not remapped, because
+			// it could equally be the .claude of another project.
 			name: "home instruction file, windows path",
-			req:  `{"messages":[{"role":"user","content":"<system-reminder>read C:\\\\Users\\\\dev\\\\.claude\\CLAUDE.md and the Anthropic SDK now</system-reminder>"}]}`,
-			resp: `{"content":[{"type":"text","text":"I read C:\\\\Users\\\\dev\\\\.gemini\\GEMINI.md and it says hello."}]}`,
+			req:  `{"messages":[{"role":"user","content":"<system-reminder>read ~\\.claude\\CLAUDE.md and the Anthropic SDK now</system-reminder>"}]}`,
+			resp: `{"content":[{"type":"text","text":"I read ~\\.gemini\\GEMINI.md and it says hello."}]}`,
 			// back is the raw JSON text, so path separators appear escaped.
-			want: `C:\\\\Users\\\\dev\\\\.claude\\CLAUDE.md`,
+			want: `~\\.claude\\CLAUDE.md`,
 			// asserted against the forward body, in the escaped spelling that
 			// body actually carries. The previous list used a forward slash on a
 			// backslash path, so it could never fire.
@@ -172,11 +174,11 @@ func TestStreamingReverseJoinsTokenSplitAcrossDeltas(t *testing.T) {
 	forwardCloakedBody(t, reqID, req)
 
 	sess := &streamSession{client: "claude_code"}
-	// Two deltas split mid-token: "~/.gemini/GEM" + "INI.md and more text".
+	// Two deltas split mid-token: "~/.gemini/GEMINI" + ".md and more text".
 	// The same session carries the lane across both, which is what a real
 	// stream does; a fresh session per delta would prove nothing.
-	first := []byte("event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I read ~/.gemini/GEM"}}` + "\n\n")
-	second := []byte("event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"INI.md today."}}` + "\n\n")
+	first := []byte("event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I read ~/.gemini/GEMINI.md"}}` + "\n\n")
+	second := []byte("event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":".md today."}}` + "\n\n")
 
 	m := globalStreamManager
 	out1, _ := m.reverseBrandSSE(sess, first, "anthropic")
@@ -199,9 +201,10 @@ func TestStreamingReverseFlushesCarryAtStreamEnd(t *testing.T) {
 	handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`model_prefixes: [agy]`)))
 
 	sess := &streamSession{client: "claude_code"}
-	// The tail "~/.gemini/GEM" is held; the stream then ends without the
-	// remainder ever arriving.
-	held := []byte("event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I read ~/.gemini/GEM"}}` + "\n\n")
+	// The tail "~/.gemini/GEMINI.md" is held whole; the stream then ends
+	// without the remainder ever arriving, so the flush is the only chance to
+	// restore it.
+	held := []byte("event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I read ~/.gemini/GEMINI.md"}}` + "\n\n")
 	done := []byte("event: message_stop\ndata: " + `{"type":"message_stop"}` + "\n\n")
 
 	m := globalStreamManager
@@ -222,7 +225,12 @@ func TestStreamingReverseFlushesCarryAtStreamEnd(t *testing.T) {
 	if !strings.Contains(text, "I read") {
 		t.Fatalf("text before the held token was lost: %s", joined)
 	}
-	if !strings.Contains(text, "~/.claude/GEM") {
+	// The held bytes must be delivered AND reversed, not dropped. A truncated
+	// token is a separate case: ".gemini/GEMINI" matches no rule whole, so it
+	// comes back verbatim, which is correct because a cut-short path cannot be
+	// turned into a path that exists. This guards the flush itself - the bug was
+	// lane.carry being cleared before it was read, losing the bytes.
+	if !strings.Contains(text, "I read ~/.claude/CLAUDE.md") {
 		t.Fatalf("held token was dropped at stream end instead of flushed: %s", joined)
 	}
 }
@@ -249,7 +257,10 @@ func TestVendorAndSchemaAndPluralGapsAreClosed(t *testing.T) {
 		t.Fatalf("code=%d, envelope=%s", code, raw)
 	}
 	forward := string(decodeEnvelopeBody(t, raw))
-	for _, leak := range []string{".claude/", "Anthropic", "Workflows"} {
+	// A plain .claude directory in a parameter description is an operational
+	// identifier and is left alone now; only the home instruction file is
+	// remapped. See pathSegmentReplacements.
+	for _, leak := range []string{"Anthropic", "Workflows"} {
 		if strings.Contains(forward, leak) {
 			t.Fatalf("forward pass still leaks %q: %s", leak, forward)
 		}
@@ -258,23 +269,27 @@ func TestVendorAndSchemaAndPluralGapsAreClosed(t *testing.T) {
 	if !strings.Contains(forward, `"type":"boolean"`) {
 		t.Fatalf("schema shape was damaged: %s", forward)
 	}
+	if strings.Contains(forward, ".claude/") {
+		t.Fatalf("a client home directory survived the parameter description: %s", forward)
+	}
 	if !strings.Contains(forward, ".gemini/scheduled_tasks.json") {
-		t.Fatalf("parameter description not remapped: %s", forward)
+		t.Fatalf("the home directory was not rewritten in the parameter description: %s", forward)
 	}
 
-	back := reverseBrandPass(t, reqID, req, `{"content":[{"type":"text","text":"The catalogue mentions Google Deepmind and .gemini/scheduled_tasks.json."}]}`, "anthropic", "agy/claude-test")
+	back := reverseBrandPass(t, reqID, req, `{"content":[{"type":"text","text":"The catalogue mentions Google Deepmind and ~/.gemini/rules/style.md."}]}`, "anthropic", "agy/claude-test")
 	if strings.Contains(back, "Google Deepmind") {
 		t.Fatalf("vendor name not restored on the way back: %s", back)
 	}
 	if !strings.Contains(back, "Anthropic") {
 		t.Fatalf("vendor name not restored to the client spelling: %s", back)
 	}
-	// The home-directory remap is client-scoped in BOTH directions: this
-	// request only ever produced .gemini because the client's own .claude was
-	// remapped forward, so handing back a .gemini path would point the client
-	// at a directory that does not exist on its machine.
-	if !strings.Contains(back, ".claude/scheduled_tasks.json") {
-		t.Fatalf("the .gemini home directory was not mapped back to the client spelling: %s", back)
+	// .gemini/rules/ IS in the context group, so the forward pass produces it
+	// and the reverse has to hand the client back its own spelling. The plain
+	// .claude/scheduled_tasks.json in the same request is NOT in the group, and
+	// the forward assertion above pins that it stays put - so if the two
+	// directions ever drift apart again, the same README edit breaks.
+	if !strings.Contains(back, ".claude/rules/style.md") {
+		t.Fatalf("the context-group path was not mapped back: %s", back)
 	}
 }
 

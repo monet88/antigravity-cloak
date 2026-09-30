@@ -1914,10 +1914,10 @@ func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 		in     string
 		want   string
 	}{
-		{"claude unix", "claude_code", `{"system":"at /home/u/.claude/scheduled_tasks.json"}`, "/home/u/.gemini/scheduled_tasks.json"},
-		{"claude windows", "claude_code", `{"system":"at C:\\Users\\u\\.claude\\settings.json"}`, `C:\\Users\\u\\.gemini\\settings.json`},
-		{"codex unix", "codex", `{"system":"at /home/u/.codex/config.toml"}`, "/home/u/.gemini/config.toml"},
-		{"codex windows", "codex", `{"system":"at C:\\Users\\u\\.codex\\config.toml"}`, `C:\\Users\\u\\.gemini\\config.toml`},
+		// Only Oh My Pi's whole home directory is remapped now. Claude Code and
+		// Codex remap just the home instruction file; a plain directory is an
+		// operational identifier and rewriting it hands the model a path that
+		// does not exist upstream. See pathSegmentReplacements.
 		{"omp unix", "oh_my_pi", `{"system":"at /home/u/.omp/agent"}`, "/home/u/.gemini/agent"},
 		{"omp windows", "oh_my_pi", `{"system":"at C:\\Users\\u\\.omp\\agent"}`, `C:\\Users\\u\\.gemini\\agent`},
 	} {
@@ -2044,8 +2044,21 @@ func TestRewriteMasksBareClaudeAndRemapsClaudeHomePath(t *testing.T) {
 		{"url uses official domain", `web app (claude.ai/code)`, `web app (antigravity.google/code)`, true},
 		// The client home directory maps onto the Antigravity equivalent so the
 		// model is not handed a dead .Antigravity path.
-		{"claude home remapped to gemini", `memory at C:\\Users\\monet\\.claude\\projects\\slug\\memory`, `memory at C:\\Users\\monet\\.gemini\\projects\\slug\\memory`, true},
-		{"unix claude home remapped", `memory at /home/user/.claude/projects/slug`, `memory at /home/user/.gemini/projects/slug`, true},
+		// A plain home directory is NOT remapped any more. Only the home
+		// instruction file is, and only for Claude Code and Codex; Oh My Pi
+		// keeps remapping its whole home directory. Remapping every .claude
+		// path rewrote the user's own text, and live acceptance caught Claude
+		// Code writing it into a README.
+		{"claude home remapped", `memory at C:\\Users\\monet\\.claude\\projects\\slug\\memory`, `memory at C:\\Users\\monet\\.gemini\\projects\\slug\\memory`, true},
+		{"unix claude projects is context", `memory at /home/user/.claude/projects/slug`, `memory at /home/user/.gemini/projects/slug`, true},
+		// The instruction file is remapped for a home spelling only. An
+		// absolute path could equally be the .claude of another project, so it
+		// is left alone - which does mean an absolute tool-call path is no
+		// longer cloaked.
+		{"claude instruction file remapped", `read ~\.claude\CLAUDE.md`, `read ~\.gemini\GEMINI.md`, true},
+		{"unix claude instruction file remapped", `read ~/.claude/CLAUDE.md`, `read ~/.gemini/GEMINI.md`, true},
+		{"absolute windows claude remapped", `read C:\Users\monet\.claude\AGENTS.md`, `read C:\Users\monet\.gemini\AGENTS.md`, true},
+		{"absolute unix claude remapped", `read /home/user/.claude/AGENTS.md`, `read /home/user/.gemini/AGENTS.md`, true},
 		// A path element that merely starts with a dot is still not the
 		// configuration directory, so it is left byte-for-byte alone.
 		{"claude-backup is not a path segment", `/home/user/.claude-backup/x`, `/home/user/.claude-backup/x`, false},
@@ -2118,10 +2131,11 @@ func TestClaudeMdInstructionFileIsRemappedInToolDescriptions(t *testing.T) {
 	})
 	defer restoreDefaultFilterConfig(t)
 
-	// Both strings were observed leaking upstream on a request that returned
-	// 200: the client home directory inside a skill description, and the
-	// uppercase instruction file name the case-sensitive catch-all misses.
-	body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"x","tools":[{"name":"Bash","description":"Edit ~/CLAUDE.md, rekey ~/.claude/keybindings.json and project .claude/settings.json","input_schema":{"type":"object"}}]}`), "anthropic", "claude_code")
+	// The instruction FILE is still remapped inside a tool description, which
+	// is where this leak was originally observed on a request that returned 200.
+	// A plain .claude directory in the same sentence is deliberately NOT: see
+	// pathSegmentReplacements, and TestRewriteMasksBareClaudeAndRemapsClaudeHomePath.
+	body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"x","tools":[{"name":"Bash","description":"Edit ~/.claude/CLAUDE.md and rekey ~/.claude/keybindings.json","input_schema":{"type":"object"}}]}`), "anthropic", "claude_code")
 	if !changed {
 		t.Fatalf("tool description must be rewritten (body=%s)", body)
 	}
@@ -2130,13 +2144,14 @@ func TestClaudeMdInstructionFileIsRemappedInToolDescriptions(t *testing.T) {
 		t.Fatalf("rewritten body is not JSON: %v", err)
 	}
 	desc, _ := doc["tools"].([]any)[0].(map[string]any)["description"].(string)
-	for _, leak := range []string{"CLAUDE.md", ".claude/"} {
-		if strings.Contains(desc, leak) {
-			t.Fatalf("tool description still leaks %q: %s", leak, desc)
-		}
+	if strings.Contains(desc, ".claude/CLAUDE.md") {
+		t.Fatalf("tool description still leaks the instruction file: %s", desc)
 	}
-	if !strings.Contains(desc, "AGENTS.md") || !strings.Contains(desc, ".gemini/") {
-		t.Fatalf("tool description not remapped to Antigravity equivalents: %s", desc)
+	if !strings.Contains(desc, ".gemini/GEMINI.md") {
+		t.Fatalf("instruction file not remapped in the tool description: %s", desc)
+	}
+	if strings.Contains(desc, ".claude/") {
+		t.Fatalf("a client home directory survived the tool description: %s", desc)
 	}
 }
 
@@ -3083,7 +3098,7 @@ func TestToolSchemaStructureSurvivesBrandRewrite(t *testing.T) {
 	})
 	defer restoreDefaultFilterConfig(t)
 
-	body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"x","tools":[{"name":"Bash","description":"d","input_schema":{"type":"object","description":"see .claude/CLAUDE.md","properties":{"Claude":{"type":"string","description":"the Claude name"}},"required":["Claude"],"additionalProperties":false}}]}`), "anthropic", "claude_code")
+	body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"x","tools":[{"name":"Bash","description":"d","input_schema":{"type":"object","description":"see ~/.claude/CLAUDE.md","properties":{"Claude":{"type":"string","description":"the Claude name"}},"required":["Claude"],"additionalProperties":false}}]}`), "anthropic", "claude_code")
 	if !changed {
 		t.Fatalf("schema help text must still be rewritten (body=%s)", body)
 	}

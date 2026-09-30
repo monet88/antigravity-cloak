@@ -1571,7 +1571,9 @@ func TestCloakedOpenAIChoicesKeepTheirOwnCarry(t *testing.T) {
 
 // Tool-call arguments stream as raw JSON, so the backslash of a Windows path is
 // written twice there. The whole-path rule missed the escaped spelling and only
-// the bare GEMINI.md rule fired, handing the client C:\...\.gemini\CLAUDE.md.
+// a bare file-name rule fired, handing the client a mixed path that exists
+// nowhere. The wire spelling carries the home prefix for the same reason the
+// non-stream spelling does: a .claude of another project is not ours.
 func TestCloakedStreamedToolArgsRestoreEscapedWindowsPath(t *testing.T) {
 	sess := &streamSession{client: "claude_code"}
 	m := globalStreamManager
@@ -1581,7 +1583,7 @@ func TestCloakedStreamedToolArgsRestoreEscapedWindowsPath(t *testing.T) {
 	first := []byte("event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
 		"type": "content_block_delta", "index": 1,
 		"delta": map[string]any{"type": "input_json_delta",
-			"partial_json": `{"path":"C:\\Users\\dev\\.gemini\\`}}) + "\n\n")
+			"partial_json": `{"path":"~\\.gemini\\`}}) + "\n\n")
 	second := []byte("event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
 		"type": "content_block_delta", "index": 1,
 		"delta": map[string]any{"type": "input_json_delta",
@@ -1603,7 +1605,7 @@ func TestCloakedStreamedToolArgsRestoreEscapedWindowsPath(t *testing.T) {
 	if strings.Contains(got, ".gemini") || strings.Contains(got, "GEMINI.md") {
 		t.Fatalf("cloaked path reached the client, args=%q", got)
 	}
-	if !strings.Contains(got, `C:\\Users\\dev\\.claude\\CLAUDE.md`) {
+	if !strings.Contains(got, `~\\.claude\\CLAUDE.md`) {
 		t.Fatalf("Windows path not restored to the client spelling, args=%q", got)
 	}
 }
@@ -1655,10 +1657,10 @@ func TestStandaloneBrandReverseRunsForClaudeCode(t *testing.T) {
 
 	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID: "sa-cc", SourceFormat: "anthropic", ChunkIndex: 0,
-		Body: []byte(`{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"see .gemini/GEMINI.md then Antigravity"}}`),
+		Body: []byte(`{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"see ~/.gemini/GEMINI.md then Antigravity"}}`),
 	}, "anthropic")
 	body1 := string(resp1.Body)
-	if !strings.Contains(body1, ".claude/CLAUDE.md") || strings.Contains(body1, ".gemini/GEMINI.md") {
+	if !strings.Contains(body1, "~/.claude/CLAUDE.md") || strings.Contains(body1, "~/.gemini/GEMINI.md") {
 		t.Fatalf("standalone path did not reverse the instruction file: %s", body1)
 	}
 	if strings.Contains(body1, "Antigravity") {

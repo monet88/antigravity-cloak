@@ -81,10 +81,10 @@ func clientContexts() []clientContext {
 			// instruction file and the vendor word, so it is the one that
 			// exercises the shared cloaked table end to end.
 			client: "claude_code", tools: claudeTools, format: "anthropic", declared: "anthropic",
-			sent:         "see .claude/CLAUDE.md and the Anthropic SDK from Google Deepmind",
-			echoes:       "see .gemini/GEMINI.md and the Antigravity SDK from Google Deepmind",
-			mustComeBack: ".claude/CLAUDE.md",
-			mustNotReach: ".gemini/GEMINI.md",
+			sent:         "see ~/.claude/CLAUDE.md and the Anthropic SDK from Google Deepmind",
+			echoes:       "see ~/.gemini/GEMINI.md and the Antigravity SDK from Google Deepmind",
+			mustComeBack: "~/.claude/CLAUDE.md",
+			mustNotReach: "~/.gemini/GEMINI.md",
 			brandReply:   "",
 			brandBack:    "",
 		},
@@ -327,7 +327,7 @@ func TestBrandReverseRunsWithNoCachedPattern(t *testing.T) {
 	ev := "event: content_block_delta\ndata: " +
 		mustJSON(t, map[string]any{
 			"type": "content_block_delta", "index": 0,
-			"delta": map[string]any{"type": "text_delta", "text": "open .gemini/GEMINI.md now"}}) + "\n\n" +
+			"delta": map[string]any{"type": "text_delta", "text": "open ~/.gemini/GEMINI.md now"}}) + "\n\n" +
 		"event: content_block_stop\ndata: " +
 		mustJSON(t, map[string]any{"type": "content_block_stop", "index": 0}) + "\n\n" +
 		"event: message_stop\ndata: " +
@@ -341,10 +341,10 @@ func TestBrandReverseRunsWithNoCachedPattern(t *testing.T) {
 	if !resp.DropChunk && out == "" {
 		out = ev
 	}
-	if strings.Contains(out, ".gemini/GEMINI.md") {
+	if strings.Contains(out, "~/.gemini/GEMINI.md") {
 		t.Fatalf("cloaked token streamed out unreversed: %s", out)
 	}
-	if !strings.Contains(out, ".claude/CLAUDE.md") {
+	if !strings.Contains(out, "~/.claude/CLAUDE.md") {
 		t.Fatalf("expected the client's own spelling back: %s", out)
 	}
 }
