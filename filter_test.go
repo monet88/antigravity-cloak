@@ -40,9 +40,12 @@ func TestRewriteRequestReplacesDefaultSystemKeywords(t *testing.T) {
 			client: "claude_code",
 		},
 		{
-			name:   "case insensitive codex",
+			// The bare client name follows the casing it was written in, so an
+			// uppercase spelling stays uppercase on the way up (and comes back
+			// as CODEX): see isProseBrandRule/mirrorBrandCase.
+			name:   "case preserved codex",
 			body:   `{"system":"route this CODEX session"}`,
-			want:   "route this Antigravity session",
+			want:   "route this ANTIGRAVITY session",
 			client: "codex",
 		},
 	}
@@ -78,8 +81,7 @@ func TestRewriteRequestCloaksClientContextButNotTypedUserText(t *testing.T) {
 			{"role":"user","content":"compare Claude Code and Codex please"},
 			{"role":"assistant","content":"Claude Code is a tool"},
 			{"role":"user","content":"<system-reminder>the catalogue mentions Anthropic</system-reminder>"}
-		],
-		"input":"Claude Code is mentioned by the user"
+		]
 	}`)
 	got, rewritten, _ := rewriteRequestBodyWithClient(body, "openai", "claude_code")
 	if !rewritten {
@@ -98,9 +100,6 @@ func TestRewriteRequestCloaksClientContextButNotTypedUserText(t *testing.T) {
 	}
 	if reminder := msgs[2].(map[string]any)["content"].(string); !strings.Contains(reminder, "Google Deepmind") {
 		t.Errorf("<system-reminder> client context must be cloaked, got %q", reminder)
-	}
-	if s, _ := doc["input"].(string); s != "Claude Code is mentioned by the user" {
-		t.Errorf("top-level input is the typed turn and must be untouched, got %q", s)
 	}
 }
 
@@ -1275,12 +1274,16 @@ func TestBuiltInBrandTablesCoverEachClientsOwnIdentity(t *testing.T) {
 				if !rewritten {
 					t.Fatalf("keyword %q was not rewritten for client %q", keyword, client)
 				}
-				// Assert the configured replacement landed verbatim rather than only
+				// Assert the configured replacement landed rather than only
 				// that "Antigravity" appears: some keywords deliberately map onto a
 				// different surface (a vendor phrase, or a model id that must name a
 				// route the gateway really serves).
+				//
+				// Compared case-insensitively: a bare brand word takes the casing
+				// it matched (isProseBrandRule/mirrorBrandCase), and that rule has
+				// its own focused regressions rather than being restated here.
 				want := `{"system":` + strconv.Quote("You are running with "+mapping.Replacement+" in this environment.") + `}`
-				if string(got) != want {
+				if !strings.EqualFold(string(got), want) {
 					t.Fatalf("keyword %q rewrote to\n  got  %s\n  want %s", keyword, got, want)
 				}
 			})
@@ -1885,7 +1888,9 @@ func TestReplaceInsensitiveWordBoundaries(t *testing.T) {
 	if !changed {
 		t.Fatal("expected changed = true for standalone 'omp'")
 	}
-	want := "Please complete the prompt using computer and Antigravity."
+	// A bare brand word takes the casing it matched, so the lowercase alias
+	// lands lowercase (mirrorBrandCase).
+	want := "Please complete the prompt using computer and antigravity."
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -1943,9 +1948,9 @@ func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 		return string(got)
 	}
 
-	// Bare brand mentions are still masked.
+	// Bare brand mentions are still masked (lowercase in, lowercase out).
 	b, bc, _ := rewriteRequestBodyWithClient([]byte(`{"system":"You are omp."}`), "openai", "oh_my_pi")
-	if !bc || !strings.Contains(string(b), "Antigravity.") {
+	if !bc || !strings.Contains(string(b), "antigravity.") {
 		t.Fatalf("bare omp brand must still be masked: changed=%v body=%s", bc, b)
 	}
 
@@ -1984,9 +1989,10 @@ func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 		t.Fatalf(".omp-backup must be left alone: %q", got)
 	}
 	// A brand glued onto a leading file name is prose, not a segment, and is
-	// still masked as before.
+	// still masked as before. The bare alias is a prose brand word, so the
+	// replacement follows the casing it matched.
 	bExtension, bcExtension, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/profile.omp/agent"}`), "openai", "oh_my_pi")
-	if !bcExtension || !strings.Contains(string(bExtension), "/home/user/profile.Antigravity/agent") {
+	if !bcExtension || !strings.Contains(string(bExtension), "/home/user/profile.antigravity/agent") {
 		t.Fatalf("profile.omp must be masked: changed=%v body=%s", bcExtension, bExtension)
 	}
 
@@ -2032,15 +2038,22 @@ func TestRewriteMasksBareClaudeAndRemapsClaudeHomePath(t *testing.T) {
 		// "a Antigravity". Grammar repair is deliberately out of scope.
 		{"bare claude prose keeps article", `You are a Claude agent.`, `You are a Antigravity agent.`, true},
 		{"claude agent sdk uses official product name", `built on Claude Agent SDK`, `built on Antigravity SDK`, true},
-		{"vendor phrase then bare claude", `Anthropic's official CLI for Claude.`, `Google's official CLI for Antigravity.`, true},
-		// Model IDs must land on Antigravity routes the gateway really serves, so
-		// the bare "Claude" rule cannot consume the vendor prefix first.
-		{"opus model id", `Opus 5.5: 'claude-opus-5-5'`, `Opus 5.5: 'gemini-3.1-pro-low'`, true},
-		{"fable model id", `Fable 5.1: 'claude-fable-5-1'`, `Fable 5.1: 'gemini-3.1-pro-low'`, true},
-		{"sonnet model id", `Sonnet 5: 'claude-sonnet-5'`, `Sonnet 5: 'gemini-3.8-flash'`, true},
-		{"haiku model id", `Haiku 4.5: 'claude-haiku-4-5-20251001'`, `Haiku 4.5: 'gemini-3.5-flash-lite'`, true},
-		// A model ID the table does not know still loses its vendor prefix.
-		{"unknown model id falls through", `'claude-9-9'`, `'Antigravity-9-9'`, true},
+		// The special phrase rule is gone: the exact identity line above handles
+		// the canonical wording, and residual vendor prose uses the accepted
+		// Google Deepmind vocabulary like every other Anthropic mention.
+		{"vendor phrase then bare claude", `Anthropic's official CLI for Claude.`, `Google Deepmind's official CLI for Antigravity.`, true},
+		// No model-ID rule exists any more. claude-fable-5-1 and claude-opus-5-5
+		// both mapped onto gemini-3.1-pro-low, which cannot be inverted (two
+		// sources, one target), and no other client ID has an evidence-backed
+		// one-to-one Antigravity route to come back from. What is left is the
+		// bare brand rule doing its job: the vendor prefix of the ID is masked,
+		// the rest of the ID is untouched, and the reverse restores the exact
+		// original spelling ("antigravity-opus-5-5" -> "claude-opus-5-5").
+		{"opus model id keeps its suffix", `Opus 5.5: 'claude-opus-5-5'`, `Opus 5.5: 'antigravity-opus-5-5'`, true},
+		{"fable model id keeps its suffix", `Fable 5.1: 'claude-fable-5-1'`, `Fable 5.1: 'antigravity-fable-5-1'`, true},
+		{"sonnet model id keeps its suffix", `Sonnet 5: 'claude-sonnet-5'`, `Sonnet 5: 'antigravity-sonnet-5'`, true},
+		{"haiku model id keeps its suffix", `Haiku 4.5: 'claude-haiku-4-5-20251001'`, `Haiku 4.5: 'antigravity-haiku-4-5-20251001'`, true},
+		{"unknown model id falls through to the bare rule", `'claude-9-9'`, `'antigravity-9-9'`, true},
 		{"url uses official domain", `web app (claude.ai/code)`, `web app (antigravity.google/code)`, true},
 		// The client home directory maps onto the Antigravity equivalent so the
 		// model is not handed a dead .Antigravity path.

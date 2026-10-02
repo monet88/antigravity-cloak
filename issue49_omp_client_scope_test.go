@@ -19,16 +19,12 @@ func TestIssue49_OMPOwnedPathsRoundTrip(t *testing.T) {
 		"/home/m/.omp/agent/AGENTS.md",
 	}
 	for _, in := range cases {
-		mid, _ := replaceInsensitiveOpt(in, "omp", "Antigravity", true)
+		mid, _ := replaceInsensitiveRule(in, rewriteMapping{Match: "omp", Replacement: "Antigravity"}, true)
 		if mid == in {
 			t.Errorf("%q: forward pass made no change", in)
 			continue
 		}
-		back := mid
-		for _, m := range ompProtectedReverseTable {
-			back, _ = replaceInsensitiveOpt(back, m.Match, m.Replacement, true)
-			back, _ = replaceInsensitiveOpt(back, m.Match, m.Replacement, false)
-		}
+		back, _ := replaceInsensitiveSetWithPrev(mid, false, ompProtectedReverseTable)
 		if back != in {
 			t.Errorf("%q: round trip = %q", in, back)
 		}
@@ -137,7 +133,7 @@ func TestIssue49_OMPIdentityLineRewrittenWhole(t *testing.T) {
 		t.Fatalf("protected route: changed=%v out=%q", changed, got)
 	}
 	for _, alias := range mandatoryProtectedOMPAliases {
-		if _, rep := replaceBrandKeyword(got, alias, protectedBrandSentinel); rep {
+		if _, rep := replaceInsensitiveRule(got, rewriteMapping{Match: alias, Replacement: protectedBrandSentinel}, true); rep {
 			t.Errorf("sentinel still matches %q in %q", alias, got)
 		}
 	}
@@ -187,9 +183,12 @@ func TestIssue49_ClaudeMdRewrittenOnlyByClaudeCode(t *testing.T) {
 	}
 }
 
+// applyTable applies a table the way the wire does: through the rule objects
+// themselves, so a rule's whole-segment boundary and exclusion are part of what
+// the helper exercises instead of being dropped by a match/replacement pair.
 func applyTable(s string, tables []rewriteMapping) string {
 	for _, m := range tables {
-		s, _ = replaceInsensitiveWithPrev(s, false, m.Match, m.Replacement)
+		s, _ = replaceMappingWithPrev(s, false, m)
 	}
 	return s
 }

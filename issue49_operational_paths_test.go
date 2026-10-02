@@ -64,7 +64,15 @@ func TestIssue49_HomeDirectoryIsRemappedEverywhere(t *testing.T) {
 		}
 	}
 	// A path element that merely starts with the same letters is not the home
-	// directory, so it stays byte-for-byte alone.
+	// directory, so it stays byte-for-byte alone. The dot is not a word byte,
+	// so only the dot-segment rule keeps "x.codex-backup" out of the remap.
+	//
+	// A brand glued onto a leading file name ("foo.codex/config.toml") is a
+	// different case: it is not a path element at all by this rule's reading,
+	// because the byte before its dot is a word byte, so the BARE brand rule
+	// masks it as prose and the reverse hands the client its own spelling back.
+	// That is the bare-rule contract (filter_test.go). The whole-segment
+	// boundary itself is pinned in TestPathRulesAreWholeSegment.
 	for _, tc := range []struct{ client, in string }{
 		{"claude_code", `{"system":"see /home/u/.claude-backup/x"}`},
 		{"codex", `{"system":"see /home/u/.codex-backup/x"}`},
@@ -72,6 +80,55 @@ func TestIssue49_HomeDirectoryIsRemappedEverywhere(t *testing.T) {
 		if _, changed, _ := rewriteRequestBodyWithClient([]byte(tc.in), "openai", tc.client); changed {
 			t.Errorf("%s: a lookalike directory was rewritten: %s", tc.client, tc.in)
 		}
+	}
+}
+
+// TestPathRulesAreWholeSegment is the boundary contract for the path groups
+// themselves. The directory they match begins with a dot, which is not a word
+// byte, so nothing in the generic word-boundary test stops ".claude/" matching
+// the tail of "foo.claude/". Both directions and both spellings are asserted,
+// because a rule that over-matches on the way up hands the model a path the
+// client does not have, and one that over-matches on the way back hands the
+// client a path that does not exist upstream.
+func TestPathRulesAreWholeSegment(t *testing.T) {
+	const (
+		unchanged = ""
+	)
+	for _, tc := range []struct {
+		name  string
+		rules []rewriteMapping
+		in    string
+		want  string
+	}{
+		// Valid forms still match.
+		{"claude forward, home spelling", claudeContextMappings, "read ~/.claude/CLAUDE.md", "read ~/.gemini/GEMINI.md"},
+		{"claude forward, project spelling", claudeContextMappings, "read ./repo/.claude/CLAUDE.md", "read ./repo/.gemini/GEMINI.md"},
+		{"claude forward, escaped windows", claudeContextMappings, `read C:\\u\\.claude\\CLAUDE.md`, `read C:\\u\\.gemini\\GEMINI.md`},
+		{"claude reverse, escaped windows", claudeReverseContextMappings, `read C:\\u\\.gemini\\GEMINI.md`, `read C:\\u\\.claude\\CLAUDE.md`},
+		{"codex forward, escaped windows", codexContextMappings, `read C:\\u\\.codex\\AGENTS.md`, `read C:\\u\\.gemini\\AGENTS.md`},
+		{"codex reverse, escaped windows", codexReverseContextMappings, `read C:\\u\\.gemini\\AGENTS.md`, `read C:\\u\\.codex\\AGENTS.md`},
+		// A larger element that merely ENDS in the directory name is not it.
+		{"claude forward, larger element", claudeContextMappings, "see foo.claude/CLAUDE.md", unchanged},
+		{"claude forward, larger element escaped", claudeContextMappings, `see foo.claude\\CLAUDE.md`, unchanged},
+		{"claude reverse, larger element", claudeReverseContextMappings, "see foo.gemini/GEMINI.md", unchanged},
+		{"claude reverse, larger element escaped", claudeReverseContextMappings, `see foo.gemini\\GEMINI.md`, unchanged},
+		{"codex forward, larger element", codexContextMappings, "see foo.codex/AGENTS.md", unchanged},
+		{"codex reverse, larger element", codexReverseContextMappings, "see foo.gemini/AGENTS.md", unchanged},
+		{"codex reverse, larger element escaped", codexReverseContextMappings, `see foo.gemini\\AGENTS.md`, unchanged},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := tc.want
+			if want == unchanged {
+				want = tc.in
+			}
+			got := tc.in
+			for _, m := range tc.rules {
+				got, _ = replaceMappingWithPrev(got, false, m)
+			}
+			if got != want {
+				t.Errorf("got %q, want %q", got, want)
+			}
+		})
 	}
 }
 
@@ -89,15 +146,36 @@ func TestIssue49_ReversePathSegmentPerClient(t *testing.T) {
 		{"claude_code", "~/.gemini/rules/style.md", "~/.claude/rules/style.md"},
 		{"claude_code", "~/.gemini/GEMINI.md", "~/.claude/CLAUDE.md"},
 		{"claude_code", "/home/u/.gemini/GEMINI.md", "/home/u/.claude/CLAUDE.md"},
-		{"claude_code", `C:\\Users\\dev\\.gemini\\GEMINI.md`, `C:\\Users\\dev\\.claude\\GEMINI.md`},
+		// Escaped (JSON) spelling: this is the form a path takes inside a tool
+		// call's arguments, where each backslash is written twice. The file rule
+		// for that spelling is what keeps the file name with the directory, so
+		// the client gets its own file back instead of a mixed
+		// ".claude\\GEMINI.md".
+		{"claude_code", `C:\\Users\\dev\\.gemini\\GEMINI.md`, `C:\\Users\\dev\\.claude\\CLAUDE.md`},
 		{"claude_code", ".claude-backup/CLAUDE.md", ".claude-backup/CLAUDE.md"},
 		{"codex", "~/.gemini/AGENTS.md", "~/.codex/AGENTS.md"},
 		{"codex", "./.gemini/skills/x/SKILL.md", "./.codex/skills/x/SKILL.md"},
 		{"codex", "/home/u/.gemini/AGENTS.md", "/home/u/.codex/AGENTS.md"},
 		{"codex", "/home/u/.gemini/config.toml", "/home/u/.codex/config.toml"},
+		// The escaped spelling of the same paths, as they arrive inside a tool
+		// call's arguments.
+		{"codex", `C:\\Users\\u\\.gemini\\AGENTS.md`, `C:\\Users\\u\\.codex\\AGENTS.md`},
 		{"oh_my_pi", "/home/u/.gemini/agent/AGENTS.md", "/home/u/.omp/agent/AGENTS.md"},
 		{"oh_my_pi", "/home/u/.gemini/config.yml", "/home/u/.omp/config.yml"},
 		{"oh_my_pi", `C:\\Users\\dev\\.gemini\\agent`, `C:\\Users\\dev\\.omp\\agent`},
+		// Oh My Pi's global Claude memory, escaped: only the file pair below
+		// ".gemini/" may claim this, or the client is handed ".omp\\AGENTS.md"
+		// for a file it keeps at ".claude\\CLAUDE.md".
+		{"oh_my_pi", `C:\\Users\\dev\\.gemini\\AGENTS.md`, `C:\\Users\\dev\\.claude\\CLAUDE.md`},
+		// Whole-segment boundary: a larger element that merely ENDS in the
+		// directory name is not that directory. The dot is not a word byte, so
+		// nothing but this boundary stops the rule matching the suffix of
+		// "foo.claude" / "foo.codex" / "foo.gemini".
+		{"claude_code", "foo.gemini/GEMINI.md", "foo.gemini/GEMINI.md"},
+		{"claude_code", "foo.gemini/settings.json", "foo.gemini/settings.json"},
+		{"codex", "foo.gemini/AGENTS.md", "foo.gemini/AGENTS.md"},
+		{"codex", "foo.gemini/config.toml", "foo.gemini/config.toml"},
+		{"oh_my_pi", "foo.gemini/agent/AGENTS.md", "foo.gemini/agent/AGENTS.md"},
 	} {
 		got := applyReverseTable(tc.in, tc.client)
 		if got != tc.want {
@@ -107,12 +185,11 @@ func TestIssue49_ReversePathSegmentPerClient(t *testing.T) {
 }
 
 // applyReverseTable runs one client's whole reverse table in declared order,
-// the same way the streaming lane and the non-stream body pass both do.
+// through the same helper the non-stream body pass uses, so the table's own
+// boundary data (whole-segment matches, exclusions) is honoured exactly as it
+// is on the wire.
 func applyReverseTable(text, client string) string {
-	out := text
-	for _, m := range brandReverseTableFor(client) {
-		out, _ = replaceInsensitive(out, m.Match, m.Replacement)
-	}
+	out, _ := replaceInsensitiveSetWithPrev(text, false, brandReverseTableFor(client))
 	return out
 }
 
@@ -187,12 +264,14 @@ func TestIssue49_OMPRemovesBlanketPreservePolicy(t *testing.T) {
 	}
 	// Only the literal dot-prefixed directory is a real operational identifier.
 	// A dot-element whose brand is glued to a suffix is a different path, and a
-	// brand behind a leading file name is prose: both are still masked.
+	// brand behind a leading file name is prose: both are still masked. The
+	// replacement follows the casing it matched, so lowercase "omp" lands as
+	// lowercase "antigravity".
 	for _, in := range []string{
 		`{"system":"at /home/user/profile.omp/agent"}`,
 	} {
 		got, changed, _ := rewriteRequestBodyWithClient([]byte(in), "openai", "oh_my_pi")
-		if !changed || !strings.Contains(string(got), ".Antigravity") {
+		if !changed || !strings.Contains(string(got), ".antigravity") {
 			t.Errorf("%s must still mask the brand: %s", in, got)
 		}
 	}
@@ -339,7 +418,7 @@ func TestPathContextIsLocalToTheMatch(t *testing.T) {
 func TestForwardRewriteSurvivesAPromptContainingAURL(t *testing.T) {
 	prompt := strings.Repeat("filler words that say nothing interesting. ", 400) +
 		"see https://www.anthropic.com for details. You are Claude Code, Anthropic's official CLI for Claude."
-	next, changed := replaceInsensitiveOpt(prompt, "Claude", "Antigravity", true)
+	next, changed := replaceInsensitiveRule(prompt, rewriteMapping{Match: "Claude", Replacement: "Antigravity"}, true)
 	if !changed {
 		t.Fatal("forward rewrite reported no change on a value containing a URL")
 	}

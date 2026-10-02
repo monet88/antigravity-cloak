@@ -12,14 +12,27 @@ coding-CLI traffic as Antigravity. Two jobs:
    Antigravity in the request `system` field and `system`-role messages, then
    restore them on the way back. The forward and reverse tables are declared
    per client (`brandMappingsByClient` / `reverseBrandMappingsByClient` in
-   `main.go`), and the resolved client selects exactly one and no other, so
-   every target a client's forward pass can produce inverts back to that same
-   client. Adding a client (opencode, cursor, ...) is one table plus one
-   registry line. A competitor product name owns no table, so a request that
-   merely mentions one is left alone.
+   `main.go`), and the resolved client selects exactly one and no other, so an
+   approved brand target inverts back to that same client. Adding a client
+   (opencode, cursor, ...) is one table plus one registry line. A competitor
+   product name owns no table, so a request that merely mentions one is left
+   alone. Two carve-outs: a client's opening identity sentence is replaced
+   **whole** (terminal, so it needs no reverse), and one approved deliberate
+   one-way convention - the bare `CLAUDE.md` -> `AGENTS.md` filename rule
+   owned by `claude_code`. Its target `AGENTS.md` is the neutral context
+   filename every client already reads, so it is never reverse-restored as a
+   bare filename; the path-qualified `.gemini/...` restoration is unaffected.
+   Two approved non-bijective pairs (SDK, Workflow) are named in `CONTEXT.md` §1.
+   **The detailed Brand Rewriting contract - every forward/reverse rule, the
+   non-bijective pairs, the one-way filename convention, the exclusions and the
+   whole-segment path rules - is `CONTEXT.md` §1, which is canonical; `main.go`'s
+   tables are the source of truth for behaviour.**
 2. Tool-name cloaking: rename a client's native tool names to Antigravity tool
    names on the way up (request), then restore them on the way back (response +
-   stream), so the client still sees its own tool names.
+   stream), so the client still sees its own tool names. The declaration and
+   history shapes are read explicitly, never guessed: a nested-only reader is a
+   silent uncloaked-tool bug. Provider built-ins (`web_search`, `mcp`, ...) own
+   no client identity.
 
 - Module: github.com/monet88/antigravity-cloak
 - Go: 1.26.0. Depends on github.com/router-for-me/CLIProxyAPI/v7 v7.2.143

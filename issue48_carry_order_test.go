@@ -35,7 +35,7 @@ func newBrandTestSession(t *testing.T, reqID, client string) *streamSession {
 func holdOneLane(t *testing.T, sess *streamSession, laneKey, match, text string) {
 	t.Helper()
 	lane := getBrandLane(sess, laneKey+reverseBrandLaneSuffix+match)
-	applyBrandLaneSet(text, lane, []rewriteMapping{{Match: match, Replacement: reverseReplacementFor(t, match)}})
+	applyBrandLaneSet(text, lane, []rewriteMapping{{Match: match, Replacement: reverseReplacementFor(t, match)}}, false)
 	stampLaneArrival(sess, lane)
 }
 
@@ -69,7 +69,7 @@ func TestIssue48_HeldTokensFlushInSourceOrderNotMappingOrder(t *testing.T) {
 		t.Fatalf("fixture is not discriminating: %q already sorts before %q", first, second)
 	}
 
-	flushes := orderedBrandFlushes(sess, brandReverseTableFor("claude_code"))
+	flushes := orderedBrandFlushes(sess)
 	if len(flushes) != 2 {
 		t.Fatalf("want two flushes, got %d", len(flushes))
 	}
@@ -99,7 +99,7 @@ func TestIssue48_FlushEventsCarryHeldTokensInSourceOrder(t *testing.T) {
 	holdOneLane(t, sess, "anthropic:0", ".gemini/GEMINI.md", " per .gemini/GEMINI.md")
 
 	var out string
-	for _, ev := range strings.Split(strings.TrimRight(string(mgr.reverseFlushCloakedBrandLanes(sess, "anthropic", "anthropic:0", false)), "\n\n"), "\n\n") {
+	for _, ev := range strings.Split(strings.TrimRight(string(mgr.reverseFlushCloakedBrandLanes(sess, "anthropic", "anthropic:0", false, nil)), "\n\n"), "\n\n") {
 		_, data := parseSSEFrame(t, ev+"\n\n")
 		delta := data["delta"].(map[string]any)
 		s, _ := delta["text"].(string)
@@ -121,7 +121,7 @@ func TestIssue48_FlushOrderIsStableAcrossMapIteration(t *testing.T) {
 		holdOneLane(t, sess, "anthropic:0", "Google Deepmind", "by Google Deepmind")
 		holdOneLane(t, sess, "anthropic:0", ".gemini/GEMINI.md", " per .gemini/GEMINI.md")
 		var got string
-		for _, f := range orderedBrandFlushes(sess, brandReverseTableFor("claude_code")) {
+		for _, f := range orderedBrandFlushes(sess) {
 			got += f.key + "=" + f.text + "|"
 		}
 		if i == 0 {
@@ -144,7 +144,7 @@ func TestIssue48_LaneIndexStillDominatesSourceOrder(t *testing.T) {
 	holdOneLane(t, sess, "anthropic:2", "Antigravity", "late Antigravity")
 	holdOneLane(t, sess, "anthropic:1", "Antigravity", "early Antigravity")
 
-	flushes := orderedBrandFlushes(sess, brandReverseTableFor("claude_code"))
+	flushes := orderedBrandFlushes(sess)
 	if len(flushes) != 2 {
 		t.Fatalf("want two flushes, got %d", len(flushes))
 	}
@@ -180,7 +180,7 @@ func TestIssue48_HoldIsLive(t *testing.T) {
 func TestIssue48_NoHoldWhenMatchIsAlreadyBoundaryValid(t *testing.T) {
 	lane := &brandLane{}
 	out, changed := applyBrandLaneSet("see https://docs.example.com/", lane,
-		[]rewriteMapping{{Match: "https://docs.example.com/", Replacement: "https://claude.ai"}})
+		[]rewriteMapping{{Match: "https://docs.example.com/", Replacement: "https://claude.ai"}}, false)
 	if lane.carry != "" {
 		t.Fatalf("already-valid match was held: carry=%q out=%q", lane.carry, out)
 	}

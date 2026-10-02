@@ -21,14 +21,17 @@ import (
 //   - claude_code: the path-qualified ~/.claude/CLAUDE.md and the vendor word
 //     are its own. There is no public repo to read, so this row rests on
 //     observed Claude Code traffic rather than on source.
-//   - codex and oh_my_pi: neither ships a vendor token. Verified by reading
-//     their sources, not by assumption. Codex's model-facing prompts
-//     (.ref/codex codex-rs/core/gpt_5*.md) contain AGENTS.md eleven times and
-//     anthropic/claude/gemini/CLAUDE.md zero times; its claude mentions are all
-//     in external-agent-migration, hooks and core-plugins, which read a Claude
-//     Code install to migrate config and never reach the wire. Oh My Pi is the
-//     same across all 83 prompt files it ships.
-//   - What DOES put those tokens in a codex or oh_my_pi request is the project's
+//   - codex: its shipped catalog carries the identity sentence "You are Codex,
+//     an agent based on GPT-6." verbatim
+//     (.ref/CLIProxyAPI/internal/registry/models/codex_client_models.json), and
+//     a second shipped opening sentence names the vendor outright ("You are
+//     Codex, an OpenAI general-purpose agentic assistant ..."). So Codex does
+//     carry vendor vocabulary: OpenAI and GPT-6, not Anthropic's. An earlier
+//     revision of this comment claimed neither Codex nor Oh My Pi ships a vendor
+//     token; that was wrong for Codex and is corrected here.
+//   - oh_my_pi: its prompts carry no vendor token. Verified by reading the 83
+//     prompt files it ships, not by assumption.
+//   - What ALSO puts those tokens in a codex or oh_my_pi request is the project's
 //     own context files. This repository's AGENTS.md names Claude Code and
 //     .claude/CLAUDE.md throughout, so any client working in it carries them.
 //
@@ -89,11 +92,12 @@ func clientContexts() []clientContext {
 			brandBack:    "",
 		},
 		{
-			// Codex owns no vendor token, so its table holds only its own name.
-			// The bare brand word is both what it rewrites and what the reverse
-			// hands back. CLAUDE.md stays verbatim: Codex carries no bare-Claude
-			// rule that could interfere with it, so rewriting the file name to
-			// AGENTS.md bought nothing and only risked misnaming a real file.
+			// Codex's own table covers its client name and the vendor vocabulary
+			// its shipped identity prose carries (OpenAI, GPT-6); this row pins
+			// the bare brand word, which round-trips with its casing.
+			// CLAUDE.md stays verbatim: Codex carries no bare-Claude rule that
+			// could interfere with it, so rewriting the file name to AGENTS.md
+			// bought nothing and only risked misnaming a real file.
 			client: "codex", tools: codexTools, format: "openai", declared: "openai",
 			sent:         "read CLAUDE.md, then run Codex",
 			echoes:       "read CLAUDE.md, then run Antigravity",
