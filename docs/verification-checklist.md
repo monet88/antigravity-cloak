@@ -136,6 +136,54 @@ GLIBC versions supported by the gateway. Direct builds from a Windows bind
 mount can report `vcs.modified=true` despite clean host Git status; the fresh
 container checkout avoids that ambiguity.
 
+**Dirty-source builds need an explicit overlay.** The command above checks out
+`$TargetCommit`, so it is only correct when the tree is committed. If you are
+accepting uncommitted work, the container-internal `git clone --no-local /src
+/build` carries **only committed state** and `git add -A` inside `/build` finds
+nothing to commit; the build then silently emits a binary of `HEAD` and drops
+every uncommitted edit. Overlay the host working tree onto the clone before
+committing, and assert the string you changed is present in the consumed
+source. Insert these lines **into `$BuildCommand`**, immediately after
+`test -z "$(git status --porcelain)"` and before the `CGO_ENABLED=1 ... go build`
+line: the detached checkout of `$CLOAK_BUILD_COMMIT` has to run first, because
+the deletion list is diffed against it, and `docker run --rm` removes the clone
+when it returns, so they cannot be run afterwards. The overlay's own commit
+leaves `/build` clean again, so that assertion keeps its meaning.
+
+```sh
+# tar copies only files that exist, so a file deleted on the host survives in
+# /build and would be baked into the acceptance commit. Drop deletions before
+# extracting the host overlay.
+git -C /src diff --name-only --diff-filter=D "$CLOAK_BUILD_COMMIT" |
+  while read -r f; do git -C /build rm -q -- "$f" || true; done
+tar -C /src --exclude=.git --exclude=dist -cf - . | tar -C /build -xf -
+git -C /build add -A && git -C /build -c user.email=b@b -c user.name=b commit -m 'acceptance snapshot'
+grep -c '<the string you added>' /build/main.go   # must be >= 1, or stop
+```
+
+Record both the host `git diff` sha256 and the built artifact sha256 whenever
+the tree is dirty, so the record identifies exactly what was accepted.
+
+**A `Conflict` from `up -d --force-recreate` means the recreate did not happen.**
+It is a container-name collision, not a retryable error: the pre-existing
+container keeps serving the previous binary, so a newly written `.so` is never
+loaded and a newly set `CPA_FILTER_DEBUG` never takes effect. Two causes, both
+seen on 2026-09-29:
+
+- **Wrong project name.** `env_file` is commented out in `docker-compose.yml`,
+  so `${CPA_FILTER_DEBUG}` is interpolated from the *invoking shell* - export it
+  in the same shell that runs `up`. Discover the project name instead of
+  guessing it: `docker ps --format '{{.Label "com.docker.compose.project"}}'`.
+- **Orphaned container.** If the name is still held after the project name is
+  right, `docker rm -f cli-proxy-api`, then `up -d`.
+
+**Never treat a deploy as proven by command output.** Assert from inside the
+running container: `env | grep CPA_FILTER_DEBUG` is non-empty, the installed
+artifact sha256 equals the built one, and a string you just added is present in
+the installed `.so`. On the host, the debug log size and the newest
+request-log mtime catch a stale container immediately - a 0-byte log after a
+probe means the container under test is not the container you just started.
+
 ## 3. Back up, enable controlled logging, and install while stopped
 
 The local-only acceptance API key / management password is `Tonight123`.
@@ -362,6 +410,303 @@ Restore the prior plugin pin/config settings, remove temporary logging settings,
 and recreate with the same explicit Compose mounts and image. Verify the old
 version/path is registered and the gateway is healthy. Report the failed new
 deployment separately; never label a rollback as new-version acceptance.
+
+## Live acceptance record - 2026-09-30 (client path scope)
+
+Claude Code live acceptance for the client-home-path scope change, run on this
+workstation against the local gateway with the default `cpa` provider. This is
+a working-tree acceptance, not a release claim - no tag exists, and the source
+is a dirty snapshot.
+
+### Pinned run
+
+| | |
+| :--- | :--- |
+| Host commit | `e2c7157` plus the uncommitted working tree |
+| `git diff` sha256 | `23abcdaa01048a720d78d063ef3f5b734b95ebcaf1e787e7600aa013ab349407` |
+| Built artifact sha256 | `33f1296f46bfbeddc58ba44c96313512b124d0e3baa3d911a79f3758eed5796d` |
+| Previous artifact sha256 | `ecb761e9e09085f5532614bb9a7b62cd141758c191b31e27f09257de4fc69caf` |
+| Build image | `golang:1.26.0-bookworm` (`golang@sha256:2a0ba12e…6677c`), gateway glibc 2.36 |
+| Plugin version | 0.6.0, `registered=true`, `effective_enabled=true` |
+| Client under test | `X-Cloak-Client: claude_code`, `User-Agent: claude-cli/2.1.284` |
+| Evidence | `.git/local-acceptance-20260929-205449/` (not in the repository) |
+
+The build used the dirty-tree overlay from step 2, asserted by the presence of
+`claudeReverseContextMappings` and `func pathRules` in the consumed source. The
+installed binary was proved from inside the running container rather than from
+command output: `env | grep CPA_FILTER_DEBUG` returned `1`, and the in-container
+`sha256sum` equalled the built hash.
+
+### What the measurement changed
+
+The scope was first narrowed to a home spelling (`~/`, `./`, `~\`, `.\`) on the
+reasoning that a harness advertises its instruction file in that form, so `~`-form
+rules would cover the injected context. The unit suite was green. Live traffic
+showed the premise was wrong on this platform:
+
+| token | `=== REQUEST BODY ===` (from Claude Code) | `=== API REQUEST 1 ===` (upstream) |
+| :--- | :--- | :--- |
+| `Claude Code` | 15 | 0 |
+| `CLAUDE.md` | 8 | 0 |
+| `Anthropic` | 8 | 1 |
+| `C:\Users\monet\.claude\…` | **114** | **114** |
+
+Claude Code on Windows puts absolute client-home paths in its system context
+and never uses the tilde form: `transcripts` 97, `plugins` 7, the instruction
+file 6, `lsp-shims` 3, `projects` 1. All 114 reached the model uncloaked. The
+rules are therefore matched as a whole segment at any position, in both
+directions, and are asserted against observed traffic rather than against
+documentation.
+
+### Per-case results - Claude Code
+
+| case | result |
+| :--- | :--- |
+| absolute client-home path to upstream | 114 -> **0** |
+| `Claude Code` to upstream | 15 -> **0** |
+| `You are Claude` to upstream | 1 -> **0** |
+| tool call `C:/Users/monet/.claude` -> client | `C:/Users/monet/.claude` (cloaked, then restored) |
+
+### Honest gaps
+
+- **The residual `.claude`, `CLAUDE.md` and `Anthropic` counts in the upstream
+  request are the operator's own text and file contents, not injected context.**
+  The session had Claude Code reading this repository's `main.go`, which
+  contains `pathRules(".claude", ".gemini", …)` in its own source, and the
+  operator's prompt text sat in the conversation history. Rewriting those would
+  corrupt code and misquote the operator, so they are correctly left alone.
+- **A model-invented `.gemini` at end of string is not reversed.** The model had
+  seen the cloaked directory in context and emitted `C:/Users/monet/.gemini`
+  with no trailing separator; the segment rule requires one, so the client
+  received the cloaked spelling. This is the accepted residual of the
+  over-remap design - the reverse pass cannot distinguish a name the model
+  echoes from one the forward pass produced.
+- **A `.claude` belonging to a different project is rewritten too.** The plugin
+  cannot tell which home directory is the client's own. Accepted deliberately:
+  that costs one path the model may wander into, where the narrow form cost 114
+  on every request.
+- Oh My Pi and Codex were not exercised in this run. `pathRules` covers both and
+  both are unit-tested, but neither has a live record for this change.
+
+## Live acceptance record - 2026-09-29
+
+Oh My Pi live acceptance for the PR #46 streaming/reverse remediation, plus the
+URL/path rule revision that came out of it. Run on this workstation against the
+local gateway with the isolated `cloak-live` profile. **This is an uncommitted
+working-tree acceptance, not a release claim** - no tag exists, and the source
+below is a dirty snapshot reviewed by the coordinator, not a commit.
+
+### Pinned run
+
+- Source: `9af5a97f11639622a2c59182a841a14fa92ac701` (`fix/streaming-brand
+  reverse`, tip of `fix/streaming-brand-reverse`) plus a **dirty** tree:
+  `main.go`, `filter_test.go`, `issue49_operational_paths_test.go`,
+  `reverse_brand_test.go`, `issue48_carry_order_test.go` modified and
+  `issue51_operational_roundtrip_test.go` untracked.
+  `git diff | sha256sum` = `de8758e0c450fcd871e957018499baad145efbc0176d29f0b5a7541db0cbaef9`,
+  recorded before and after the run and unchanged. No commit, no push.
+- Build image: `golang:1.26.0-bookworm`, digest
+  `sha256:2a0ba12e116687098780d3ce700f9ce3cb340783779646aafbabed748fa6677c`.
+- Artifact: `dist/antigravity-cloak.so`, SHA256
+  `2f9cd356fed33817e0352e371b834b1c6819fe571d16dd75a453edb89acb1a7f`
+  (the four-blocker build) and then
+  `d50f905ed51f7eca39a6da154a8d94382d4fe29f3e48c9ad721c8cae41dcd8c3`
+  after the URL/path rule revision. 5,280,536 bytes. `go version -m` reports
+  `go1.26.0`, `CGO_ENABLED=1`, `GOOS=linux`, `GOARCH=amd64`,
+  `vcs.revision=9af5a97…`, and `vcs.modified=true` - the last is expected and
+  is the provenance marker for a deliberately dirty snapshot.
+  `readelf` reports ELF64 DYN, x86-64, GLIBC requirement <= 2.34 (gateway
+  glibc 2.36).
+- Installed as `plugins/linux/amd64/antigravity-cloak-v0.6.0.so`; the host
+  registered `version=0.6.0` from that path and the in-container SHA256 matched
+  the built artifact byte-for-byte. `pluginVersion` and `registry.json` both
+  read `0.6.0`; no `v0.6.0` tag exists.
+- Gateway: `cli-proxy-api`, CLIProxyAPI **v8.0.3**, image
+  `sha256:69326f4bcf4f6e68a7a84885be8e89adb917ef47227a20f3cc9b405e7130bc50`.
+  All four discovered mounts (config `config.local.yaml`, `plugins`, `logs`,
+  `auths`) preserved across both deployments and both cleanups.
+- OMP `18.4.2` on PATH (`--help` reports 18.4.3 after its own update check).
+- `cloak-live`: provider `cpa` -> `http://127.0.0.1:8317/v1`,
+  `api: openai-completions`, `headers: {X-Cloak-Client: oh_my_pi}`,
+  `discovery: {type: openai-models-list}`. All 24 catalog models resolve under
+  provider `cpa`.
+- **Every protected test used `cpa/agy/gemini-3.8-flash`.** The plugin-visible
+  model at ingress was `agy/gemini-3.8-flash` in the request body and in the OMP
+  JSONL `provider`/`model` fields. No `3.7*`, no `3.8-flash-high`, no other
+  route. The `gemini-3.8-flash-high` name that appears in `API REQUEST` is the
+  Antigravity route's own internal upstream model mapping, not a model choice.
+- Controlled capture: `request-log: true` throughout. `CPA_FILTER_DEBUG` was
+  enabled only for the bounded manual window, then disabled and truncated to
+  0 bytes. After cleanup: plugin registered 0.6.0 from the expected path,
+  installed SHA256 matching, all mounts preserved, authenticated
+  `GET /v1/models` = 200.
+
+### URL/path rule (revised during this run)
+
+A bare vendor word inside a URL or filesystem path is rewritten **only** as a
+literal dot-prefixed directory segment, remapped onto the client's neutral
+equivalent. Every other position in a path is left byte-for-byte alone.
+
+| Input | Result |
+| :--- | :--- |
+| `.omp/agent`, `C:\Users\u\.claude\settings.json` | remapped to `.gemini/...` (unchanged behaviour) |
+| `/omp/`, `\omp\`, `/claude/`, `/codex/` | never rewritten |
+| `F:/CodeBase/antigravity-cloak/main.go` | never rewritten |
+| `https://omp.ai/pricing` | never rewritten |
+| `.omp-backup/` | never rewritten |
+| `profile.omp/` | still masked (prose, not a segment) |
+| `claude.ai` (composed domain mapping) | still cloaks to `antigravity.google` |
+| `You are omp.` (prose) | still masked to `You are Antigravity.` |
+
+The guard is applied in **both** directions. A forward-only fix still let the
+response reverse rewrite `antigravity-cloak` into `omp-cloak`, because the
+reverse walk is case-insensitive and cannot know which tokens the forward pass
+actually introduced - the same one-way-authority class as the P1/P2 fixes in
+this PR. Composed entries (`claude.ai`, `Antigravity SDK`, `.gemini/CLAUDE.md`)
+are exempt and keep their existing behaviour; only bare single-word mappings are
+subject to the rule. This reverses the earlier recorded decision that
+non-dot delimiters should mask to Antigravity.
+
+### Live defect found and fixed during this run
+
+**Minimal repro.** This repository lives at `F:/CodeBase/antigravity-cloak/`.
+Asking the real OMP CLI to read a fixture by an absolute path under that
+directory produced a corrupted path on the client. The path sits in the user's
+typed prompt, so the forward pass correctly left it literal; the model echoed it
+back in its `view_file` argument, and the response reverse pass rewrote
+`antigravity` -> `omp` with a case-insensitive matcher:
+
+```text
+model received : F:/CodeBase/antigravity-cloak/.git/.../sample.txt
+client received: F:/CodeBase/omp-cloak/.git/.../sample.txt
+=> read failed "Path not found" on two consecutive attempts
+```
+
+Root cause: at the time of that run `ompProtectedReverseTable` held only its
+protected `{Match: "Antigravity", Replacement: "omp"}` pair and
+`replaceMappingWithPrev` (the case-insensitive mapping walk) lowercases both
+sides, while the forward pass is authority-aware and the reverse is not. This
+violates the HARD contract that
+operational identifiers round-trip client-specifically. Fixed by the URL/path
+rule above, applied symmetrically: the table now carries that pair plus the
+`.gemini/AGENTS.md` -> `.claude/CLAUDE.md` and `.gemini/` -> `.omp` path rules, so
+it is no longer a single entry. **No synthetic unit fixture exposes this**:
+fixtures like `/home/u/.gemini` are clean by construction, and only a real run
+whose working directory contains a brand word reveals it.
+
+### Per-case results - Oh My Pi
+
+All runs: real `omp` CLI, `cloak-live`, `cpa/agy/gemini-3.8-flash`, fixture
+root `C:/Users/monet/omp-cloak-fixture` containing a literal `.omp/agent/`
+segment plus a `.gemini/agent/decoy.txt` that must never be read.
+
+| Case | Transport | Result |
+| :--- | :--- | :--- |
+| A. Baseline smoke, `bash` | `POST /v1/chat/completions` | PASS - ingress `bash` -> upstream `run_command` (id `run_command-1790654659627457245-1`) -> client `bash`, result `9af5a97` (matches HEAD), continuation, single upstream attempt |
+| B. Canonical matrix `read`/`write`/`edit`/`grep`/`glob` | same | PASS 5/5, 0 errors, on-disk result `MATRIX_EDIT_OK` |
+| B. `task` | same | PASS for identity and spawn (`invoke_subagent` -> `task`, subagent `ReadSampleFile` spawned `isError=false`); the parent read `agent://` before the subagent delivered, which is a harness race in the prompt, not a plugin result |
+| B. `ask` | - | NOT RUN - declared only in interactive mode; `execute` throws "Ask tool requires interactive mode" headless. Not simulated |
+| B. `web_search` | - | NOT RUN - `providers.webSearchOrder` is `[]` in the acceptance profile; `search_web` is declared upstream but was never driven |
+| C.1 Tool identity, all cases | same | PASS - every upstream name restored to the exact native OMP name |
+| C.2 Operational path, model-derived | same | PASS - see chain below |
+| C.2 Operational path, user-typed | same | PASS - the `.omp` path was left literal in both directions and the real fixture was read |
+| C.2 Brand-word directory (the defect) | same | PASS after the fix - 1 tool call, 0 errors, byte-identical in both directions |
+| C.3 Streamed tool-argument carrier | `openai-completions` | PASS - see chain below |
+| C.3 Anthropic transport | - | NOT RUN - the profile is `openai-completions`; switching transport means editing the profile. No Anthropic live coverage is claimed |
+| C.4 Flush framing / source order | - | NOT induced live - a split operational token could not be induced reliably through the live model. Still covered offline by the `processChunk` regressions `TestIssue48_ReheldLaneTakesItsNewArrivalOrder` and `TestIssue48_PathCarryStillReassembles`. No live proof is fabricated |
+| Extended: shared `wp_*` aliases | same | PASS - `wp_todo`, `wp_find`, `wp_eval`, `wp_vibe_*` all restored |
+| Extended: deterministic `wp_ext_<hash>` | same | PASS - `wait` -> `wp_ext_061bef0f1c6ccd0b4819958bcb73eba6`, `yield` -> `wp_ext_6000f482bcb616c9b358f46162f191f6`, `goal` -> `wp_ext_63f44033c2aa095324c02661c93b17b9`; all three reproduce `sha256("request-alias-v1\x00" + source)[:16]` |
+| Extended: `learn` / `manage_skill` | same | PASS - required `autolearn.enabled: true` plus `memory.backend: local`; upstream `wp_learn` -> client `learn`, `isError=false`, "Lesson stored." |
+| Extended: `xd://` MCP device | same | PASS - `.mcp.json` in the cwd mounts 14 `mcp__gitnexus_*` devices; `read` on `xd://mcp__gitnexus_list_repos` returned the real tool documentation with the URI byte-identical, reached through the cloaked `read` |
+| D. `goal` mode (TUI) | same | PASS - 13-tool set (adds `ask_question` and the `goal` fallback alias); `goal` round-tripped with `{"op":"complete"}` |
+| D. `vibe` mode (TUI) | same | PASS - toolset shrank to 7 tools with `run_command`, `write_to_file` and `replace_file_content` absent, confirming read-only; `vibe_spawn`, `vibe_wait`, `vibe_kill` all restored |
+| D. `loop` mode (TUI) | same | PASS - 8 requests carried the `yield` alias upstream, so the loop really re-submitted, and `yield` restored its exact name each time |
+
+### Correlated evidence
+
+**Operational path round trip, model-derived** (log
+`v1-chat-completions-2026-09-29T121034-0000001a.log`). The model was *not*
+given the path; it derived it from its own system prompt, which the plugin had
+already cloaked:
+
+```text
+ingress      declared read                    system .omp x0
+upstream     declared view_file               system .omp x0  .gemini x5
+upstream call: view_file id=call_281605
+              args {"path":"C:/Users/monet/.gemini/agent/AGENTS.md"}   <- cloaked
+client sees : read id=view_file-1790655033980858952-6
+              args {"path":"C:/Users/monet/.omp/agent/AGENTS.md"}      <- restored
+OMP executed: read on the real file -> "# Global Agent Rules", isError=false
+```
+
+**Brand-word directory, after the fix** (log
+`v1-chat-completions-2026-09-29T123605-00000002.log`), byte-identical in both
+directions with no retry:
+
+```text
+UPSTREAM view_file  path = F:/CodeBase/antigravity-cloak/.../fixture/.omp/agent/sample.txt
+CLIENT   read       path = F:/CodeBase/antigravity-cloak/.../fixture/.omp/agent/sample.txt
+OMP read isError=false -> "OMP_PATH_MARKER_LINE_1\nsecond line"
+```
+
+**Manual matrix run** (14 requests), every tool restored and every `.omp` path
+intact:
+
+| upstream | client |
+| :--- | :--- |
+| `find_by_name` | `glob` |
+| `grep_search` | `grep` |
+| `view_file` | `read` |
+| `write_to_file` | `write` |
+| `replace_file_content` | `edit` |
+| `run_command` | `bash` |
+| `invoke_subagent` | `task` |
+| `wp_ext_6000f482bcb616c9b358f46162f191f6` | `yield` |
+
+**Mode runs** (31 requests): declaration sets of 13 / 7 / 11 tools for goal /
+vibe / normal, every name mapped, and the upstream `Antigravity` count in the
+system instruction dropped from 43 to 14 after the URL/path rule, which is the
+fewer-wrong-path-writes signal.
+
+**Cleanliness across the whole run.** 0 client-side `.gemini` leaks in 126
+streamed tool-argument streams. The decoy `.gemini/agent/decoy.txt` was never
+read - its marker appears in 0 of the 13 logs that touched the fixture. The
+plugin debug log contains 0 matches for `panic`, `unknown tool`,
+`admission rejected`, `503` or `schema mismatch`. Every request carried the
+explicit `X-Cloak-Client: oh_my_pi` marker. No hidden retries.
+
+### Setup and cleanup notes for the next run
+
+- **MCP config location.** `.mcp.json` is discovered from the **working
+  directory**, not from the profile. `mcp.enableProjectConfig` defaults to
+  `true`. Putting `mcp.json` in the profile root does nothing.
+- **`learn` gating.** `autolearn.enabled` defaults to `false`, so the `learn`
+  and `manage_skill` tools are absent until it is set, and `LearnTool.createIf`
+  additionally requires `memory.backend` to be `hindsight`, `mnemopi` or
+  `local`.
+- **Modes are TUI commands.** `vibe`, `goal` and `loop` are slash commands, not
+  tools; the plugin never sees their names. `goal.enabled` defaults to `true`.
+  They must be driven from an interactive session.
+- **`CLAUDE.md -> AGENTS.md` remains intentionally one-way** and was not
+  exercised in this run.
+- **Profile edits must preserve `.env`.** Overwriting `.env` with only
+  `CPA_FILTER_DEBUG` drops `CLI_PROXY_CONFIG_PATH` and the gateway restart-loops
+  with `failed to read config file: /CLIProxyAPI/config.yaml: is a directory`.
+  Always keep both lines.
+- Raw captures, OMP JSONL, the redacted summary, and the pre-change backups stay
+  in the gitignored local evidence area and are not committed.
+
+### Remaining gaps against the HARD contract
+
+- Claude Code and OpenAI Codex were not re-attested in this pass; the 2026-09-27
+  record's pending items stand.
+- The Anthropic transport and the `ask` / `web_search` tools have no live
+  coverage from this run.
+- Source-order flush reproduction remains offline-only.
+- The response reverse still leaves a bare vendor word inside a path untouched
+  when the model copies a prose-masked token into a tool argument (for example
+  `/tmp/Antigravity`). That is the deliberate cost of a symmetric path rule: a
+  cosmetic leftover was chosen over a path that does not exist.
 
 ## Live acceptance record - 2026-09-27
 

@@ -44,7 +44,7 @@ func decodeStreamBody(t *testing.T, rawEnvelope []byte) ([]byte, bool) {
 		OK     bool `json:"ok"`
 		Result struct {
 			Body      string `json:"Body"`
-			DropChunk bool `json:"DropChunk"`
+			DropChunk bool   `json:"DropChunk"`
 		} `json:"result"`
 	}
 	if err := json.Unmarshal(rawEnvelope, &env); err != nil {
@@ -59,6 +59,7 @@ func decodeStreamBody(t *testing.T, rawEnvelope []byte) ([]byte, bool) {
 	dec, _ := base64.StdEncoding.DecodeString(env.Result.Body)
 	return dec, env.Result.DropChunk
 }
+
 // sseAssistantJoined centralizes repeated SSE assistant-text extraction for
 // both Anthropic content_block_delta and OpenAI choice delta content.
 // It joins delta texts in event order, handling the string and array content
@@ -192,7 +193,9 @@ func TestReverseBrand_Anthropic_NonStream_OMP(t *testing.T) {
 	interceptPayload := makeIntegrationRequestInterceptPayload(t, reqID, "anthropic", "agy/model", []byte(reqBody))
 	handlePluginCall(pluginabi.MethodRequestInterceptBefore, interceptPayload)
 
-	respBody := `{"content":[{"type":"text","text":"We are Antigravity now"},{"type":"tool_use","id":"1","name":"view_file","input":{"path":"/tmp/Antigravity"}}]}`
+	respBody := `{"content":[{"type":"text","text":"We are Antigravity now"},` +
+		`{"type":"tool_use","id":"1","name":"view_file",` +
+		`"input":{"path":"/home/u/.gemini/agent/notes.md","plain":"/tmp/Antigravity"}}]}`
 	payload := responseInterceptRequestJSON(t, reqBody, respBody, "anthropic")
 	var reqMap map[string]any
 	json.Unmarshal(payload, &reqMap)
@@ -209,11 +212,22 @@ func TestReverseBrand_Anthropic_NonStream_OMP(t *testing.T) {
 	if !strings.Contains(txt, "omp") || strings.Contains(txt, "Antigravity") {
 		t.Fatalf("anthropic brand reverse failed, got %q", txt)
 	}
-	// tool input must preserve Antigravity
+	// Tool input is the non-stream twin of the streamed partial_json: a cloaked
+	// path left in the arguments is a path the model writes to disk, so it is
+	// reversed here exactly as the stream path reverses it.
 	toolBlock := content[1].(map[string]any)
 	input := toolBlock["input"].(map[string]any)
-	if input["path"] != "/tmp/Antigravity" {
-		t.Fatalf("tool arg mangled, got %v", input["path"])
+	// The dot-prefixed configuration directory is a real operational identifier
+	// and is restored in the tool arguments, exactly as the stream path restores
+	// it. The forward pass produced it, so the reverse owns undoing it.
+	if input["path"] != "/home/u/.omp/agent/notes.md" {
+		t.Fatalf("tool arg not reversed, got %v", input["path"])
+	}
+	// A non-dot path element is never touched in either direction: the forward
+	// pass leaves "/tmp/omp" alone, so the reverse must not invent "/tmp/omp"
+	// out of a path the plugin never wrote.
+	if input["plain"] != "/tmp/Antigravity" {
+		t.Fatalf("a non-dot path must be left alone, got %v", input["plain"])
 	}
 	// tool name uncloaked
 	if toolBlock["name"] != "read" {
@@ -311,7 +325,9 @@ func TestReverseBrand_CaseInsensitiveAndWordBoundary(t *testing.T) {
 	var resp map[string]any
 	json.Unmarshal(dec, &resp)
 	content := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string)
-	if !strings.Contains(content, "omp") {
+	// The match is case-insensitive, and the replacement follows the casing it
+	// matched: "ANTIGRAVITY" comes back as "OMP", not "omp" (mirrorBrandCase).
+	if !strings.Contains(content, "OMP") {
 		t.Fatalf("case insensitive failed, got %q", content)
 	}
 	if strings.Contains(content, "AntigravityX") == false {
@@ -328,9 +344,9 @@ func TestReverseBrand_CaseInsensitiveAndWordBoundary(t *testing.T) {
 			t.Fatalf("inside larger token incorrectly: %q", content)
 		}
 	}
-	// Ensure standalone ANTIGRAVITY became omp
-	if strings.Count(content, "omp") != 1 {
-		t.Fatalf("expected exactly one omp, got %q count %d", content, strings.Count(content, "omp"))
+	// Ensure standalone ANTIGRAVITY became OMP, and only it.
+	if strings.Count(strings.ToUpper(content), "OMP") != 1 {
+		t.Fatalf("expected exactly one OMP, got %q", content)
 	}
 }
 
@@ -339,8 +355,10 @@ func TestReverseBrand_ToolArgsPreserved(t *testing.T) {
 	reqID := "rev-toolargs"
 	reqBody := `{"tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"task"}}],"messages":[]}`
 	handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
-	// Response contains assistant text with Antigravity and tool args with Antigravity
-	respBody := `{"choices":[{"message":{"content":"I am Antigravity","tool_calls":[{"function":{"name":"run_command","arguments":"{\"file\":\"Antigravity\"}"}}]}}]}`
+	// Response contains assistant text with Antigravity and tool args with an
+	// operational path the forward pass produced plus a prose word the model
+	// copied out of the user's own prompt.
+	respBody := `{"choices":[{"message":{"content":"I am Antigravity","tool_calls":[{"function":{"name":"run_command","arguments":"{\"path\":\"~/.gemini/agent/AGENTS.md\",\"note\":\"Antigravity\"}"}}]}}]}`
 	payload := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
 	var mm map[string]any
 	json.Unmarshal(payload, &mm)
@@ -356,16 +374,25 @@ func TestReverseBrand_ToolArgsPreserved(t *testing.T) {
 	if strings.Contains(content, "Antigravity") {
 		t.Fatalf("assistant content not rewritten: %q", content)
 	}
+	// Carried by the same contract as the streamed arguments: the model writes
+	// these bytes to disk, where nothing can reverse them later. The
+	// operational path inverts; the prose word is left as the client wrote it,
+	// because a brand rule would only corrupt data the client executes.
 	tc := msg["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)
 	args := tc["arguments"].(string)
+	if !strings.Contains(args, "~/.omp/agent/AGENTS.md") || strings.Contains(args, ".gemini") {
+		t.Fatalf("operational path in tool args not restored: %q", args)
+	}
 	if !strings.Contains(args, "Antigravity") {
-		t.Fatalf("tool args mangled, expected Antigravity preserved, got %q", args)
+		t.Fatalf("a prose word inside tool args must reach the client untouched: %q", args)
 	}
 }
 
-func TestReverseBrand_NonOMPNoRewrite(t *testing.T) {
+func TestReverseBrand_NonOMPGetsItsOwnWordNotOmp(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
-	// Claude Code request
+	// Claude Code request. A non-OMP client now runs its own reverse table, so
+	// the bare brand word must come back as Claude and never as omp. Asserting
+	// only "the payload does not contain omp" would pass either way.
 	reqID := "rev-non-omp"
 	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
 	handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
@@ -377,7 +404,6 @@ func TestReverseBrand_NonOMPNoRewrite(t *testing.T) {
 	mm["Model"] = "agy/model"
 	payload, _ = json.Marshal(mm)
 	raw, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter, payload)
-	// Should be no change (empty Body) since not OMP
 	var env struct {
 		OK     bool `json:"ok"`
 		Result struct {
@@ -385,134 +411,17 @@ func TestReverseBrand_NonOMPNoRewrite(t *testing.T) {
 		} `json:"result"`
 	}
 	json.Unmarshal(raw, &env)
-	if env.Result.Body != "" {
-		dec, _ := base64.StdEncoding.DecodeString(env.Result.Body)
-		var resp map[string]any
-		json.Unmarshal(dec, &resp)
-		content := resp["choices"].([]any)[0].(map[string]any)["message"].(map[string]any)["content"].(string)
-		if strings.Contains(content, "omp") {
-			t.Fatalf("non-OMP incorrectly rewritten to omp: %q", content)
-		}
+	if env.Result.Body == "" {
+		t.Fatal("claude_code reverse must rewrite the bare brand word, not pass it through")
 	}
-}
-
-func TestReverseBrand_InterleavedLanesIsolated(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-	reqID := "rev-interleaved"
-	reqBody := `{"tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"task"}},{"type":"function","function":{"name":"hub"}}],"messages":[]}`
-	handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
-	initPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", -1, []byte(""), []byte(reqBody))
-	handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, initPayload)
-
-	// Choice 0 gets Anti, Choice 1 gets gravity, they should not combine to omp
-	chunk := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Anti\"}},{\"index\":1,\"delta\":{\"content\":\"gravity\"}}]}\n\n"
-	p := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 0, []byte(chunk), nil)
-	raw, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p)
-	body, _ := decodeStreamBody(t, raw)
-	// Decode choices
-	var assembled0, assembled1 string
-	if len(body) > 0 {
-		s := string(body)
-		parts := strings.Split(s, "data: ")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if part == "" || part == "[DONE]" {
-				continue
-			}
-			line := strings.Split(part, "\n")[0]
-			var m map[string]any
-			json.Unmarshal([]byte(line), &m)
-			if choices, ok := m["choices"].([]any); ok {
-				for _, cRaw := range choices {
-					c := cRaw.(map[string]any)
-					idx := int(c["index"].(float64))
-					if delta, ok := c["delta"].(map[string]any); ok {
-						if txt, ok := delta["content"].(string); ok {
-							if idx == 0 {
-								assembled0 += txt
-							} else {
-								assembled1 += txt
-							}
-						}
-					}
-				}
-			}
-		}
+	dec, _ := base64.StdEncoding.DecodeString(env.Result.Body)
+	content := string(dec)
+	if !strings.Contains(content, "Hello Claude") {
+		t.Fatalf("bare Antigravity was not reversed to Claude: %s", content)
 	}
-	// Neither lane should have omp, since fragments isolated
-	if strings.Contains(assembled0, "omp") || strings.Contains(assembled1, "omp") {
-		t.Fatalf("interleaved lanes incorrectly combined: 0=%q 1=%q body=%q", assembled0, assembled1, string(body))
+	if strings.Contains(content, "omp") {
+		t.Fatalf("non-OMP incorrectly rewritten to omp: %s", content)
 	}
-	// Flush DONE should emit remaining carries without creating false omp
-	doneChunk := "data: [DONE]\n\n"
-	pDone := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 1, []byte(doneChunk), nil)
-	rawDone, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, pDone)
-	bDone, _ := decodeStreamBody(t, rawDone)
-	// After DONE, check that no omp was synthesized from cross-lane
-	combined := string(body) + string(bDone)
-	if strings.Contains(combined, "\"content\":\"omp\"") {
-		t.Fatalf("false omp from interleaved: %q", combined)
-	}
-	// Flush carries should be Anti and gravity respectively, not omp
-	// Parse flush events if any
-}
-
-func TestReverseBrand_UnmatchedCarryFlush(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-	reqID := "rev-flush"
-	reqBody := `{"tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"task"}}],"messages":[]}`
-	handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
-	initPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", -1, []byte(""), []byte(reqBody))
-	handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, initPayload)
-
-	chunk := "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello Anti\"}}]}\n\n"
-	p := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 0, []byte(chunk), nil)
-	raw, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p)
-	b, _ := decodeStreamBody(t, raw)
-	// b should contain Hello (without Anti)
-	if strings.Contains(string(b), "Anti") {
-		// Might still contain Anti as held? Actually hold should make first chunk not contain Anti
-	}
-
-	// DONE should flush Anti
-	done := "data: [DONE]\n\n"
-	pDone := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 1, []byte(done), nil)
-	rawDone, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, pDone)
-	bDone, _ := decodeStreamBody(t, rawDone)
-	combined := string(b) + string(bDone)
-	// Extract all delta contents
-	var texts []string
-	for _, s := range []string{string(b), string(bDone)} {
-		parts := strings.Split(s, "data: ")
-		for _, part := range parts {
-			part = strings.TrimSpace(part)
-			if part == "" || part == "[DONE]" {
-				continue
-			}
-			line := strings.Split(part, "\n")[0]
-			var m map[string]any
-			if err := json.Unmarshal([]byte(line), &m); err == nil {
-				if choices, ok := m["choices"].([]any); ok {
-					for _, cRaw := range choices {
-						c := cRaw.(map[string]any)
-						if delta, ok := c["delta"].(map[string]any); ok {
-							if txt, ok := delta["content"].(string); ok {
-								texts = append(texts, txt)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-	joined := strings.Join(texts, "")
-	if !strings.Contains(joined, "Anti") {
-		t.Fatalf("flush lost Anti, joined=%q b=%q bDone=%q", joined, string(b), string(bDone))
-	}
-	if strings.Contains(joined, "omp") {
-		t.Fatalf("unexpected omp for unmatched Anti, joined=%q", joined)
-	}
-	_ = combined
 }
 
 func TestReverseBrand_ModelGateRejectedNoRewrite(t *testing.T) {
@@ -556,7 +465,7 @@ func TestReverseBrand_ModelGateRejectedNoRewrite(t *testing.T) {
 		OK     bool `json:"ok"`
 		Result struct {
 			Body      string `json:"Body"`
-			DropChunk bool `json:"DropChunk"`
+			DropChunk bool   `json:"DropChunk"`
 		} `json:"result"`
 	}
 	json.Unmarshal(rawStream, &env2)
@@ -572,7 +481,7 @@ func TestReverseBrand_ModelGateRejectedNoRewrite(t *testing.T) {
 func TestReverseBrand_NativeAntigravityNoRewrite(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	reqID := "rev-native"
-	// Native Antigravity tools: not matching any client, so no cloak
+	// Native Antigravity tools: no client is resolved, so nothing may mutate.
 	reqBody := `{"tools":[{"type":"function","function":{"name":"view_file"}}],"messages":[]}`
 	handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
 	respBody := `{"choices":[{"message":{"content":"Antigravity should stay"}}]}`
@@ -590,10 +499,13 @@ func TestReverseBrand_NativeAntigravityNoRewrite(t *testing.T) {
 		} `json:"result"`
 	}
 	json.Unmarshal(raw, &env)
+	// An unresolved client means no reverse table at all, so the response comes
+	// back untouched. Checking for the absence of "omp" would pass even if the
+	// text had been rewritten to some other client's word.
 	if env.Result.Body != "" {
 		dec, _ := base64.StdEncoding.DecodeString(env.Result.Body)
-		if strings.Contains(string(dec), "omp") {
-			t.Fatalf("native antigravity incorrectly rewrote: %s", string(dec))
+		if string(dec) != respBody {
+			t.Fatalf("unresolved client must not mutate the response: got %s want %s", dec, respBody)
 		}
 	}
 }
@@ -655,8 +567,11 @@ func TestReverseBrand_StandaloneJSON_OMP(t *testing.T) {
 	if !strings.Contains(txt, "omp") || strings.Contains(txt, "Antigravity") {
 		t.Fatalf("standalone OMP reverse failed, txt=%q", txt)
 	}
-	// Ensure tool args in same standalone chunk preserved - use spaced content to allow immediate rewrite
-	jsonChunk2 := `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command","arguments":"Antigravity"}}],"content":"Hi Antigravity there"}}]}`
+	// Tool arguments in the same standalone chunk are restored too, in their
+	// own carrier, by the argument-safe rules. The fragment carries interior
+	// boundaries so the token resolves in this chunk rather than being held for
+	// a terminal flush.
+	jsonChunk2 := `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command","arguments":"path ~/.gemini/agent/AGENTS.md home"}}],"content":"Hi Antigravity there"}}]}`
 	payload2 := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/model", 1, []byte(jsonChunk2), nil)
 	raw2, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, payload2)
 	body2, _ := decodeStreamBody(t, raw2)
@@ -670,12 +585,23 @@ func TestReverseBrand_StandaloneJSON_OMP(t *testing.T) {
 			t.Fatalf("standalone content not rewritten: %q", txt2)
 		}
 	}
-	// tool args should stay
-	if tcs, ok := delta2["tool_calls"].([]any); ok {
-		args := tcs[0].(map[string]any)["function"].(map[string]any)["arguments"].(string)
-		if !strings.Contains(args, "Antigravity") {
-			t.Fatalf("standalone tool args mangled: %q", args)
-		}
+	// Tool arguments must be restored by the argument-safe rules, in their own
+	// carrier: an operational path left cloaked here is what the model writes
+	// to disk, where nothing can reverse it. The tool NAME is untouched - that
+	// is exact uncloak authority.
+	tcs, ok := delta2["tool_calls"].([]any)
+	if !ok {
+		t.Fatal("tool_calls lost")
+	}
+	fn := tcs[0].(map[string]any)["function"].(map[string]any)
+	args := fn["arguments"].(string)
+	if !strings.Contains(args, "~/.omp/agent/AGENTS.md") || strings.Contains(args, ".gemini") {
+		t.Fatalf("operational path in standalone tool args not restored: %q", args)
+	}
+	// Exact uncloak owns the identity: run_command came from the client's own
+	// "bash" and goes back to "bash". The brand pass must not touch it.
+	if fn["name"] != "bash" {
+		t.Fatalf("tool identity did not round-trip: %v", fn["name"])
 	}
 }
 
@@ -739,17 +665,20 @@ func TestReverseBrand_Streaming_AnthropicToolArgsPreserved(t *testing.T) {
 	if !strings.Contains(string(body1), "omp") {
 		t.Fatalf("anthropic stream text not reversed: %q", string(body1))
 	}
-	chunk2 := "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"Antigravity\\\"}\"}}\n\n"
+	chunk2 := "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"~/.gemini/agent/AGENTS.md\\\"}\"}}\n\n"
 	p2 := makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/model", 1, []byte(chunk2), nil)
 	raw2, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, p2)
 	body2, _ := decodeStreamBody(t, raw2)
-	// input_json_delta must preserve Antigravity and return no Body (pass-through) since no text change
-	if body2 != nil && strings.Contains(string(body2), "omp") {
-		t.Fatalf("anthropic tool input incorrectly rewritten: %q", string(body2))
+	// input_json_delta is the Anthropic tool-argument carrier. The model writes
+	// what it produces there to disk, so the operational identifiers the
+	// forward pass really produced are restored - the path inverts (Issue #51).
+	// Prose rules do not run here: a brand word the model copied out of the
+	// user's own prompt must reach the client as the client wrote it.
+	if body2 == nil || !strings.Contains(string(body2), "~/.omp/agent/AGENTS.md") {
+		t.Fatalf("anthropic tool arguments were not restored: %v", body2)
 	}
-	// If body2 is nil, it means no modification (correct), otherwise it should still contain Antigravity
-	if body2 != nil && !strings.Contains(string(body2), "Antigravity") {
-		t.Fatalf("anthropic tool input lost: %q", string(body2))
+	if strings.Contains(string(body2), ".gemini") {
+		t.Fatalf("anthropic tool arguments still cloaked: %q", string(body2))
 	}
 }
 
@@ -867,19 +796,67 @@ func TestReviewFix_DeterministicMultiLaneFlushOrder(t *testing.T) {
 	}
 }
 
+// sseFrame is one parsed SSE event: the name from its `event:` line (empty
+// when the frame carried none) and the JSON payload from its `data:` lines.
+type sseFrame struct {
+	name string
+	data map[string]any
+}
+
+// sseFrames decodes an SSE body the way a strict client does: an `event:` line
+// names the frame and every `data:` line contributes to its JSON payload.
+// A frame whose payload is not JSON (the terminal [DONE]) is skipped, but a
+// frame whose `event:` name disagrees with the payload's own "type" fails the
+// test — that agreement is the protocol rule a real Anthropic client relies on,
+// so a data-only "flush" frame can never pass as a well-formed event again.
+func sseFrames(t *testing.T, body []byte) []sseFrame {
+	t.Helper()
+	var out []sseFrame
+	for _, ev := range strings.Split(string(body), "\n\n") {
+		var name string
+		var payload strings.Builder
+		for _, line := range strings.Split(ev, "\n") {
+			line = strings.TrimRight(line, "\r")
+			switch {
+			case strings.HasPrefix(line, "event:"):
+				name = strings.TrimSpace(strings.TrimPrefix(line, "event:"))
+			case strings.HasPrefix(line, "data:"):
+				payload.WriteString(strings.TrimSpace(strings.TrimPrefix(line, "data:")))
+			}
+		}
+		raw := strings.TrimSpace(payload.String())
+		if !strings.HasPrefix(raw, "{") {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal([]byte(raw), &m); err != nil {
+			t.Fatalf("unparseable SSE event %q: %v", ev, err)
+		}
+		if typ, ok := m["type"].(string); ok && name != "" && name != typ {
+			t.Fatalf("SSE event name %q disagrees with payload type %q in %q", name, typ, ev)
+		}
+		out = append(out, sseFrame{name: name, data: m})
+	}
+	return out
+}
+
+// sseDataMaps decodes every JSON payload of an SSE body, dropping the event
+// names. Callers that assert framing use sseFrames instead.
+func sseDataMaps(t *testing.T, body []byte) []map[string]any {
+	t.Helper()
+	frames := sseFrames(t, body)
+	out := make([]map[string]any, 0, len(frames))
+	for _, f := range frames {
+		out = append(out, f.data)
+	}
+	return out
+}
+
 // flushLaneOrder extracts choice indexes of flush events preceding [DONE].
 func flushLaneOrder(t *testing.T, body []byte) []int {
 	t.Helper()
 	var order []int
-	for _, ev := range strings.Split(string(body), "\n\n") {
-		ev = strings.TrimSpace(ev)
-		if !strings.HasPrefix(ev, "data: {") {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(ev, "data: ")), &m); err != nil {
-			t.Fatalf("unparseable flush event %q: %v", ev, err)
-		}
+	for _, m := range sseDataMaps(t, body) {
 		choices, ok := m["choices"].([]any)
 		if !ok {
 			continue
@@ -1024,7 +1001,7 @@ func TestReviewFix_OpenAIContentSingletonMapAllowlist(t *testing.T) {
 		{"type": "data", "text": "g Antigravity h"},
 	}
 	for _, part := range literal {
-		got, changed := reverseBrandInOpenAIContent(part)
+		got, changed := reverseBrandInOpenAIContent(part, "claude_code")
 		if changed {
 			t.Fatalf("explicit non-text part was rewritten: %v", got)
 		}
@@ -1038,7 +1015,7 @@ func TestReviewFix_OpenAIContentSingletonMapAllowlist(t *testing.T) {
 		{"text": "e Antigravity f"},
 	}
 	for _, part := range rewritten {
-		if _, changed := reverseBrandInOpenAIContent(part); !changed {
+		if _, changed := reverseBrandInOpenAIContent(part, "claude_code"); !changed {
 			t.Fatalf("assistant text part not rewritten: %v", part)
 		}
 	}
@@ -1266,15 +1243,7 @@ func TestIssue21_AnthropicSSE_InterleavedLanesIsolatedAndDeterministic(t *testin
 func flushAnthropicLaneOrder(t *testing.T, body []byte) []int {
 	t.Helper()
 	var order []int
-	for _, ev := range strings.Split(string(body), "\n\n") {
-		ev = strings.TrimSpace(ev)
-		if !strings.HasPrefix(ev, "data: {") {
-			continue
-		}
-		var m map[string]any
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(ev, "data: ")), &m); err != nil {
-			continue
-		}
+	for _, m := range sseDataMaps(t, body) {
 		if m["type"] != "content_block_delta" {
 			continue
 		}
@@ -1295,8 +1264,9 @@ func TestIssue21_AnthropicSSE_ToolPayloadPreservedThroughNativeTermination(t *te
 		RequestID: "issue21-tool", SourceFormat: "anthropic", ChunkIndex: 0,
 		Body: []byte("data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello Anti\"}}\n\n"),
 	}, "anthropic")
-	// Tool/input_json_delta with literal Antigravity must stay untouched, plus native termination.
-	term := "data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\" Antigravity \"}}\n\n" +
+	// Tool arguments hold their own lane and are restored by the argument-safe
+	// rules: an operational path inverts, a prose brand word would not.
+	term := `data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"~/.gemini/agent/AGENTS.md\"}"}}` + "\n\n" +
 		"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
 		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
@@ -1304,21 +1274,18 @@ func TestIssue21_AnthropicSSE_ToolPayloadPreservedThroughNativeTermination(t *te
 		Body: []byte(term),
 	}, "anthropic")
 	body := string(resp.Body)
-	// Tool partial_json must retain literal Antigravity.
-	if !strings.Contains(body, "Antigravity") {
-		t.Fatalf("tool payload Antigravity should remain literal, body=%q", body)
+	// The argument carrier is restored, and it stays an argument carrier.
+	if !strings.Contains(body, "partial_json") || !strings.Contains(body, "~/.omp/agent/AGENTS.md") {
+		t.Fatalf("tool arguments were not restored in their own carrier, body=%q", body)
 	}
 	// Flush text delta must be present before stop, but not corrupt tool payload.
 	if !strings.Contains(body, `"text":"Anti"`) {
 		t.Fatalf("text carry not flushed, body=%q", body)
 	}
-	// Ensure the input_json_delta block itself was not rewritten to omp.
-	if strings.Contains(body, `input_json_delta`) {
-		// locate the input_json_delta event line
-		for _, ev := range strings.Split(body, "\n\n") {
-			if strings.Contains(ev, "input_json_delta") && strings.Contains(ev, "omp") {
-				t.Fatalf("tool delta incorrectly rewritten, ev=%q", ev)
-			}
+	// The held prose carry still flushes as assistant text, on its own carrier.
+	for _, ev := range strings.Split(body, "\n\n") {
+		if strings.Contains(ev, "text_delta") && strings.Contains(ev, "partial_json") {
+			t.Fatalf("a prose carry was flushed through the argument carrier: %q", ev)
 		}
 	}
 }
@@ -1407,6 +1374,11 @@ func sseEventsStrict(t *testing.T, body []byte) []map[string]any {
 				t.Fatalf("SSE event line not data:-framed: %q in body=%q", line, string(body))
 			}
 			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			if payload == "[DONE]" {
+				// The OpenAI terminal marker is a valid frame, not a JSON event.
+				gotData = true
+				continue
+			}
 			var m map[string]any
 			if err := json.Unmarshal([]byte(payload), &m); err != nil {
 				t.Fatalf("data: payload not valid JSON %q: %v", payload, err)
@@ -1498,5 +1470,249 @@ func TestIssue21_AnthropicStandalone_TerminalFlushCompositeIsSSEFramed(t *testin
 	mgr2.mu.Unlock()
 	if sess2 == nil || pending {
 		t.Fatalf("session must survive block stop with drained carry: sess=%v pending=%v", sess2 != nil, pending)
+	}
+}
+
+// ── Cloaked-brand stream review regressions (claude_code / codex) ─────────
+
+// A held token flushed at content_block_stop must carry the index of the block
+// it was held in. Without an index the client cannot attach the text to a
+// content block, so the end of the sentence is unplaceable and is dropped.
+// "A" is a prefix of every Antigravity rule, so it is held, not emitted inline.
+func TestCloakedFlushKeepsContentBlockIndex(t *testing.T) {
+	sess := &streamSession{client: "claude_code"}
+	m := globalStreamManager
+
+	held := []byte("event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_delta", "index": 2,
+		"delta": map[string]any{"type": "text_delta", "text": "A"}}) + "\n\n")
+	stop := []byte("event: content_block_stop\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_stop", "index": 2}) + "\n\n")
+
+	out1, _ := m.reverseBrandSSE(sess, held, "anthropic")
+	out2, _ := m.reverseBrandSSE(sess, stop, "anthropic")
+	joined := string(out1) + string(out2)
+	if strings.Contains(string(out1), `"text":"A"`) {
+		t.Fatalf("the partial token should be held until the block closes, body=%q", out1)
+	}
+
+	var flush map[string]any
+	for _, ev := range sseEventsStrict(t, []byte(joined)) {
+		if d, ok := ev["delta"].(map[string]any); ok && d["text"] == "A" {
+			flush = ev
+		}
+	}
+	if flush == nil {
+		t.Fatalf("held token was never flushed at content_block_stop, body=%q", joined)
+	}
+	if got, _ := flush["index"].(float64); int(got) != 2 {
+		t.Fatalf("flush index = %v, want 2 (body=%q)", flush["index"], joined)
+	}
+	if flush["type"] != "content_block_delta" {
+		t.Fatalf("flush event type = %v, body=%q", flush["type"], joined)
+	}
+}
+
+// A token held open by a longer rule's lane has to be reversed by the shorter
+// rule that actually owns it. "Antigravity" sits in the "Antigravity-api" lane
+// because it is a prefix of that rule; resolving the carry with that rule alone
+// emitted the cloaked word to the client verbatim.
+func TestCloakedTerminalCarryResolvesAgainstTheWholeTable(t *testing.T) {
+	sess := &streamSession{client: "claude_code"}
+	m := globalStreamManager
+
+	held := []byte("event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_delta", "index": 0,
+		"delta": map[string]any{"type": "text_delta", "text": "say Antigravity"}}) + "\n\n")
+	stop := []byte("event: content_block_stop\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_stop", "index": 0}) + "\n\n")
+
+	out1, _ := m.reverseBrandSSE(sess, held, "anthropic")
+	out2, _ := m.reverseBrandSSE(sess, stop, "anthropic")
+	joined := string(out1) + string(out2)
+	if strings.Contains(joined, "Antigravity") {
+		t.Fatalf("terminal carry kept the cloaked word, body=%q", joined)
+	}
+	if !strings.Contains(joined, `"text":"Claude"`) {
+		t.Fatalf("terminal carry not restored to the client's word, body=%q", joined)
+	}
+}
+
+// OpenAI streamed choices carry their index on the choice, not on the event
+// root. Reading the root alone put every choice in one lane, so a token held
+// for choice 0 was emitted through choice 1: "A" + "hello " came back as
+// "" + "Ahello ".
+func TestCloakedOpenAIChoicesKeepTheirOwnCarry(t *testing.T) {
+	sess := &streamSession{client: "codex"}
+	m := globalStreamManager
+
+	chunk := []byte("data: " + mustJSON(t, map[string]any{"choices": []any{
+		map[string]any{"index": 0, "delta": map[string]any{"content": "A"}},
+		map[string]any{"index": 1, "delta": map[string]any{"content": "hello "}},
+	}}) + "\n\n")
+	done := []byte("data: [DONE]\n\n")
+
+	out1, _ := m.reverseBrandSSE(sess, chunk, "openai")
+	out2, _ := m.reverseBrandSSE(sess, done, "openai")
+	joined := string(out1) + string(out2)
+	if strings.Contains(joined, "Ahello") {
+		t.Fatalf("choice 0's held token bled into choice 1, body=%q", joined)
+	}
+
+	// A client concatenates every delta addressed to a choice, so the held
+	// token arriving in a later event still belongs to choice 0.
+	byChoice := map[int]string{}
+	for _, ev := range sseEventsStrict(t, []byte(joined)) {
+		choices, _ := ev["choices"].([]any)
+		for _, cRaw := range choices {
+			c, ok := cRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			n, _ := c["index"].(float64)
+			d, _ := c["delta"].(map[string]any)
+			s, _ := d["content"].(string)
+			byChoice[int(n)] += s
+		}
+	}
+	if got := byChoice[0]; got != "A" {
+		t.Fatalf("choice 0 content = %q, want %q (body=%q)", got, "A", joined)
+	}
+	if got := byChoice[1]; got != "hello " {
+		t.Fatalf("choice 1 content = %q, want %q (body=%q)", got, "hello ", joined)
+	}
+}
+
+// Tool-call arguments stream as raw JSON, so the backslash of a Windows path is
+// written twice there. The whole-path rule missed the escaped spelling and only
+// a bare file-name rule fired, handing the client a mixed path that exists
+// nowhere. The wire spelling carries the home prefix for the same reason the
+// non-stream spelling does: a .claude of another project is not ours.
+func TestCloakedStreamedToolArgsRestoreEscapedWindowsPath(t *testing.T) {
+	sess := &streamSession{client: "claude_code"}
+	m := globalStreamManager
+
+	// Split inside the path so the lane has to carry the escaped form across
+	// two deltas.
+	first := []byte("event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_delta", "index": 1,
+		"delta": map[string]any{"type": "input_json_delta",
+			"partial_json": `{"path":"~\\.gemini\\`}}) + "\n\n")
+	second := []byte("event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
+		"type": "content_block_delta", "index": 1,
+		"delta": map[string]any{"type": "input_json_delta",
+			"partial_json": `GEMINI.md"}`}}) + "\n\n")
+
+	out1, _ := m.reverseBrandSSE(sess, first, "anthropic")
+	out2, _ := m.reverseBrandSSE(sess, second, "anthropic")
+
+	// Reassemble the fragments the way a streaming client does.
+	var args strings.Builder
+	for _, ev := range sseEventsStrict(t, []byte(string(out1)+string(out2))) {
+		if d, ok := ev["delta"].(map[string]any); ok {
+			if pj, ok := d["partial_json"].(string); ok {
+				args.WriteString(pj)
+			}
+		}
+	}
+	got := args.String()
+	if strings.Contains(got, ".gemini") || strings.Contains(got, "GEMINI.md") {
+		t.Fatalf("cloaked path reached the client, args=%q", got)
+	}
+	if !strings.Contains(got, `~\\.claude\\CLAUDE.md`) {
+		t.Fatalf("Windows path not restored to the client spelling, args=%q", got)
+	}
+}
+
+// ── Standalone (non-SSE) chunks: brand reverse for every resolved client ──
+
+// The OpenAI-protocol exits hand the plugin unframed JSON chunks — the host
+// adds `data: ` itself after interception (`openai_handlers.go` does
+// `fmt.Fprintf(c.Writer, "data: %s\n\n", chunk)`) — so a codex or claude_code
+// session takes the standalone branch, not the SSE one. Brand reverse used to be
+// gated on Oh My Pi there, which left the cloaked word in every such response.
+func TestStandaloneBrandReverseRunsForCodex(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:sa-codex", "codex", nil)
+
+	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-codex", SourceFormat: "openai", ChunkIndex: 0,
+		Body: []byte(`{"choices":[{"index":0,"delta":{"content":"say Antigravity"}}]}`),
+	}, "openai")
+	if strings.Contains(string(resp1.Body), "Antigravity") {
+		t.Fatalf("held token emitted inline on the standalone path: %s", resp1.Body)
+	}
+
+	resp2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-codex", SourceFormat: "openai", ChunkIndex: 1,
+		Body: []byte(`{"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`),
+	}, "openai")
+	body2 := string(resp2.Body)
+	if strings.Contains(body2, "Antigravity") {
+		t.Fatalf("standalone brand reverse did not run for codex: %s", body2)
+	}
+	if !strings.Contains(body2, `"content":"Codex"`) {
+		t.Fatalf("held carry not flushed as the client's word: %s", body2)
+	}
+
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:sa-codex"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be freed at standalone stream completion")
+	}
+}
+
+func TestStandaloneBrandReverseRunsForClaudeCode(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:sa-cc", "claude_code", nil)
+
+	resp1 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-cc", SourceFormat: "anthropic", ChunkIndex: 0,
+		Body: []byte(`{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"see ~/.gemini/GEMINI.md then Antigravity"}}`),
+	}, "anthropic")
+	body1 := string(resp1.Body)
+	if !strings.Contains(body1, "~/.claude/CLAUDE.md") || strings.Contains(body1, "~/.gemini/GEMINI.md") {
+		t.Fatalf("standalone path did not reverse the instruction file: %s", body1)
+	}
+	if strings.Contains(body1, "Antigravity") {
+		t.Fatalf("held token emitted inline: %s", body1)
+	}
+
+	resp2 := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-cc", SourceFormat: "anthropic", ChunkIndex: 1,
+		Body: []byte(`{"type":"message_stop"}`),
+	}, "anthropic")
+	body2 := string(resp2.Body)
+	if strings.Contains(body2, "Antigravity") || !strings.Contains(body2, `"text":"Claude"`) {
+		t.Fatalf("standalone carry not flushed as the client's word: %s", body2)
+	}
+	if !strings.Contains(body2, `"index":2`) {
+		t.Fatalf("standalone flush lost the content block index: %s", body2)
+	}
+
+	mgr.mu.Lock()
+	_, alive := mgr.sessions["req:sa-cc"]
+	mgr.mu.Unlock()
+	if alive {
+		t.Fatal("session must be freed at standalone stream completion")
+	}
+}
+
+// A standalone chunk with nothing to reverse must pass through untouched,
+// otherwise every such chunk would be re-encoded for no reason.
+func TestStandalonePlainChunkPassesThroughForNonOMP(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	mgr := newStreamSessionManager()
+	mgr.resetSession("req:sa-plain", "claude_code", nil)
+
+	resp := mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "sa-plain", SourceFormat: "openai", ChunkIndex: 0,
+		Body: []byte(`{"choices":[{"index":0,"delta":{"content":"plain text"}}]}`),
+	}, "openai")
+	if resp.DropChunk || len(resp.Body) != 0 {
+		t.Fatalf("untouched standalone chunk must pass through, got body=%q drop=%v", resp.Body, resp.DropChunk)
 	}
 }

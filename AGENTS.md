@@ -8,11 +8,34 @@ building, or debugging. Written for a future agent session.
 A CLIProxyAPI v7 dynamic plugin (buildmode=c-shared .so) that disguises
 coding-CLI traffic as Antigravity. Two jobs:
 
-1. Brand rewrite: replace OpenCode / Codex / Claude Code with Antigravity
-   in the request `system` field and `system`-role messages.
+1. Brand rewrite: replace the resolved client's own identity words with
+   Antigravity in the request `system` field and `system`-role messages, then
+   restore them on the way back. The forward tables are declared per client
+   (`brandMappingsByClient` in `main.go`); `claude_code` and `codex` register
+   their reverse tables in `reverseBrandMappingsByClient`, while Oh My Pi
+   inverts through the protected `ompProtectedReverseTable` that
+   `brandReverseTableFor` selects. The resolved client selects exactly one and
+   no other, so an approved brand target inverts back to that same client.
+   Adding a client (opencode, cursor, ...) is one forward table plus one
+   registry line, and a reverse authority. A competitor product name owns no
+   table, so a request that merely mentions one is left
+   alone. Two carve-outs: a client's opening identity sentence is replaced
+   **whole** (terminal, so it needs no reverse), and one approved deliberate
+   one-way convention - the bare `CLAUDE.md` -> `AGENTS.md` filename rule
+   owned by `claude_code`. Its target `AGENTS.md` is the neutral context
+   filename every client already reads, so it is never reverse-restored as a
+   bare filename; the path-qualified `.gemini/...` restoration is unaffected.
+   Two approved non-bijective pairs (SDK, Workflow) are named in `CONTEXT.md` §1.
+   **The detailed Brand Rewriting contract - every forward/reverse rule, the
+   non-bijective pairs, the one-way filename convention, the exclusions and the
+   whole-segment path rules - is `CONTEXT.md` §1, which is canonical; `main.go`'s
+   tables are the source of truth for behaviour.**
 2. Tool-name cloaking: rename a client's native tool names to Antigravity tool
    names on the way up (request), then restore them on the way back (response +
-   stream), so the client still sees its own tool names.
+   stream), so the client still sees its own tool names. The declaration and
+   history shapes are read explicitly, never guessed: a nested-only reader is a
+   silent uncloaked-tool bug. Provider built-ins (`web_search`, `mcp`, ...) own
+   no client identity.
 
 - Module: github.com/monet88/antigravity-cloak
 - Go: 1.26.0. Depends on github.com/router-for-me/CLIProxyAPI/v7 v7.2.143
@@ -91,7 +114,7 @@ exact key string back to the client and tool names are case-sensitive.
 Supported clients:
 - `claude_code` (PascalCase: Core tools `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `WebSearch`, `WebFetch` map to proven Antigravity equivalents. Tier-2 subagent control, planning, and MCP-resource tools cloak to shared aliases `wp_*`, with unknown/MCP tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
 - `codex` (snake_case: `exec`, `exec_command`, `web_search`, `request_user_input`, `collaboration__spawn_agent`. In `defaultCloakTables["codex"]`, only code-mode entry point `exec` and direct AGY role targets are kept so `defaultUncloakTables` remains injective at `init()`. Shell-mode `exec_command -> run_command`, helpers (`apply_patch`, `write_stdin`, `view_image`), and collaboration tools cloak to shared aliases `wp_*` via `codexSharedAliases` in the request-scoped alias plan. Dynamic `mcp__*` and unknown tools receive deterministic fallback aliases `wp_ext_<hash>`. Response and stream reversal restores exact original source names without cross-mode collision.)
-- `oh_my_pi` (9-tool Safe Mapping Set: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Extended tools `todo`, `hub`, `eval`, `vibe_*`, and Autoresearch tools cloak to shared aliases `wp_*`, with unknown tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
+- `oh_my_pi` (9-tool Safe Mapping Set: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Extended tools `todo`, `hub`, `eval`, `goal`, `yield`, `wait`, `vibe_*`, and Autoresearch tools cloak to shared aliases `wp_*`, with unknown tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
 > Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 > Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
 > Which tool names a given Codex model actually sends, and the recommended mapping for the shell-mode surface, are recorded in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**.
@@ -106,7 +129,7 @@ Supported clients:
 2. **Request-Scoped Active Reverse**: Only canonical pairs whose source tool was actually declared and transformed in that request become active in the reverse map. Inactive canonical targets and native AGY target-only traffic are never reverse-cloaked.
 3. **ExplicitOMPNonAGYBypass**: Explicit OMP marker on non-`agy/` routes consumes the marker, pins a durable bypass state keyed by host `RequestID`, and performs zero tool or brand mutation across request, response, and stream.
 4. **Lifecycle Ownership**: Route state (`ProtectedAGY` / `ExplicitOMPNonAGYBypass`) is managed by `explicitOMPLifecycleManager` and cleaned only on `request.complete` (`MethodRequestComplete`). Disposable stream sessions are cleaned on `[DONE]`, but pre-payload disposable state can be rehydrated deterministically solely from pinned route state.
-5. **Protected Brand Policy**: `Oh My Pi`, `oh-my-pi`, and `omp` are masked to `Antigravity` as terminal outputs (cannot be overridden or reprocessed by operator custom mappings). Literal `.omp` path segments (`.omp/foo`, `C:\Users\...\.omp\agent`) are strictly preserved. Correlated assistant text restores `Antigravity -> omp` using pinned route authority.
+5. **Protected Brand Policy**: `Oh My Pi`, `oh-my-pi`, and `omp` are masked to `Antigravity` as terminal outputs (cannot be overridden or reprocessed by operator custom mappings). A literal `.omp` path segment (`.omp/foo`, `C:\Users\...\.omp\agent`) is remapped to `.gemini/...` on the way up and restored to `.omp/...` on the way back, like `.claude` and `.codex`: a client's home directory is an operational identifier, not brand prose (#49). The remap is client-scoped in both directions — nothing is ever guessed from content. Correlated assistant text restores `Antigravity -> omp` using pinned route authority.
 1. sourceFormat normalization. The proxy sends SourceFormat="claude" for
    Claude Code, but the body-walking branches only understand "anthropic" /
    "openai". normalizeSourceFormat maps claude/antigravity -> anthropic and
@@ -167,6 +190,49 @@ pin the source commit, use a Go image compatible with the gateway's libc, build
 from a clean checkout inside the container, and verify embedded provenance and
 the artifact checksum. Do not substitute a floating-image host-bind build for
 that acceptance procedure.
+
+### Build and deploy traps that fail silently
+
+Both of these produced a wrong result with no error, and each one cost a full
+acceptance cycle on 2026-09-29. Neither is caught by reading the build output.
+
+1. **A container-internal `git clone` of the host repo carries only committed
+    state.** Cloning `/src` into `/build` and then running `git add -A && git
+    commit` inside `/build` commits *nothing*: the fresh clone is a clean tree
+    with no working-tree edits in it, so the build silently produces a binary
+    of `HEAD` and every uncommitted change is dropped. This is invisible when
+    the change under test is behavioural. To build dirty source, remove tracked
+    host deletions from the clone, then overlay the host working tree **before**
+    committing:
+    `git -C /src diff --name-only --diff-filter=D "$CLOAK_BUILD_COMMIT" | while read -r f; do git -C /build rm -q -- "$f"; done`,
+    followed by
+    `tar -C /src --exclude=.git --exclude=dist -cf - . | tar -C /build -xf -`.
+    Those lines belong inside `$BuildCommand`, before `go build` - `docker run
+    --rm` has already removed the clone by the time it returns. `tar` copies
+    only files that exist, so failing to remove tracked host deletions first
+    leaves stale source in the acceptance commit.
+    Section 2 of the runbook only describes the committed-`$TargetCommit` path,
+    which is why this is easy to miss. Always assert the string you changed is
+    present in the source the build actually consumed, not just in the host
+    file.
+2. **Discover the Compose project name, do not guess it.** Using the wrong
+    `--project-name` makes `up -d --force-recreate` fail with a container-name
+    `Conflict` that reads like a transient retry, while the pre-existing
+    container keeps running the old binary. `CPA_FILTER_DEBUG` stays empty in
+    the live container, so the debug log stays 0 bytes and every live probe
+    appears to produce no evidence. Get the name from
+    `docker ps --format '{{.Label "com.docker.compose.project"}}'`, and treat
+    any `Conflict` as "the recreate did not happen".
+
+`env_file` is commented out in that compose file, so `${CPA_FILTER_DEBUG}` is
+interpolated from the invoking shell. Export it in the same shell that runs
+`up`; writing it into the host `.env` alone does nothing.
+
+**Never conclude a deploy succeeded from the command's output.** Assert, from
+inside the running container: `env | grep CPA_FILTER_DEBUG` is non-empty, the
+artifact sha256 matches what you built, and a string you just added is present
+in the installed `.so`. The log file's size and the newest request-log mtime
+are the cheapest way to catch a stale container.
 
 Local validation on Windows (gcc/mingw present, CGO works):
 

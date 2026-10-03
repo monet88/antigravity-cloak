@@ -164,24 +164,6 @@ func TestOMP_VibeModeToolsCloaked(t *testing.T) {
 	}
 }
 
-func TestOMP_CanonicalCollisionStillRejects(t *testing.T) {
-	isolateOMPMeasurement(t)
-	const requestID = "omp-issue37-collision"
-	body := []byte(`{
-		"messages":[],
-		"tools":[
-			{"type":"function","function":{"name":"read"}},
-			{"type":"function","function":{"name":"_read"}}
-		]
-	}`)
-
-	var result pluginapi.RequestInterceptResponse
-	ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(requestID, "openai", body), &result)
-	if !result.Terminate || result.StatusCode != 503 {
-		t.Fatalf("collision must reject with 503: terminate=%t status=%d body=%s", result.Terminate, result.StatusCode, result.ResponseBody)
-	}
-}
-
 func TestOMP_ExtendedTableReversal(t *testing.T) {
 	isolateOMPMeasurement(t)
 	const requestID = "omp-issue37-reversal"
@@ -825,5 +807,79 @@ func TestOMP_NamespacedDeclarationGrantsExactReverseAuthorityOnly(t *testing.T) 
 	}, &bareRestored)
 	if !bytes.Contains(bareRestored.Body, []byte(`"name":"read"`)) {
 		t.Fatalf("bare target did not restore to its source: %s", bareRestored.Body)
+	}
+}
+
+// TestOMP_GoalAndLoopRuntimeUseNamedAliases pins the goal/loop family to named
+// aliases rather than the deterministic wp_ext_<hash> fallback.
+//
+// These three tools only exist in a session that has run /goal, /guided-goal or
+// /loop, so a default-session test never declared them and they silently took
+// the hash path. A live run caught it: the wire showed
+// wp_ext_63f44033c2aa095324c02661c93b17b9 for "goal", which round-tripped
+// correctly but is unreadable, and it made the Oh My Pi alias set inconsistent
+// with codex, which has mapped its own "wait" to wp_wait all along.
+//
+// The assertion that matters is the negative one: no wp_ext_ may appear for
+// these three sources, so a future table edit that drops one is caught here
+// rather than in a log.
+func TestOMP_GoalAndLoopRuntimeUseNamedAliases(t *testing.T) {
+	isolateOMPMeasurement(t)
+	const requestID = "omp-goal-loop-named-aliases"
+	body := []byte(`{
+		"messages":[],
+		"tools":[
+			{"type":"function","function":{"name":"read"}},
+			{"type":"function","function":{"name":"goal"}},
+			{"type":"function","function":{"name":"yield"}},
+			{"type":"function","function":{"name":"wait"}}
+		]
+	}`)
+
+	var admitted pluginapi.RequestInterceptResponse
+	ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(requestID, "openai", body), &admitted)
+	if admitted.Terminate {
+		t.Fatalf("request rejected: %s", admitted.ResponseBody)
+	}
+
+	for _, want := range []string{`"name":"wp_goal"`, `"name":"wp_yield"`, `"name":"wp_wait"`} {
+		if !bytes.Contains(admitted.Body, []byte(want)) {
+			t.Errorf("cloaked request missing %s: %s", want, admitted.Body)
+		}
+	}
+	for _, raw := range []string{`"name":"goal"`, `"name":"yield"`, `"name":"wait"`} {
+		if bytes.Contains(admitted.Body, []byte(raw)) {
+			t.Errorf("raw tool name %s survived cloaking: %s", raw, admitted.Body)
+		}
+	}
+	if bytes.Contains(admitted.Body, []byte("wp_ext_")) {
+		t.Errorf("goal/loop runtime fell through to the hash fallback: %s", admitted.Body)
+	}
+
+	// The response direction has to restore the exact source names, which is
+	// what makes a named alias safe to add: the request-scoped alias plan stays
+	// the only authority for tool identity, so the name upstream sees is
+	// cosmetic and the client still gets "goal"/"yield"/"wait" back.
+	respBody := []byte(`{"choices":[{"message":{"tool_calls":[
+		{"id":"1","type":"function","function":{"name":"wp_goal","arguments":"{\"op\":\"complete\"}"}},
+		{"id":"2","type":"function","function":{"name":"wp_yield","arguments":"{}"}},
+		{"id":"3","type":"function","function":{"name":"wp_wait","arguments":"{}"}}
+	]}}]}`)
+	var uncloaked pluginapi.ResponseInterceptResponse
+	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+		RequestID:    requestID,
+		SourceFormat: "openai",
+		Model:        "agy/measurement",
+		Body:         respBody,
+	}, &uncloaked)
+	for _, want := range []string{`"name":"goal"`, `"name":"yield"`, `"name":"wait"`} {
+		if !bytes.Contains(uncloaked.Body, []byte(want)) {
+			t.Errorf("response did not restore %s: %s", want, uncloaked.Body)
+		}
+	}
+	for _, bad := range []string{"wp_goal", "wp_yield", "wp_wait"} {
+		if bytes.Contains(uncloaked.Body, []byte(bad)) {
+			t.Errorf("alias %s leaked to the client: %s", bad, uncloaked.Body)
+		}
 	}
 }

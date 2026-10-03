@@ -78,7 +78,7 @@ Transport and alias checks:
 | EXT-03 `read` virtual device (`xd://<top-level-tool>`) | PASS | The acceptance profile mounts no standalone device, and a bare `xd://bash` correctly resolves to "No such tool"; the client also dispatches active top-level tools, so `read` with `path: xd://todo` executed against the todo device with the URI intact (see OMP-ESC-03) |
 | EXT-04 `write` virtual device | PASS | `write` to `xd://bash` dispatched the real bash runner (`echo xd_write_dispatch_success`) with the `xd://` identifier intact through `write_to_file → write` |
 | Shared aliases | PASS | bare `todo → wp_todo` and `find → wp_find`, plus escaped `_todo → wp_todo`; all restored to the client spelling and executed |
-| Dynamic/fallback | PASS | bare `wait → wp_ext_061bef0f1c6ccd0b4819958bcb73eba6` and `yield → wp_ext_6000f482bcb616c9b358f46162f191f6`, plus escaped `_find → wp_ext_8bfa04d75e222553a5dc712e5ec3671e` and `_wait → wp_ext_416dac4969d214f84545c92795d9a734`; the alias is keyed on the source identity as sent, so the escaped spelling gets its own deterministic hash |
+| Dynamic/fallback | PASS (run predates the named aliases) | the 2026-09-27 run recorded bare `wait → wp_ext_061bef0f1c6ccd0b4819958bcb73eba6` and `yield → wp_ext_6000f482bcb616c9b358f46162f191f6`, plus escaped `_find → wp_ext_8bfa04d75e222553a5dc712e5ec3671e` and `_wait → wp_ext_416dac4969d214f84545c92795d9a734`; the alias is keyed on the source identity as sent, so an escaped spelling gets its own deterministic hash. `goal`, `yield` and `wait` are NAMED aliases now (`wp_goal`/`wp_yield`/`wp_wait`, main.go shared-alias table), so those two hashes can no longer be emitted and the deterministic-fallback claim holds for the escape case and for tools outside the shared table |
 
 One `agy/gemini-3.8-flash` request carried these 12 declarations and produced
 this upstream set, with no source name surviving upstream:
@@ -89,6 +89,10 @@ upstream: find_by_name grep_search invoke_subagent replace_file_content
           run_command search_web view_file wp_eval
           wp_ext_061bef0f1c6ccd0b4819958bcb73eba6 wp_find wp_todo write_to_file
 ```
+
+That block is the 2026-09-27 observation verbatim: the two `wp_ext_` hashes for
+`wait`/`yield` are historical, because the shared-alias table now emits
+`wp_wait`/`wp_yield` for them (`goal` likewise maps to `wp_goal`).
 
 System-prompt sanitization was confirmed on the same request:
 `<system-conventions>` counts 2 → 0 and `<conventions>` 1 → 3 (ingress →

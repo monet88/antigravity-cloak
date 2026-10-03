@@ -26,7 +26,7 @@ func ompSizedRequest(tb testing.TB, format string, size int, textHeavy bool) []b
 	tools := make([]any, 0, len(names))
 	for _, name := range names {
 		definition := map[string]any{
-			"name": name, "description": "Oh My Pi tool " + name + ". Keep /workspace/.omp/agent paths intact. " + strings.Repeat("Tool documentation. ", 4),
+			"name": name, "description": "Oh My Pi tool " + name + ". Reads /workspace/.omp/agent config. " + strings.Repeat("Tool documentation. ", 4),
 		}
 		schema := map[string]any{"type": "object", "properties": map[string]any{"text": map[string]any{"type": "string"}}}
 		if format == "openai" {
@@ -38,7 +38,7 @@ func ompSizedRequest(tb testing.TB, format string, size int, textHeavy bool) []b
 		}
 	}
 	root := map[string]any{"tools": tools, "stream": true, "n": 2}
-	system := "You are Oh My Pi. Use bash and read. Keep /workspace/.omp/agent and C:\\Users\\agent\\.omp\\agent intact."
+	system := "You are Oh My Pi. Use bash and read. Config lives at /workspace/.omp/agent and C:\\Users\\agent\\.omp\\agent."
 	systemMessage := map[string]any{"role": "system", "content": system}
 	var messages []any
 	if format == "openai" {
@@ -152,8 +152,8 @@ func TestOMPMeasurementFixtures(t *testing.T) {
 				if len(route.activeReverse) != 9 || route.activeReverse["run_command"] != "bash" || route.expected != 2 || !route.cachedUncloak.exactOnly {
 					t.Fatal("fixture lost canonical request authority or choice count")
 				}
-				if !bytes.Contains(admitted.Body, []byte("Antigravity")) || !bytes.Contains(admitted.Body, []byte(".omp/agent")) {
-					t.Fatalf("fixture lost brand rewrite or preserved path: format=%s size=%d textHeavy=%t", format, size, textHeavy)
+				if !bytes.Contains(admitted.Body, []byte("Antigravity")) || !bytes.Contains(admitted.Body, []byte(".gemini/agent")) {
+					t.Fatalf("fixture lost brand rewrite or the remapped home path: format=%s size=%d textHeavy=%t", format, size, textHeavy)
 				}
 			}
 		}
@@ -226,6 +226,8 @@ func BenchmarkOMPChoiceCount(b *testing.B) {
 }
 
 func BenchmarkOMPBrandDerivation(b *testing.B) {
+	// The protected brand walker always runs for the Oh My Pi client.
+	const client = "oh_my_pi"
 	for _, custom := range []int{0, 32} {
 		b.Run(fmt.Sprintf("custom%d", custom), func(b *testing.B) {
 			cfg := defaultFilterConfig()
@@ -236,18 +238,22 @@ func BenchmarkOMPBrandDerivation(b *testing.B) {
 				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
 					// Attribution probe of main.go's rewriteProtectedBrandText
-					// mapping-derivation block (680-693 at 1428005). Keep this
-					// probe in sync if that production block changes.
+					// mapping-derivation block. Keep this probe in sync if that
+					// production block changes: it now draws from the resolved
+					// client's own table and applies the same client scope.
+					inScope := func(m rewriteMapping) bool {
+						return (m.Client == "" || m.Client == client) && !isOMPAlias(m.Match)
+					}
 					var mappings []rewriteMapping
 					if cfg.UseDefaultKeywords {
-						for _, m := range defaultRewriteMappings {
-							if !isOMPAlias(m.Match) {
+						for _, m := range brandMappingsFor(client) {
+							if inScope(m) {
 								mappings = append(mappings, m)
 							}
 						}
 					}
 					for _, m := range cfg.CustomMappings {
-						if !isOMPAlias(m.Match) {
+						if inScope(m) {
 							mappings = append(mappings, m)
 						}
 					}
@@ -259,7 +265,7 @@ func BenchmarkOMPBrandDerivation(b *testing.B) {
 				b.Run(fmt.Sprintf("RewriteNoMatch/%dB", size), func(b *testing.B) {
 					b.ReportAllocs()
 					for i := 0; i < b.N; i++ {
-						result, _ := rewriteProtectedBrandText(text, &cfg)
+						result, _ := rewriteProtectedBrandText(text, &cfg, client)
 						runtime.KeepAlive(result)
 					}
 				})

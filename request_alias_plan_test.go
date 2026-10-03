@@ -117,6 +117,9 @@ func TestRequestAliasPlanAdmissionFailsClosed(t *testing.T) {
 		{req: pluginapi.RequestInterceptRequest{SourceFormat: "openai", Body: validBody}},
 		{req: pluginapi.RequestInterceptRequest{RequestID: "unsupported-format", SourceFormat: "responses", Body: validBody}},
 		{req: pluginapi.RequestInterceptRequest{RequestID: "unsupported-shape", SourceFormat: "openai", Body: []byte("{\"tools\":[{\"type\":\"custom\",\"name\":\"exec\"}]}")}},
+		{req: pluginapi.RequestInterceptRequest{RequestID: "unsupported-flat-no-name", SourceFormat: "openai", Body: []byte("{\"tools\":[{\"type\":\"function\"}]}")}},
+		// A non-object entry: no owner to read a name from.
+		{req: pluginapi.RequestInterceptRequest{RequestID: "unsupported-entry", SourceFormat: "openai", Body: []byte("{\"tools\":[\"exec\"]}")}},
 		{req: pluginapi.RequestInterceptRequest{RequestID: "trailing-json", SourceFormat: "openai", Body: append(validBody, []byte(" {}")...)}},
 		{
 			req:       pluginapi.RequestInterceptRequest{RequestID: "collision", SourceFormat: "openai", Body: []byte("{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"Read\"}},{\"type\":\"function\",\"function\":{\"name\":\"Write\"}}]}")},
