@@ -31,7 +31,7 @@ func TestIssue51_OMPStreamRestoresToolArguments(t *testing.T) {
 			h := http.Header{}
 			h.Set("X-Cloak-Client", "oh_my_pi")
 			// The canonical OMP declaration shape: admission is strict on purpose.
-			orig := `{"messages":[],"tools":[{"type":"function","function":{"name":"functions:read"}}]}`
+			orig := `{"messages":[],"tools":[{"type":"function","function":{"name":"bash"}}]}`
 			raw, code := handlePluginCall("request.intercept_before",
 				makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai",
 					"agy/model", []byte(orig), h))
@@ -76,9 +76,16 @@ func TestIssue51_OMPStreamRestoresToolArguments(t *testing.T) {
 				t.Fatalf("operational path was not restored in tool arguments: %q", body)
 			}
 			// The identity of the tool is exact-uncloak authority, not brand
-			// reverse: the client declared bash, so bash is what comes back.
-			if !strings.Contains(body, "run_command") && !strings.Contains(body, "bash") {
-				t.Fatalf("tool identity lost: %q", body)
+			// reverse: the client declared bash, so bash is what comes back and
+			// the cloaked name must not. This is asserted on the concatenated
+			// delivered bytes, including any chunk the plugin passed through
+			// unchanged, because a chunk that falls back to its raw form would
+			// still reach the client.
+			if !strings.Contains(body, "bash") {
+				t.Fatalf("tool identity was not restored: %q", body)
+			}
+			if strings.Contains(body, "run_command") {
+				t.Fatalf("cloaked tool identity reached the client: %q", body)
 			}
 		})
 	}

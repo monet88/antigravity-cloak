@@ -49,9 +49,11 @@ func TestContextGroupsAreExactInverses(t *testing.T) {
 	}
 }
 
-// Each rule inverted is itself: applying the reverse rule to what the forward
-// rule produced has to give back the original spelling. This is the property
-// the round trip depends on, checked on the bytes rather than on the pairing.
+// Each rule inverted is itself: applying the client's whole reverse table to
+// what the forward rule produced has to give back the original spelling. This is
+// the property the round trip depends on, checked on the bytes through the table
+// the response path actually uses rather than on the pairing, so deleting or
+// mis-scoping a reverse table fails here.
 func TestContextGroupRulesInvertOnBytes(t *testing.T) {
 	for _, group := range []struct {
 		client string
@@ -61,9 +63,9 @@ func TestContextGroupRulesInvertOnBytes(t *testing.T) {
 		{"codex", codexContextMappings},
 	} {
 		for _, m := range group.rules {
-			back, changed := replaceInsensitive(m.Replacement, m.Replacement, m.Match)
-			if !changed || back != m.Match {
-				t.Errorf("%s: %q -> %q inverted to %q, want %q", group.client, m.Match, m.Replacement, back, m.Match)
+			back := applyReverseTable(m.Replacement, group.client)
+			if back != m.Match {
+				t.Errorf("%s: %q -> %q restored to %q, want %q", group.client, m.Match, m.Replacement, back, m.Match)
 			}
 		}
 	}

@@ -85,8 +85,15 @@ func TestIssue51_StreamToolArgumentsRestoreLikeNonStream(t *testing.T) {
 		reqID := "issue51-args-" + format
 		mgr.resetSession("req:"+reqID, "claude_code", ompUncloakCache(t))
 
-		// Split inside the path, so the carry has to survive the fragment.
-		first, second := wire[:20], wire[20:]
+		// Split inside the path, so the carry has to survive the fragment. The
+		// cut is derived from the fixture: hard-coding an offset would let a
+		// future edit to `wire` move the split out of the path and drop this
+		// coverage without failing.
+		cut := strings.Index(wire, "gemini") + 2
+		if cut <= 2 || cut >= len(wire) {
+			t.Fatalf("fixture no longer contains the split marker: %q", wire)
+		}
+		first, second := wire[:cut], wire[cut:]
 		frames := []string{
 			streamToolArgumentEvent(format, 0, 0, first),
 			streamToolArgumentEvent(format, 0, 0, second),
@@ -190,11 +197,14 @@ func TestIssue51_OMPMachineGeneratedProseUsesRequestScopedAliases(t *testing.T) 
 	if !strings.Contains(forward, "run_command") {
 		t.Fatalf("canonical OMP tool was not aliased: %s", forward)
 	}
+	// Pinned to the named alias: a fallback-compatible assertion (empty ->
+	// wp_ext_<hash>) holds after the named entry is deleted, so it would not
+	// test the named-alias contract at all.
 	alias := sharedAliasesFor("oh_my_pi")["hub"]
-	if alias == "" {
-		alias = fallbackAliasForSource("hub")
+	if alias != "wp_hub" {
+		t.Fatalf("OMP hub alias = %q, want the named alias %q", alias, "wp_hub")
 	}
-	if alias == "" || !strings.Contains(forward, alias) {
+	if !strings.Contains(forward, alias) {
 		t.Fatalf("shared OMP tool alias %q missing from the request: %s", alias, forward)
 	}
 	// A bare mention is prose, not a tool reference, and the ambiguous tier
@@ -236,8 +246,14 @@ func TestIssue51_NonStreamToolArgumentsMatchStream(t *testing.T) {
 		// different spelling per client, which is the point of the gate.
 		h := http.Header{}
 		h.Set("X-Cloak-Client", "claude_code")
-		handlePluginCall("request.intercept_before",
+		reqRaw, reqCode := handlePluginCall("request.intercept_before",
 			makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, format, "agy/model", []byte(reqBody), h))
+		if reqCode != 0 || strings.Contains(string(reqRaw), `"StatusCode":503`) {
+			t.Fatalf("%s: request-stage cloak failed: code=%d %s", format, reqCode, reqRaw)
+		}
+		if globalAliasPlanManager.get(reqID) == nil {
+			t.Fatalf("%s: request-stage cloak pinned no alias plan for %s", format, reqID)
+		}
 		payload := responseInterceptRequestJSON(t, reqBody, respBody, format)
 		var reqMap map[string]any
 		if err := json.Unmarshal(payload, &reqMap); err != nil {

@@ -132,17 +132,21 @@ func TestRepoAgentsMdIsNeverCloakedInEitherDirection(t *testing.T) {
 }
 
 // A tool result is cloaked on the way up and mapped back on the way down, so
-// the client still reads exactly what the tool returned.
+// the client still reads exactly what the tool returned. The model can only
+// quote what the request gave it, so the reply here is built from the text the
+// forwarded request actually carried and the two legs are compared against each
+// other rather than against a restated mapping.
 func TestToolResultRoundTripsToTheClient(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`model_prefixes: [agy]`)))
 
 	const reqID = "req_bidi_toolresult"
-	const req = `{
+	const original = "the ~/.claude/CLAUDE.md mentions the Anthropic SDK"
+	req := `{
 		"messages":[
 			{"role":"user","content":"read the file"},
 			{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"path":"/tmp/a.md"}}]},
-			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"the ~/.claude/CLAUDE.md mentions the Anthropic SDK"}]}
+			{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":` + strconv.Quote(original) + `}]}
 		],
 		"tools":[
 			{"name":"Bash","description":""},{"name":"Read","description":""},
@@ -160,6 +164,38 @@ func TestToolResultRoundTripsToTheClient(t *testing.T) {
 	if !strings.Contains(forward, ".gemini/GEMINI.md") || !strings.Contains(forward, "Antigravity SDK") {
 		t.Fatalf("tool_result content not cloaked for the model: %s", forward)
 	}
+
+	// The model can only quote what the request gave it, so the reply carries the
+	// tool_result text the forwarded body actually holds. Driving that reply
+	// through the response intercept is the round trip: the client has to read
+	// its own bytes back, not the spelling the model was given.
+	var wire struct {
+		Messages []struct {
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(forward), &wire); err != nil {
+		t.Fatalf("decode forward body: %v", err)
+	}
+	if len(wire.Messages) != 3 {
+		t.Fatalf("forward body lost the tool_result message: %s", forward)
+	}
+	var toolResult []struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(wire.Messages[2].Content, &toolResult); err != nil {
+		t.Fatalf("decode tool_result message: %v", err)
+	}
+	if len(toolResult) != 1 {
+		t.Fatalf("forward body lost the tool_result content: %s", forward)
+	}
+	resp := mustJSON(t, map[string]any{
+		"content": []any{map[string]any{"type": "text", "text": toolResult[0].Content}},
+	})
+	back := reverseBrandPass(t, reqID, req, resp, "anthropic", "agy/claude-test")
+	if !strings.Contains(back, original) || strings.Contains(back, ".gemini/GEMINI.md") || strings.Contains(back, "Antigravity SDK") {
+		t.Fatalf("client did not read its own tool result back: %s", back)
+	}
 }
 
 // Streaming: the token is split across two deltas, so a line-based rewrite
@@ -174,11 +210,13 @@ func TestStreamingReverseJoinsTokenSplitAcrossDeltas(t *testing.T) {
 	forwardCloakedBody(t, reqID, req)
 
 	sess := &streamSession{client: "claude_code"}
-	// Two deltas split mid-token: "~/.gemini/GEMINI" + ".md and more text".
-	// The same session carries the lane across both, which is what a real
-	// stream does; a fresh session per delta would prove nothing.
-	first := []byte("event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I read ~/.gemini/GEMINI.md"}}` + "\n\n")
-	second := []byte("event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":".md today."}}` + "\n\n")
+	// Two deltas split INSIDE the token: neither carries the complete
+	// "~/.gemini/GEMINI.md", so a per-delta rewrite that ignored the lane would
+	// hand the client the cloaked spelling. The same session carries the lane
+	// across both, which is what a real stream does; a fresh session per delta
+	// would prove nothing.
+	first := []byte("event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"I read ~/.gemini/GEM"}}` + "\n\n")
+	second := []byte("event: content_block_delta\ndata: " + `{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"INI.md and more text."}}` + "\n\n")
 
 	m := globalStreamManager
 	out1, _ := m.reverseBrandSSE(sess, first, "anthropic")

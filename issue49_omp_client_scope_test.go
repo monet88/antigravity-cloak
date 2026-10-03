@@ -32,16 +32,34 @@ func TestIssue49_OMPOwnedPathsRoundTrip(t *testing.T) {
 }
 
 // TestIssue49_OMPLooksLikeSegmentStillMasks covers the dot-segment rule's
-// left boundary. A .omp that is a real path segment rewrites; one that is
-// merely a lookalike inside a larger word does not.
+// boundaries on the production forward seam (the bare alias rule with the path
+// guard enabled): a .omp that is a real path segment is remapped onto the
+// neutral .gemini directory, a segment that continues past the brand word
+// (~/.omp-backup/agent) or a slash-delimited /omp/ is left byte-for-byte, and a
+// brand glued to a preceding word (checkpoint.omp/state) is prose, not a
+// segment, so it is masked to the bare brand word - the reverse restores it, so
+// the round trip still hands the client its own spelling back (the same
+// contract filter_test.go pins for profile.omp/agent). Expected outputs are
+// exact, so the test can tell the right rewrite from a wrong one instead of
+// only detecting "something changed".
 func TestIssue49_OMPLooksLikeSegmentStillMasks(t *testing.T) {
-	for _, in := range []string{
-		"~/.omp/agent/AGENTS.md",
-		".omp/commands/review-prs.md",
-		"persist to .omp/state",
+	for _, tc := range []struct{ in, want string }{
+		{"~/.omp/agent/AGENTS.md", "~/.gemini/agent/AGENTS.md"},
+		{".omp/commands/review-prs.md", ".gemini/commands/review-prs.md"},
+		{"persist to .omp/state", "persist to .gemini/state"},
+		// Not a segment: the element continues past the brand word.
+		{"~/.omp-backup/agent", "~/.omp-backup/agent"},
+		// Not dot-prefixed: an ordinary name in a path.
+		{"cd /omp/state", "cd /omp/state"},
+		// Glued to a preceding word: prose, so the bare brand word is masked
+		// rather than remapped as a directory, and the reverse undoes it.
+		{"checkpoint.omp/state", "checkpoint.antigravity/state"},
+		// Prose is not a path, so the bare brand word is still masked.
+		{"run omp now", "run antigravity now"},
 	} {
-		if got, _ := replaceInsensitiveWithPrev(in, false, "omp", "Antigravity"); got == in {
-			t.Errorf("%q: expected the dot-segment to be masked, got it verbatim", in)
+		got, _ := replaceInsensitiveRule(tc.in, rewriteMapping{Match: "omp", Replacement: "Antigravity"}, true)
+		if got != tc.want {
+			t.Errorf("%q: forward = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -54,19 +72,30 @@ func TestIssue49_OMPLooksLikeSegmentStillMasks(t *testing.T) {
 // opencode,github}.ts) and injects the absolute paths, so these strings do
 // reach the model. They are accepted because the operator does not use those
 // tools in their own repositories. If that changes, this test is the tripwire.
+//
+// It applies each client's REAL forward table, so a blanket .claude -> .gemini
+// added to oh_my_pi (or any other table reaching into a foreign directory) fails
+// here. Each client's own directory is the client's own business and is skipped;
+// the liveness check below proves the table under test actually rewrites
+// something, so the negative rows cannot pass vacuously.
 func TestIssue49_CompetitorDirsLeftAlone(t *testing.T) {
+	ownDir := map[string]string{"claude_code": ".claude", "codex": ".codex", "oh_my_pi": ".omp"}
+	for client, own := range ownDir {
+		live := "C:/Users/monet/" + own + "/settings.json"
+		if applyTable(live, brandMappingsFor(client)) == live {
+			t.Fatalf("%s: forward table does not rewrite its own directory %q", client, live)
+		}
+	}
 	for _, dir := range []string{
 		".claude", ".codex", ".cursor", ".windsurf", ".vscode", ".opencode", ".copilot",
 	} {
 		in := "C:/Users/monet/" + dir + "/settings.json"
-		for _, client := range []string{"claude_code", "codex", "oh_my_pi"} {
-			for _, m := range brandMappingsFor(client) {
-				if m.Match != "omp" && m.Match != "Oh My Pi" && m.Match != "oh-my-pi" {
-					continue
-				}
-				if got, _ := replaceInsensitiveWithPrev(in, false, m.Match, m.Replacement); got != in {
-					t.Errorf("%s rewrote %q: %q", client, in, got)
-				}
+		for client := range ownDir {
+			if ownDir[client] == dir {
+				continue
+			}
+			if got := applyTable(in, brandMappingsFor(client)); got != in {
+				t.Errorf("%s rewrote %q: %q", client, in, got)
 			}
 		}
 	}
@@ -183,12 +212,15 @@ func TestIssue49_ClaudeMdRewrittenOnlyByClaudeCode(t *testing.T) {
 	}
 }
 
-// applyTable applies a table the way the wire does: through the rule objects
-// themselves, so a rule's whole-segment boundary and exclusion are part of what
-// the helper exercises instead of being dropped by a match/replacement pair.
+// applyTable applies a table the way the wire does - one rule at a time through
+// the rule objects themselves, so a rule's whole-segment boundary, its scheme
+// exclusion and (on the forward pass) the dot-segment path remap are part of
+// what the helper exercises instead of being dropped by a match/replacement
+// pair. It is the same loop the request path uses for text, which is what makes
+// these fixtures able to fail when production changes.
 func applyTable(s string, tables []rewriteMapping) string {
 	for _, m := range tables {
-		s, _ = replaceMappingWithPrev(s, false, m)
+		s, _ = replaceInsensitiveRule(s, m, true)
 	}
 	return s
 }

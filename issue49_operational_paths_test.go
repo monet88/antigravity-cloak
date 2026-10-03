@@ -152,7 +152,9 @@ func TestIssue49_ReversePathSegmentPerClient(t *testing.T) {
 		// the client gets its own file back instead of a mixed
 		// ".claude\\GEMINI.md".
 		{"claude_code", `C:\\Users\\dev\\.gemini\\GEMINI.md`, `C:\\Users\\dev\\.claude\\CLAUDE.md`},
-		{"claude_code", ".claude-backup/CLAUDE.md", ".claude-backup/CLAUDE.md"},
+		// Whole-segment: a directory that merely STARTS with the remapped name is
+		// not that directory, so no rule may claim it.
+		{"claude_code", ".gemini-backup/GEMINI.md", ".gemini-backup/GEMINI.md"},
 		{"codex", "~/.gemini/AGENTS.md", "~/.codex/AGENTS.md"},
 		{"codex", "./.gemini/skills/x/SKILL.md", "./.codex/skills/x/SKILL.md"},
 		{"codex", "/home/u/.gemini/AGENTS.md", "/home/u/.codex/AGENTS.md"},
@@ -252,14 +254,20 @@ func TestIssue49_OperationalDomainRoundTrips(t *testing.T) {
 func TestIssue49_OMPRemovesBlanketPreservePolicy(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
-	for _, in := range []string{
-		`{"system":"at /home/user/.omp"}`,
-		`{"system":"at /home/user/.omp/agent"}`,
-		`{"system":"at C:\\Users\\monet\\.omp\\agent"}`,
+	// The exact spelling matters: a remap onto anything other than .gemini, or
+	// a truncated rewrite, satisfies a bare "no .omp left" check.
+	for _, tc := range []struct{ in, want string }{
+		{`{"system":"at /home/user/.omp"}`, `"at /home/user/.gemini"`},
+		{`{"system":"at /home/user/.omp/agent"}`, `"at /home/user/.gemini/agent"`},
+		{`{"system":"at C:\\Users\\monet\\.omp\\agent"}`, `"at C:\\Users\\monet\\.gemini\\agent"`},
 	} {
-		got, changed, _ := rewriteRequestBodyWithClient([]byte(in), "openai", "oh_my_pi")
-		if !changed || strings.Contains(string(got), ".omp") {
-			t.Errorf("%s still preserved: %s", in, got)
+		got, changed, _ := rewriteRequestBodyWithClient([]byte(tc.in), "openai", "oh_my_pi")
+		if !changed {
+			t.Errorf("%s was not rewritten: %s", tc.in, got)
+			continue
+		}
+		if !strings.Contains(string(got), tc.want) {
+			t.Errorf("%s: got %s, want it to contain %s", tc.in, got, tc.want)
 		}
 	}
 	// Only the literal dot-prefixed directory is a real operational identifier.

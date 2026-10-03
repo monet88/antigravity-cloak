@@ -30,7 +30,7 @@ func TestIssue50_LiteralDescendantsAreNeverRewritten(t *testing.T) {
 			},
 			"target": map[string]any{
 				"type":    "string",
-				"default": "Antigravity",
+				"default": "Claude",
 			},
 			"tuning": map[string]any{
 				"type":    "object",
@@ -41,7 +41,7 @@ func TestIssue50_LiteralDescendantsAreNeverRewritten(t *testing.T) {
 			},
 			"legacy": map[string]any{
 				"type":    "string",
-				"example": "Antigravity",
+				"example": "Claude",
 			},
 		},
 	}
@@ -50,7 +50,7 @@ func TestIssue50_LiteralDescendantsAreNeverRewritten(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, changed := rewriteSchemaText(schema, claudeCodeBrandMappings); !changed {
+	if !rewriteSchemaWithClaudeBrand(schema) {
 		t.Fatal("descriptions were expected to be rewritten")
 	}
 
@@ -62,10 +62,14 @@ func TestIssue50_LiteralDescendantsAreNeverRewritten(t *testing.T) {
 	for _, want := range []string{
 		`"enum":["Claude","Codex","plain"]`,
 		`"const":"Claude"`,
-		`"default":"Antigravity"`,
+		// A bare string under default/example is protected by the
+		// isSchemaTextField allowlist and nothing else, so it has to carry a
+		// spelling the forward pass WOULD rewrite: with "Antigravity" here the
+		// row holds even if that allowlist is widened to the literal keywords.
+		`"default":"Claude"`,
 		`"default":{"description":"Tuned by Claude.","note":"Claude tuned"}`,
 		`"examples":[{"description":"Built by Claude.","note":"Claude tuned"}]`,
-		`"example":"Antigravity"`,
+		`"example":"Claude"`,
 	} {
 		if !strings.Contains(string(got), want) {
 			t.Errorf("literal %s was rewritten: %s", want, got)
@@ -114,7 +118,7 @@ func TestIssue50_NestedSchemasAreStillTraversed(t *testing.T) {
 			}},
 		},
 	}
-	if _, changed := rewriteSchemaText(schema, claudeCodeBrandMappings); !changed {
+	if !rewriteSchemaWithClaudeBrand(schema) {
 		t.Fatal("nested descriptions were expected to be rewritten")
 	}
 	got, _ := json.Marshal(schema)
@@ -141,7 +145,7 @@ func TestIssue50_RequestedAndPatternPropertiesAreNeverRewritten(t *testing.T) {
 		"dependentSchemas":     map[string]any{"Claude": map[string]any{"type": "object"}},
 		"additionalProperties": map[string]any{"type": "string", "description": "Extra Claude value."},
 	}
-	if _, changed := rewriteSchemaText(schema, claudeCodeBrandMappings); !changed {
+	if !rewriteSchemaWithClaudeBrand(schema) {
 		t.Fatal("descriptions were expected to be rewritten")
 	}
 	got, _ := json.Marshal(schema)
@@ -160,4 +164,105 @@ func TestIssue50_RequestedAndPatternPropertiesAreNeverRewritten(t *testing.T) {
 			t.Errorf("real schema under a structural keyword was not reached: %s", got)
 		}
 	}
+}
+
+// TestIssue50_CollidingEntryNamesStillGetCloaked covers the other side of the
+// literal guard: inside a dictionary-of-schemas container the keys are entry
+// names, not keywords, so an entry spelled exactly like a literal keyword still
+// has its own subschema walked. Applying the guard at every map level skipped
+// the whole entry, and its description reached the model with the client's own
+// brand word.
+func TestIssue50_CollidingEntryNamesStillGetCloaked(t *testing.T) {
+	sub := func(desc string) map[string]any {
+		return map[string]any{"type": "string", "description": desc}
+	}
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"const":    sub("Claude const prop."),
+			"enum":     sub("Claude enum prop."),
+			"default":  sub("Claude default prop."),
+			"example":  sub("Claude example prop."),
+			"examples": sub("Claude examples prop."),
+		},
+		"$defs": map[string]any{
+			"default": sub("Claude defs default."),
+		},
+		"definitions": map[string]any{
+			"examples": sub("Claude definitions examples."),
+		},
+		"patternProperties": map[string]any{
+			"enum": sub("Claude pattern enum."),
+		},
+		"dependentSchemas": map[string]any{
+			"const": sub("Claude dependent const."),
+		},
+	}
+	if !rewriteSchemaWithClaudeBrand(schema) {
+		t.Fatal("colliding entry descriptions were expected to be rewritten")
+	}
+	got, _ := json.Marshal(schema)
+	for _, want := range []string{
+		`"description":"Antigravity const prop."`,
+		`"description":"Antigravity enum prop."`,
+		`"description":"Antigravity default prop."`,
+		`"description":"Antigravity example prop."`,
+		`"description":"Antigravity examples prop."`,
+		`"description":"Antigravity defs default."`,
+		`"description":"Antigravity definitions examples."`,
+		`"description":"Antigravity pattern enum."`,
+		`"description":"Antigravity dependent const."`,
+	} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("colliding entry schema was skipped, want %s in %s", want, got)
+		}
+	}
+	// The colliding names are structural, so they stay verbatim.
+	for _, keep := range []string{`"default":`, `"examples":`, `"dependentSchemas":`} {
+		if !strings.Contains(string(got), keep) {
+			t.Errorf("structural entry name was lost: %s", got)
+		}
+	}
+}
+
+// TestIssue50_LiteralsUnderCollidingEntriesStayUntouched pins the boundary of
+// the fix: a schema reached through a colliding entry name is still a schema
+// node, so its own literal keywords hold data and must stay byte-for-byte.
+func TestIssue50_LiteralsUnderCollidingEntriesStayUntouched(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"default": map[string]any{
+				"type":        "object",
+				"enum":        []any{"Claude", "Codex"},
+				"const":       "Claude",
+				"examples":    []any{map[string]any{"note": "Claude tuned"}},
+				"description": "Claude-tuned entry.",
+			},
+		},
+	}
+	if !rewriteSchemaWithClaudeBrand(schema) {
+		t.Fatal("the entry's own description was expected to be rewritten")
+	}
+	got, _ := json.Marshal(schema)
+	for _, want := range []string{
+		`"enum":["Claude","Codex"]`,
+		`"const":"Claude"`,
+		`"examples":[{"note":"Claude tuned"}]`,
+		`"description":"Antigravity-tuned entry."`,
+	} {
+		if !strings.Contains(string(got), want) {
+			t.Errorf("want %s in %s", want, got)
+		}
+	}
+}
+
+// rewriteSchemaWithClaudeBrand runs the descriptive-text pass the request path
+// applies to a tool's JSON Schema - brand mappings and request-scoped tool
+// aliases - bound to the claude_code brand table, and reports whether anything
+// changed.
+func rewriteSchemaWithClaudeBrand(schema any) bool {
+	return rewriteSchemaTextFields(schema, func(s string) (string, bool) {
+		return rewriteDescriptiveText(s, claudeCodeBrandMappings, nil)
+	})
 }

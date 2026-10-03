@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
@@ -24,11 +25,10 @@ func TestEscapedWindowsAbsolutePathRestoresExactlyOnEveryCarrier(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
 	for _, tc := range []struct {
-		name    string
-		client  string
-		arg     string
-		want    string
-		mustNot string
+		name   string
+		client string
+		arg    string
+		want   string
 	}{
 		{
 			// claude_code renames the file as well as the directory.
@@ -876,13 +876,6 @@ func openAIArrayProseFrame(choice int, escapedContent string) string {
 		escapedContent + `"}]}}]}` + "\n\n"
 }
 
-// openAITerminalArrayContentFrame is openAIArrayProseFrame with the choice's
-// finish_reason carried in the same event.
-func openAITerminalArrayContentFrame(choice int, escapedContent, reason string) string {
-	return "data: " + `{"choices":[{"index":` + jsonNumber(choice) + `,"delta":{"content":[{"type":"text","text":"` +
-		escapedContent + `"}]},"finish_reason":"` + reason + `"}]}` + "\n\n"
-}
-
 // driveStreamFrames feeds each frame through the stream interceptor and returns
 // the bytes emitted for it: the plugin's rewritten body, or the input frame when
 // the plugin left it untouched.
@@ -1644,5 +1637,117 @@ func TestOpenAITerminalArrayContentContinuesOnlyItsOwnChoice(t *testing.T) {
 	}
 	if !strings.Contains(joined, "visit ") || !strings.Contains(joined, ".go") {
 		t.Fatalf("choice 1's prose did not survive: %q", joined)
+	}
+}
+
+// The end-to-end consequence - two blocks with non-standard indices keeping
+// their own lanes - is witnessed through the plugin ABI below. These rows are
+// only the value-level facts no stream event can show: the absent-key default,
+// the numeric parse, the in-process shapes, present-vs-absent, and the
+// non-integral ceiling. Wire rows decode through safeUnmarshal because
+// json.Number is what the stream path sees.
+func TestLaneKeyWithIndexKeepsAPresentNonNumericIndexDistinct(t *testing.T) {
+	wire := func(t *testing.T, raw string) map[string]any {
+		t.Helper()
+		var m map[string]any
+		if err := safeUnmarshal([]byte(`{"index":`+raw+`}`), &m); err != nil {
+			t.Fatalf("decode index %s: %v", raw, err)
+		}
+		return m
+	}
+	rows := []struct {
+		name   string
+		format string
+		want   string
+		data   func(t *testing.T) map[string]any
+	}{
+		{"no index at all", "anthropic", "anthropic:0", func(*testing.T) map[string]any { return map[string]any{} }},
+		{"no index, openai", "openai", "openai:0", func(*testing.T) map[string]any { return map[string]any{} }},
+		{"wire number", "anthropic", "anthropic:2", func(t *testing.T) map[string]any { return wire(t, `2`) }},
+		{"non-integral number still defaults", "anthropic", "anthropic:0", func(t *testing.T) map[string]any { return wire(t, `1.5`) }},
+		{"in-process float64", "anthropic", "anthropic:3", func(*testing.T) map[string]any { return map[string]any{"index": float64(3)} }},
+		{"in-process int", "anthropic", "anthropic:4", func(*testing.T) map[string]any { return map[string]any{"index": 4} }},
+		// The OpenAI call site's own behaviour for a non-standard index; the ABI
+		// test below drives the Anthropic carrier only.
+		{"present string index, openai", "openai", "openai:1", func(t *testing.T) map[string]any { return wire(t, `"1"`) }},
+		// A present null is not an absent key: only a missing key defaults,
+		// which this row is the only witness of.
+		{"present null index", "anthropic", "anthropic:<nil>", func(t *testing.T) map[string]any { return wire(t, `null`) }},
+	}
+	for _, row := range rows {
+		t.Run(row.name, func(t *testing.T) {
+			if got := laneKeyWithIndex(row.format, row.data(t)); got != row.want {
+				t.Fatalf("laneKeyWithIndex(%q) = %q, want %q", row.format, got, row.want)
+			}
+		})
+	}
+}
+
+// The lane-index fallback is observable through the plugin ABI: two Anthropic
+// content blocks whose `index` arrives as a JSON string are distinct lanes, and
+// the shared laneKeyWithIndex has to keep them apart - the pre-fix
+// fall-through put both on lane 0, which merged their carries and flushed one
+// block's held token through the other. Each block here streams half of the
+// cloaked token, so each hold must resolve on its own continuation and each
+// synthesised flush must carry its own content-block index.
+func TestStreamChunkABILaneIndexFallbackKeepsBlocksDistinct(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`model_prefixes: [agy]`)))
+
+	reqID := "req_lane_fallback_abi"
+	headers := http.Header{}
+	headers.Set("X-Cloak-Client", "oh_my_pi")
+	reqBody := `{"system":"hi","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"read","description":"Read a file"}]}`
+	if _, code := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
+		makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/lane-model", []byte(reqBody), headers)); code != 0 {
+		t.Fatalf("request intercept code=%d", code)
+	}
+
+	delta := func(index, text string) string {
+		return "event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
+			"type": "content_block_delta", "index": index,
+			"delta": map[string]any{"type": "text_delta", "text": text},
+		}) + "\n\n"
+	}
+	stop := func(index string) string {
+		return "event: content_block_stop\ndata: " + mustJSON(t, map[string]any{
+			"type": "content_block_stop", "index": index}) + "\n\n"
+	}
+	chunks := []string{
+		// Both blocks open on a held half of the cloaked token.
+		delta("1", "Ant") + delta("2", "Ant"),
+		// Each continuation completes its own block's token, then closes it.
+		delta("1", "igravity") + stop("1"),
+		delta("2", "igravity") + stop("2"),
+		"event: message_stop\ndata: " + mustJSON(t, map[string]any{"type": "message_stop"}) + "\n\n",
+	}
+	var out []byte
+	for i, chunk := range chunks {
+		raw, code := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk,
+			makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/lane-model", i, []byte(chunk), nil))
+		if code != 0 {
+			t.Fatalf("chunk %d: code=%d", i, code)
+		}
+		body, drop := decodeStreamBody(t, raw)
+		switch {
+		case drop:
+		case len(body) > 0:
+			out = append(out, body...)
+		default:
+			// The host forwards a chunk the plugin did not modify verbatim.
+			out = append(out, chunk...)
+		}
+	}
+	emitted := string(out)
+	if n := strings.Count(emitted, "omp"); n != 2 {
+		t.Fatalf("expected one restored token per block, got %d: %s", n, emitted)
+	}
+	if strings.Contains(emitted, "Antig") {
+		t.Fatalf("a cloaked spelling reached the client: %s", emitted)
+	}
+	// The synthesised flush events carry each block's own index: a lane-0
+	// collapse can only ever produce "index":0.
+	if !strings.Contains(emitted, `"index":1`) || !strings.Contains(emitted, `"index":2`) {
+		t.Fatalf("flushes did not carry both block indices: %s", emitted)
 	}
 }

@@ -4,7 +4,7 @@ CLIProxyAPI v7 dynamic plugin (`buildmode=c-shared`, ABI v1) for disguising codi
 
 ## Features
 
-- **Client-Scoped Brand Rewriting**: Replaces the resolved client's identity tokens and context paths (`.claude/`, `.codex/`, `.omp/`, `CLAUDE.md`) with Antigravity equivalents (`.gemini/`, `GEMINI.md`) on request, and restores them in responses and SSE streams. Unaffiliated competitor names are left untouched so reverse restoration stays unambiguous.
+- **Client-Scoped Brand Rewriting**: Replaces the resolved client's identity tokens and context paths (`.claude/`, `.codex/`, `.omp/`) with Antigravity equivalents (`.gemini/`) on request, and restores them in responses and SSE streams. Each client's instruction file follows its directory (`CLAUDE.md` -> `GEMINI.md` for `claude_code`; `codex` keeps `AGENTS.md`; Oh My Pi's global `~/.claude/CLAUDE.md` -> `~/.gemini/AGENTS.md`). The bare `CLAUDE.md` filename maps one-way to the neutral `AGENTS.md` and is never reverse-restored as a bare filename. Unaffiliated competitor names are left untouched so reverse restoration stays unambiguous.
 - **Bidirectional Tool Cloaking**: Maps client-native tool declarations to Antigravity targets on request and restores original names in JSON responses and SSE streams.
 - **SSE Stream Reassembly Buffer**: Event-level buffer across `\n\n` boundaries uncloaks tool names and brand tokens split across network packets.
 - **Model-Prefix Gate (`model_prefixes`)**: Restricts cloaking to matching upstream/requested model prefixes (e.g. `agy/`); non-matching models pass through untouched.

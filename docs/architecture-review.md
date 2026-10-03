@@ -47,7 +47,7 @@ In `rewriteRequestBodyWithClient`, a single request payload traverses the decode
 2. `extractToolNames` (recursive walk to locate tool declarations/invocations)
 3. `cloakToolNames` (walks `tools[]`, `messages[]`, `tool_choice`)
 4. `rewriteToolDescriptions` (walks `tools[]` to replace brands and tool references)
-5. `rewriteConversationContent` (walks `messages[]` where `role == "system"`)
+5. `rewriteConversationContent` (walks `messages[]` content for every role; user turns only their own machine-generated `<system-reminder>`/`tool_result` blocks)
 6. `replaceToolNamesInValue` (walks top-level `"system"`)
 
 Schema knowledge for `openai` and `anthropic` formats is duplicated and fragmented across 6 separate functions. Adding support for new message block types or parameter structures requires modifying multiple functions across 600 lines.

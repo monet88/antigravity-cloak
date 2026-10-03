@@ -2055,19 +2055,15 @@ func TestRewriteMasksBareClaudeAndRemapsClaudeHomePath(t *testing.T) {
 		{"haiku model id keeps its suffix", `Haiku 4.5: 'claude-haiku-4-5-20251001'`, `Haiku 4.5: 'antigravity-haiku-4-5-20251001'`, true},
 		{"unknown model id falls through to the bare rule", `'claude-9-9'`, `'antigravity-9-9'`, true},
 		{"url uses official domain", `web app (claude.ai/code)`, `web app (antigravity.google/code)`, true},
-		// The client home directory maps onto the Antigravity equivalent so the
-		// model is not handed a dead .Antigravity path.
-		// A plain home directory is NOT remapped any more. Only the home
-		// instruction file is, and only for Claude Code and Codex; Oh My Pi
-		// keeps remapping its whole home directory. Remapping every .claude
-		// path rewrote the user's own text, and live acceptance caught Claude
-		// Code writing it into a README.
+		// The client context paths are remapped at any position - home-relative,
+		// absolute, Windows or Unix - because Claude Code emits absolute
+		// spellings in its own system context. That covers plain directories
+		// (.claude/projects/...) as well as the instruction file.
 		{"claude home remapped", `memory at C:\\Users\\monet\\.claude\\projects\\slug\\memory`, `memory at C:\\Users\\monet\\.gemini\\projects\\slug\\memory`, true},
 		{"unix claude projects is context", `memory at /home/user/.claude/projects/slug`, `memory at /home/user/.gemini/projects/slug`, true},
-		// The instruction file is remapped for a home spelling only. An
-		// absolute path could equally be the .claude of another project, so it
-		// is left alone - which does mean an absolute tool-call path is no
-		// longer cloaked.
+		// The instruction file is renamed inside the remapped directory, and an
+		// absolute spelling is remapped too: live acceptance measured 114
+		// absolute .claude paths per request reaching the model uncloaked.
 		{"claude instruction file remapped", `read ~\.claude\CLAUDE.md`, `read ~\.gemini\GEMINI.md`, true},
 		{"unix claude instruction file remapped", `read ~/.claude/CLAUDE.md`, `read ~/.gemini/GEMINI.md`, true},
 		{"absolute windows claude remapped", `read C:\Users\monet\.claude\AGENTS.md`, `read C:\Users\monet\.gemini\AGENTS.md`, true},

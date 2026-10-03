@@ -88,8 +88,11 @@ func clientContexts() []clientContext {
 			echoes:       "see ~/.gemini/GEMINI.md and the Antigravity SDK from Google Deepmind",
 			mustComeBack: "~/.claude/CLAUDE.md",
 			mustNotReach: "~/.gemini/GEMINI.md",
-			brandReply:   "",
-			brandBack:    "",
+			// Pin the vendor-word reverse through the generic brand assertion;
+			// the SDK reverse is asserted separately below because streamed SSE
+			// may split the two restored spellings across different frames.
+			brandReply: "Google Deepmind",
+			brandBack:  "Anthropic",
 		},
 		{
 			// Codex's own table covers its client name and the vendor vocabulary
@@ -106,14 +109,17 @@ func clientContexts() []clientContext {
 		},
 		{
 			// Oh My Pi ships bare filenames in prose and brands itself Oh My Pi.
-			// CLAUDE.md stays verbatim: with no bare-Claude rule in this table
-			// nothing would rewrite it anyway, and rewriting it to AGENTS.md
-			// would only misname a file the harness really does load.
+			// A bare CLAUDE.md stays verbatim on both legs: with no bare-Claude
+			// rule in this table nothing would rewrite it anyway, and rewriting
+			// it to AGENTS.md would only misname a file the harness really does
+			// load. mustComeBack has to be a spelling the REVERSE pass produces:
+			// an already-native literal in the echo satisfies it with the
+			// reverse deleted, which is what the home path below pins instead.
 			client: "oh_my_pi", tools: ompTools, format: "anthropic", declared: "openai",
-			sent:         "read CLAUDE.md first, never grep for CLAUDE.md or .cursorrules",
-			echoes:       "read CLAUDE.md first, never grep for CLAUDE.md or .cursorrules",
-			mustComeBack: "CLAUDE.md",
-			mustNotReach: "",
+			sent:         "read CLAUDE.md first, then persist to ~/.omp/agent",
+			echoes:       "read CLAUDE.md first, then persist to ~/.gemini/agent",
+			mustComeBack: "~/.omp/agent",
+			mustNotReach: "~/.gemini/agent",
 			brandReply:   "Antigravity",
 			brandBack:    "omp",
 		},
@@ -188,6 +194,11 @@ func TestEveryClientReversesWhatItRewrites(t *testing.T) {
 				}
 				if !strings.Contains(back, tc.brandBack) {
 					t.Errorf("%s: expected brand %q, client saw: %s", tc.client, tc.brandBack, back)
+				}
+			}
+			if tc.client == "claude_code" {
+				if strings.Contains(back, "Antigravity SDK") || !strings.Contains(back, "Anthropic SDK") {
+					t.Errorf("claude_code: SDK reverse did not round-trip: %s", back)
 				}
 			}
 		})
@@ -296,6 +307,11 @@ func TestEveryClientReversesWhatItRewritesWhileStreaming(t *testing.T) {
 					t.Errorf("%s: expected brand %q in the stream, client saw: %s", tc.client, tc.brandBack, out)
 				}
 			}
+			if tc.client == "claude_code" {
+				if strings.Contains(out, "Antigravity SDK") || !strings.Contains(out, "Anthropic SDK") {
+					t.Errorf("claude_code: streamed SDK reverse did not round-trip: %s", out)
+				}
+			}
 		})
 	}
 }
@@ -325,7 +341,7 @@ func TestBrandReverseRunsWithNoCachedPattern(t *testing.T) {
 		m.mu.Unlock()
 	})
 
-	if m.sessions[key].cached != nil {
+	if m.getSession(key).cached != nil {
 		t.Fatal("probe must start with a nil cached pattern")
 	}
 

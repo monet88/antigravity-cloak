@@ -10,12 +10,15 @@ import (
 // name is a client-declared identifier the model calls back by name, so one
 // name surviving the forward pass is a leak of the client's own tool inventory.
 //
-// The list is BUILTIN_TOOL_NAMES + HIDDEN_TOOL_NAMES from
-// .ref/oh-my-pi/packages/coding-agent/src/tools/builtin-names.ts, plus the
-// names declared in that package's tool definition files. When Oh My Pi gains
-// or renames a tool, add it here: a name missing from the list is still safe
-// (the deterministic wp_ext_<hash> fallback covers unknown tools), but a name
-// that starts leaking would not be caught.
+// The list is BUILTIN_TOOL_NAMES + HIDDEN_TOOL_NAMES from the oh-my-pi
+// coding-agent package's tools/builtin-names.ts, plus the names declared in
+// that package's tool definition files. `.ref/` is a gitignored workspace
+// clone, so the list is pinned to the revision it was read from: oh-my-pi
+// 2b023d1b80133c523d66412602d99b5427408395 (`git -C .ref/oh-my-pi rev-parse
+// HEAD`). When Oh My Pi gains or renames a tool, re-read that file at the pin
+// and add the name here: a name missing from the list is still safe (the
+// deterministic wp_ext_<hash> fallback covers unknown tools), but a name that
+// starts leaking would not be caught.
 func TestOMPToolSurfaceIsFullyCloaked(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`model_prefixes: [agy]`)))

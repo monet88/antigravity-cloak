@@ -10,12 +10,15 @@ coding-CLI traffic as Antigravity. Two jobs:
 
 1. Brand rewrite: replace the resolved client's own identity words with
    Antigravity in the request `system` field and `system`-role messages, then
-   restore them on the way back. The forward and reverse tables are declared
-   per client (`brandMappingsByClient` / `reverseBrandMappingsByClient` in
-   `main.go`), and the resolved client selects exactly one and no other, so an
-   approved brand target inverts back to that same client. Adding a client
-   (opencode, cursor, ...) is one table plus one registry line. A competitor
-   product name owns no table, so a request that merely mentions one is left
+   restore them on the way back. The forward tables are declared per client
+   (`brandMappingsByClient` in `main.go`); `claude_code` and `codex` register
+   their reverse tables in `reverseBrandMappingsByClient`, while Oh My Pi
+   inverts through the protected `ompProtectedReverseTable` that
+   `brandReverseTableFor` selects. The resolved client selects exactly one and
+   no other, so an approved brand target inverts back to that same client.
+   Adding a client (opencode, cursor, ...) is one forward table plus one
+   registry line, and a reverse authority. A competitor product name owns no
+   table, so a request that merely mentions one is left
    alone. Two carve-outs: a client's opening identity sentence is replaced
    **whole** (terminal, so it needs no reverse), and one approved deliberate
    one-way convention - the bare `CLAUDE.md` -> `AGENTS.md` filename rule
@@ -111,7 +114,7 @@ exact key string back to the client and tool names are case-sensitive.
 Supported clients:
 - `claude_code` (PascalCase: Core tools `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `WebSearch`, `WebFetch` map to proven Antigravity equivalents. Tier-2 subagent control, planning, and MCP-resource tools cloak to shared aliases `wp_*`, with unknown/MCP tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
 - `codex` (snake_case: `exec`, `exec_command`, `web_search`, `request_user_input`, `collaboration__spawn_agent`. In `defaultCloakTables["codex"]`, only code-mode entry point `exec` and direct AGY role targets are kept so `defaultUncloakTables` remains injective at `init()`. Shell-mode `exec_command -> run_command`, helpers (`apply_patch`, `write_stdin`, `view_image`), and collaboration tools cloak to shared aliases `wp_*` via `codexSharedAliases` in the request-scoped alias plan. Dynamic `mcp__*` and unknown tools receive deterministic fallback aliases `wp_ext_<hash>`. Response and stream reversal restores exact original source names without cross-mode collision.)
-- `oh_my_pi` (9-tool Safe Mapping Set: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Extended tools `todo`, `hub`, `eval`, `vibe_*`, and Autoresearch tools cloak to shared aliases `wp_*`, with unknown tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
+- `oh_my_pi` (9-tool Safe Mapping Set: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Extended tools `todo`, `hub`, `eval`, `goal`, `yield`, `wait`, `vibe_*`, and Autoresearch tools cloak to shared aliases `wp_*`, with unknown tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
 > Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 > Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
 > Which tool names a given Codex model actually sends, and the recommended mapping for the shell-mode surface, are recorded in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**.
@@ -198,9 +201,16 @@ acceptance cycle on 2026-09-29. Neither is caught by reading the build output.
     commit` inside `/build` commits *nothing*: the fresh clone is a clean tree
     with no working-tree edits in it, so the build silently produces a binary
     of `HEAD` and every uncommitted change is dropped. This is invisible when
-    the change under test is behavioural. To build dirty source, overlay the
-    host working tree onto the clone **before** committing:
+    the change under test is behavioural. To build dirty source, remove tracked
+    host deletions from the clone, then overlay the host working tree **before**
+    committing:
+    `git -C /src diff --name-only --diff-filter=D "$CLOAK_BUILD_COMMIT" | while read -r f; do git -C /build rm -q -- "$f"; done`,
+    followed by
     `tar -C /src --exclude=.git --exclude=dist -cf - . | tar -C /build -xf -`.
+    Those lines belong inside `$BuildCommand`, before `go build` - `docker run
+    --rm` has already removed the clone by the time it returns. `tar` copies
+    only files that exist, so failing to remove tracked host deletions first
+    leaves stale source in the acceptance commit.
     Section 2 of the runbook only describes the committed-`$TargetCommit` path,
     which is why this is easy to miss. Always assert the string you changed is
     present in the source the build actually consumed, not just in the host

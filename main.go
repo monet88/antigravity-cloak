@@ -900,24 +900,22 @@ func rewriteProtectedBrand(rootMap map[string]any, sourceFormat, client string) 
 	}
 
 	if toolsRaw, ok := rootMap["tools"].([]any); ok {
+		brandText := func(s string) (string, bool) {
+			return rewriteProtectedBrandText(s, cfg, client)
+		}
 		for _, tRaw := range toolsRaw {
-			if tMap, ok := tRaw.(map[string]any); ok {
-				if sourceFormat == "openai" {
-					if fn, ok := tMap["function"].(map[string]any); ok {
-						if desc, ok := fn["description"].(string); ok {
-							if next, c := rewriteProtectedBrandText(desc, cfg, client); c {
-								fn["description"] = next
-							}
-						}
-					}
-				} else if sourceFormat == "anthropic" {
-					if desc, ok := tMap["description"].(string); ok {
-						if next, c := rewriteProtectedBrandText(desc, cfg, client); c {
-							tMap["description"] = next
-						}
-					}
-				}
+			tMap, ok := tRaw.(map[string]any)
+			if !ok {
+				continue
 			}
+			// Parameter help is machine-generated tool prose one or two levels
+			// below the tool, so the same brand contract applies there as to the
+			// tool's own description: a nested description or title naming the
+			// client or its home directory must not reach the model literal,
+			// while structure and literal-bearing subtrees stay byte-for-byte.
+			// The request-scoped tool aliases reach these fields through the
+			// alias pass that runs after this one.
+			rewriteToolProse(tMap, sourceFormat, brandText)
 		}
 	}
 
@@ -1371,7 +1369,7 @@ func handleResponseIntercept(request []byte) []byte {
 					}
 				}
 				if route.brandRestorationEnabled {
-					if rev, c := reverseBrandInResponseBody(modified, format, route.client); c {
+					if rev, c := reverseCloakedBrandBody(modified, route.client); c {
 						modified = rev
 						changed = true
 					}
@@ -1472,17 +1470,13 @@ func handleResponseIntercept(request []byte) []byte {
 			changed = true
 		}
 	}
-	if client == "oh_my_pi" {
-		if rev, c := reverseBrandInResponseBody(modified, format, client); c {
-			modified = rev
-			changed = true
-		}
-	}
-	if client != "oh_my_pi" {
-		if rev, c := reverseCloakedBrandBody(modified, client); c {
-			modified = rev
-			changed = true
-		}
+	// One brand reverse for every resolved client. The table it walks is
+	// selected by the client inside the walk (the protected pair and home
+	// directory for oh_my_pi, the client's own table otherwise), so there is
+	// no second authority to choose between here.
+	if rev, c := reverseCloakedBrandBody(modified, client); c {
+		modified = rev
+		changed = true
 	}
 	debugLog("handleResponseIntercept: changed=%t Body=%s", changed, string(modified))
 	if !changed {
@@ -1804,21 +1798,6 @@ func uncloakResponseBodyExact(body []byte, uncloakTable map[string]string, sourc
 	return raw, true
 }
 
-func reverseBrandInResponseBody(body []byte, format, client string) ([]byte, bool) {
-	var root any
-	if err := safeUnmarshal(body, &root); err != nil {
-		return nil, false
-	}
-	if !reverseAssistantBrandInJSON(root, format, client) {
-		return nil, false
-	}
-	raw, err := safeMarshal(root)
-	if err != nil {
-		return nil, false
-	}
-	return raw, true
-}
-
 // reverseAssistantBrandInJSON restores the resolved client's own reverse table
 // over the CARRIERS a response actually carries: assistant prose, and the values
 // inside tool arguments. It never rewrites a tool name, an id, a type or any
@@ -1827,9 +1806,8 @@ func reverseBrandInResponseBody(body []byte, format, client string) ([]byte, boo
 // tool_use.name and rewrite a tool the client had declared under a spelling
 // that happens to look like a cloaked token.
 //
-// Both carriers are processed whenever the body has them; the format argument
-// is only a hint.
-func reverseAssistantBrandInJSON(root any, format, client string) bool {
+// Both carriers are processed whenever the body has them.
+func reverseAssistantBrandInJSON(root any, client string) bool {
 	m, ok := root.(map[string]any)
 	if !ok {
 		return false
@@ -1926,25 +1904,38 @@ func isAssistantTextPartType(typ string) bool {
 	return typ == "text" || typ == "output_text" || typ == ""
 }
 
-func reverseBrandInOpenAIContent(content any, client string) (any, bool) {
+// walkOpenAITextParts rewrites every assistant-visible text string in an OpenAI
+// `content` value: a plain string, an array whose entries are strings or
+// text-part objects, or a single text-part object. Only those three shapes are
+// touched - every control, non-text or otherwise unsupported part is left
+// byte-for-byte unchanged. Containers are mutated in place; the plain-string
+// shape is returned for the caller to reassign. The flag is true only when the
+// rewrite changed at least one string.
+func walkOpenAITextParts(content any, rewrite func(string) string) (any, bool) {
 	switch v := content.(type) {
 	case string:
-		return replaceInsensitiveSetWithPrev(v, false, brandReverseTableFor(client))
+		if next := rewrite(v); next != v {
+			return next, true
+		}
 	case []any:
 		changed := false
 		for _, partRaw := range v {
-			if part, ok := partRaw.(map[string]any); ok {
+			switch part := partRaw.(type) {
+			case map[string]any:
 				if typ, _ := part["type"].(string); !isAssistantTextPartType(typ) {
 					continue
 				}
 				if txt, ok := part["text"].(string); ok {
-					if next, c := replaceInsensitiveSetWithPrev(txt, false, brandReverseTableFor(client)); c {
+					if next := rewrite(txt); next != txt {
 						part["text"] = next
 						changed = true
 					}
 				}
-			} else if s, ok := partRaw.(string); ok {
-				if next, c := replaceInsensitiveSetWithPrev(s, false, brandReverseTableFor(client)); c {
+			case string:
+				if next := rewrite(part); next != part {
+					// Replace the first equal element, not the element at this
+					// index: the rewrite may be stateful (a streaming lane), so
+					// two equal strings need not rewrite identically.
 					for i, elem := range v {
 						if elem == partRaw {
 							v[i] = next
@@ -1955,19 +1946,26 @@ func reverseBrandInOpenAIContent(content any, client string) (any, bool) {
 				}
 			}
 		}
-		return v, changed
+		return content, changed
 	case map[string]any:
 		if typ, _ := v["type"].(string); !isAssistantTextPartType(typ) {
 			return content, false
 		}
 		if txt, ok := v["text"].(string); ok {
-			if next, c := replaceInsensitiveSetWithPrev(txt, false, brandReverseTableFor(client)); c {
+			if next := rewrite(txt); next != txt {
 				v["text"] = next
-				return v, true
+				return content, true
 			}
 		}
 	}
 	return content, false
+}
+
+func reverseBrandInOpenAIContent(content any, client string) (any, bool) {
+	return walkOpenAITextParts(content, func(txt string) string {
+		next, _ := replaceInsensitiveSetWithPrev(txt, false, brandReverseTableFor(client))
+		return next
+	})
 }
 
 // uncloakStreamChunk uses pre-compiled regex to replace tool names directly in
@@ -2384,37 +2382,19 @@ func openAIToolCallLaneKey(choice, toolCall map[string]any) string {
 // cannot append to can never keep a carry inside the lane past its own
 // finish_reason, waiting for a [DONE] that the client has already passed.
 //
-// `content` is a string in the Chat Completions form, and an array of text
-// parts (or a single text-part object) in the content-parts form; the applier
-// handles all three, so this must too.
+// It is expressed through walkOpenAITextParts with an identity rewrite, so the
+// set of shapes it accepts cannot drift from the set the applier mutates: the
+// probe visits exactly the strings the applier would, and returning each string
+// unchanged is what keeps the walk from writing anything.
 func openAIContentAppendsProse(content any) bool {
-	switch v := content.(type) {
-	case string:
-		return v != ""
-	case []any:
-		for _, partRaw := range v {
-			switch part := partRaw.(type) {
-			case string:
-				if part != "" {
-					return true
-				}
-			case map[string]any:
-				if typ, _ := part["type"].(string); !isAssistantTextPartType(typ) {
-					continue
-				}
-				if txt, ok := part["text"].(string); ok && txt != "" {
-					return true
-				}
-			}
+	appends := false
+	walkOpenAITextParts(content, func(txt string) string {
+		if txt != "" {
+			appends = true
 		}
-	case map[string]any:
-		if typ, _ := v["type"].(string); !isAssistantTextPartType(typ) {
-			return false
-		}
-		txt, ok := v["text"].(string)
-		return ok && txt != ""
-	}
-	return false
+		return txt
+	})
+	return appends
 }
 
 // applyOpenAIProseContent reverses a choice's `content` value in place, in
@@ -2426,54 +2406,10 @@ func applyOpenAIProseContent(sess *streamSession, laneKey string, content any) (
 	if !openAIContentAppendsProse(content) {
 		return content, false
 	}
-	switch v := content.(type) {
-	case string:
-		next, _ := applySemanticBrandLane(sess, laneKey, v)
-		if next == v {
-			return content, false
-		}
-		return next, true
-	case []any:
-		changed := false
-		for _, partRaw := range v {
-			switch part := partRaw.(type) {
-			case map[string]any:
-				if typ, _ := part["type"].(string); !isAssistantTextPartType(typ) {
-					continue
-				}
-				if txt, ok := part["text"].(string); ok {
-					if next, _ := applySemanticBrandLane(sess, laneKey, txt); next != txt {
-						part["text"] = next
-						changed = true
-					}
-				}
-			case string:
-				if next, _ := applySemanticBrandLane(sess, laneKey, part); next != part {
-					for i, elem := range v {
-						if elem == partRaw {
-							v[i] = next
-							changed = true
-							break
-						}
-					}
-				}
-			}
-		}
-		return content, changed
-	case map[string]any:
-		if typ, _ := v["type"].(string); !isAssistantTextPartType(typ) {
-			return content, false
-		}
-		txt, ok := v["text"].(string)
-		if !ok {
-			return content, false
-		}
-		if next, _ := applySemanticBrandLane(sess, laneKey, txt); next != txt {
-			v["text"] = next
-			return content, true
-		}
-	}
-	return content, false
+	return walkOpenAITextParts(content, func(txt string) string {
+		next, _ := applySemanticBrandLane(sess, laneKey, txt)
+		return next
+	})
 }
 
 // openAIChoiceContinuedLanes returns the lane keys a choice's own payload in the
@@ -2746,22 +2682,7 @@ func (m *streamSessionManager) reverseBrandOpenAIStreamingMap(data map[string]an
 }
 
 func (m *streamSessionManager) reverseBrandAnthropicStreamingMap(data map[string]any, sess *streamSession) bool {
-	idxVal, hasIdx := data["index"]
-	laneKey := "anthropic:0"
-	if hasIdx {
-		switch v := idxVal.(type) {
-		case json.Number:
-			if i, err := v.Int64(); err == nil {
-				laneKey = fmt.Sprintf("anthropic:%d", i)
-			}
-		case float64:
-			laneKey = fmt.Sprintf("anthropic:%d", int(v))
-		case int:
-			laneKey = fmt.Sprintf("anthropic:%d", v)
-		default:
-			laneKey = fmt.Sprintf("anthropic:%v", v)
-		}
-	}
+	laneKey := laneKeyWithIndex("anthropic", data)
 	typ, _ := data["type"].(string)
 	switch typ {
 	case "content_block_start":
@@ -3184,10 +3105,29 @@ func openAIMayCarryFinishReason(ev []byte) bool {
 }
 
 // laneKeyWithIndex derives a lane key from an event's own `index` field,
-// defaulting to lane 0 for the events that carry none.
+// defaulting to lane 0 only when the event carries none. The wire shape is
+// json.Number (safeUnmarshal decodes with UseNumber); float64 and int are
+// accepted for maps built in-process. A present index that is none of those
+// keeps its own identity rather than collapsing onto lane 0: two such blocks are
+// distinct content lanes, and merging them would emit one block's held carry
+// through the other. The Anthropic reader has always keyed them apart; the
+// shared helper has to preserve that, and a non-integral number has never
+// parsed, so it still defaults.
 func laneKeyWithIndex(format string, data map[string]any) string {
-	if n, ok := jsonIndexValue(data["index"]); ok {
-		return fmt.Sprintf("%s:%d", format, n)
+	idx, present := data["index"]
+	if present {
+		switch v := idx.(type) {
+		case json.Number:
+			if i, err := v.Int64(); err == nil {
+				return fmt.Sprintf("%s:%d", format, i)
+			}
+		case float64:
+			return fmt.Sprintf("%s:%d", format, int(v))
+		case int:
+			return fmt.Sprintf("%s:%d", format, v)
+		default:
+			return fmt.Sprintf("%s:%v", format, v)
+		}
 	}
 	return format + ":0"
 }
@@ -5037,14 +4977,9 @@ type rewriteMapping struct {
 // reverseCloakedBrandBody maps the tokens this plugin introduced back onto the
 // client's own spelling, so a cloaked conversation reads to the client exactly
 // as it did before. It runs after tool-name uncloaking and uses the same
-// recursive walk as the forward pass.
-//
-// This is separate from reverseBrandInResponseBody, which is the Oh My Pi
-// protected-brand policy (Antigravity -> omp) and has its own chunk-safe
-// streaming lane. For claude_code and codex the two tables do share the bare
-// "Antigravity" token: those clients run this pass and invert it to their own
-// name, while Oh My Pi runs the protected lane and inverts it to omp. No client
-// runs both, so the token is still inverted exactly once.
+// recursive walk as the forward pass, with the table selected by the resolved
+// client: the protected pair and home directory for oh_my_pi, the client's own
+// table for claude_code and codex.
 func reverseCloakedBrandBody(body []byte, client string) ([]byte, bool) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {
@@ -5057,7 +4992,7 @@ func reverseCloakedBrandBody(body []byte, client string) ([]byte, bool) {
 	// never declared. Tool identity, ids, types and metadata belong to the
 	// exact alias-plan authority alone; brand reverse owns assistant prose and
 	// the VALUES inside tool arguments.
-	if !reverseAssistantBrandInJSON(root, "", client) {
+	if !reverseAssistantBrandInJSON(root, client) {
 		return nil, false
 	}
 	raw, err := safeMarshal(root)
@@ -6255,22 +6190,17 @@ func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, cac
 		if !ok {
 			continue
 		}
-		schemaOwner := tMap
-		if sourceFormat == "openai" {
-			fn, ok := tMap["function"].(map[string]any)
-			if !ok {
-				continue
-			}
-			schemaOwner = fn
-		}
-		if rewriteDescriptionField(schemaOwner, "description", mappings, cached) {
-			changed = true
-		}
-		// Parameter help lives inside the JSON Schema, one or two levels below
-		// the tool. Claude Code ships tools whose parameter description names
-		// the client home directory (~/.claude/scheduled_tasks.json), so a
-		// top-level-only walk left that sitting in the payload.
-		if rewriteSchemaDescriptions(schemaOwner, mappings) {
+		// The tool's own description is machine-generated prose too, and so is
+		// the parameter help inside the JSON Schema one or two levels below it.
+		// Claude Code ships tools whose parameter description names the client
+		// home directory (~/.claude/scheduled_tasks.json), so a top-level-only
+		// walk left that sitting in the payload. Both take this pass's text
+		// rule - the brand mappings plus the request-scoped tool aliases - and
+		// the schema is walked rather than re-serialized, so key order and
+		// nesting survive.
+		if rewriteToolProse(tMap, sourceFormat, func(s string) (string, bool) {
+			return rewriteDescriptiveText(s, mappings, cached)
+		}) {
 			changed = true
 		}
 	}
@@ -6280,28 +6210,41 @@ func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, cac
 // isSchemaTextField reports whether a JSON Schema keyword holds human-readable
 // help rather than structure. Every other string in a schema is structure: a
 // property name, a `required` member, an `enum`/`const` value, a `pattern`.
+// Rewriting one of those while the property or value it validates keeps the
+// client's spelling leaves a schema no arguments can satisfy
+// (required:["Antigravity"] over a property still called "Claude").
 func isSchemaTextField(key string) bool {
 	return key == "description" || key == "title"
 }
 
-// rewriteSchemaDescriptions applies the brand mapping to the help text inside a
-// tool's JSON Schema. The schema is walked rather than re-serialized, so key
-// order and nesting survive untouched, and only descriptive fields are
-// rewritten: a schema is the contract the model's arguments have to satisfy, so
-// rewriting a "required" entry, an "enum"/"const" member or a property name —
-// while the matching property name or validated value keeps the client's
-// spelling — leaves a schema no arguments can satisfy
-// (required:["Antigravity"] over a property still called "Claude").
-func rewriteSchemaDescriptions(tool map[string]any, mappings []rewriteMapping) bool {
+// rewriteToolProse rewrites the machine-generated prose of one tool
+// declaration: its own description, then its JSON Schema's descriptive fields.
+// The owner is the tool itself, or its `function` object on the OpenAI wire
+// shape; a structural or literal-bearing field is never touched.
+func rewriteToolProse(tool map[string]any, sourceFormat string, rewrite func(string) (string, bool)) bool {
+	owner := tool
+	if sourceFormat == "openai" {
+		fn, ok := tool["function"].(map[string]any)
+		if !ok {
+			return false
+		}
+		owner = fn
+	}
 	changed := false
+	if desc, ok := owner["description"].(string); ok {
+		if next, c := rewrite(desc); c {
+			owner["description"] = next
+			changed = true
+		}
+	}
+	// The schema is walked rather than re-serialized, so key order and nesting
+	// survive the rewrite.
 	for _, key := range []string{"input_schema", "parameters"} {
-		schema, ok := tool[key]
+		schema, ok := owner[key]
 		if !ok {
 			continue
 		}
-		// Maps and slices are mutated in place, so the schema is already
-		// rewritten at tool[key] whenever this reports a change.
-		if _, c := rewriteSchemaText(schema, mappings); c {
+		if rewriteSchemaTextFields(schema, rewrite) {
 			changed = true
 		}
 	}
@@ -6313,8 +6256,9 @@ func rewriteSchemaDescriptions(tool map[string]any, mappings []rewriteMapping) b
 // constant while the property carrying it keeps the client's spelling, so the
 // schema can no longer be satisfied: enum:["Antigravity"] over a property
 // still called "Claude" rejects every argument the client can send. A nested
-// schema is only ever found under a schema keyword, so skipping these subtrees
-// costs no real traversal.
+// schema is reached through a schema keyword or a dictionary entry, never
+// through one of these literal keywords, so skipping a literal subtree costs
+// no real traversal.
 var schemaLiteralKeys = map[string]bool{
 	"const":    true,
 	"enum":     true,
@@ -6323,24 +6267,51 @@ var schemaLiteralKeys = map[string]bool{
 	"examples": true,
 }
 
-// rewriteSchemaText rewrites the descriptive strings of a JSON Schema value,
-// recursing through properties, items, $defs and the composition keywords to
-// reach nested schemas, and leaving every structural string exactly as it was.
-// The subtree under a literal-bearing keyword is never descended into.
-func rewriteSchemaText(value any, mappings []rewriteMapping) (any, bool) {
+// schemaDictionaryKeys are the schema keywords whose value is a
+// dictionary-of-schemas: the keys are arbitrary property or definition names,
+// never keywords. A name that happens to collide with a literal keyword - a
+// property called "default", a definition called "examples" - is still an
+// entry whose subschema has to be walked, so the literal-key skip applies only
+// on a schema node, never inside one of these containers.
+var schemaDictionaryKeys = map[string]bool{
+	"properties":        true,
+	"patternProperties": true,
+	"$defs":             true,
+	"definitions":       true,
+	"dependentSchemas":  true,
+}
+
+// rewriteSchemaTextFields applies rewrite to the descriptive strings of a JSON
+// Schema value, recursing through properties, items, $defs and the composition
+// keywords to reach nested schemas, and leaving every structural string exactly
+// as it was. The subtree under a literal-bearing keyword is never descended
+// into, but only where that keyword holds data: inside a dictionary-of-schemas
+// container the keys are names, so an entry spelled like a literal keyword is
+// still walked. Containers are mutated in place, so only the changed flag
+// travels back. The transform is a parameter because two passes need the same
+// walk with different text rules: the alias-plan clients run the brand mappings
+// plus the request-scoped tool aliases, while the protected Oh My Pi route runs
+// its own sentinel-aware brand text and gets the aliases from the later alias
+// pass.
+func rewriteSchemaTextFields(value any, rewrite func(string) (string, bool)) bool {
+	return rewriteSchemaValue(value, false, rewrite)
+}
+
+// rewriteSchemaValue walks one JSON Schema value. dictOfSchemas is true when
+// value is the contents of a dictionary-of-schemas container, so its keys are
+// entry names rather than keywords.
+func rewriteSchemaValue(value any, dictOfSchemas bool, rewrite func(string) (string, bool)) bool {
 	switch typed := value.(type) {
 	case map[string]any:
 		changed := false
 		for key, child := range typed {
 			if s, isString := child.(string); isString {
-				if !isSchemaTextField(key) {
+				// A dictionary entry's value is a schema, so a string here is
+				// not keyword help; only a schema node's descriptive field is.
+				if dictOfSchemas || !isSchemaTextField(key) {
 					continue
 				}
-				next := s
-				for _, mapping := range mappings {
-					next, _ = replaceInsensitiveRule(next, mapping, true)
-				}
-				if next != s {
+				if next, c := rewrite(s); c {
 					typed[key] = next
 					changed = true
 				}
@@ -6349,60 +6320,55 @@ func rewriteSchemaText(value any, mappings []rewriteMapping) (any, bool) {
 			// Only containers are walked, and never under a literal-bearing
 			// keyword: a nested string there is a validated constant, not help
 			// text, and rewriting it would break the contract the model's
-			// arguments have to satisfy.
-			if schemaLiteralKeys[key] {
+			// arguments have to satisfy. This is a schema-keyword guard, so it
+			// does not fire on an entry name inside a dictionary.
+			if !dictOfSchemas && schemaLiteralKeys[key] {
 				continue
 			}
 			switch child.(type) {
 			case map[string]any, []any:
-				if next, c := rewriteSchemaText(child, mappings); c {
-					typed[key] = next
+				if rewriteSchemaValue(child, !dictOfSchemas && schemaDictionaryKeys[key], rewrite) {
 					changed = true
 				}
 			}
 		}
-		return typed, changed
+		return changed
 	case []any:
 		changed := false
-		for i, child := range typed {
+		for _, child := range typed {
 			switch child.(type) {
 			case map[string]any, []any:
-				if next, c := rewriteSchemaText(child, mappings); c {
-					typed[i] = next
+				if rewriteSchemaValue(child, false, rewrite) {
 					changed = true
 				}
 			}
 		}
-		return typed, changed
-	default:
-		return value, false
+		return changed
 	}
+	return false
 }
 
-// rewriteDescriptionField applies brand replacements and tool-name cloaking to
-// the string description stored at obj[key], writing back only when something
-// changed. It reports whether the field was modified.
-func rewriteDescriptionField(obj map[string]any, key string, mappings []rewriteMapping, cached *cachedCloakPatterns) bool {
-	descVal, ok := obj[key].(string)
-	if !ok {
-		return false
-	}
-	next := descVal
-	descChanged := false
+// rewriteDescriptiveText applies the brand mappings and then the request-scoped
+// tool-name aliases to one piece of human-readable text. It is the single seam
+// every descriptive surface uses - a tool's top-level description and the
+// description/title fields inside its JSON Schema - so machine-generated prose
+// that names a declared tool is cloaked to the same alias everywhere. Only
+// descriptive text may take the tool aliases: running them over structural
+// strings would rewrite a contract the model's arguments have to satisfy.
+func rewriteDescriptiveText(text string, mappings []rewriteMapping, cached *cachedCloakPatterns) (string, bool) {
+	next := text
+	changed := false
 	for _, mapping := range mappings {
 		var replaced bool
 		next, replaced = replaceInsensitiveRule(next, mapping, true)
-		descChanged = descChanged || replaced
+		changed = changed || replaced
 	}
 	if cached != nil {
 		var toolReplaced bool
 		next, toolReplaced = replaceToolNamesInText(next, cached)
-		descChanged = descChanged || toolReplaced
+		changed = changed || toolReplaced
 	}
-	if descChanged {
-		obj[key] = next
-	}
-	return descChanged
+	return next, changed
 }
 
 // rewriteConversationContent applies the brand mapping and the tool-name cloak
@@ -6906,10 +6872,6 @@ func mirrorBrandCase(matched, replacement string) string {
 // hasPrefixFold reports whether s starts with prefix, case-insensitively.
 func hasPrefixFold(s, prefix string) bool {
 	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
-}
-
-func replaceInsensitiveWithPrev(value string, prevIsWord bool, match, replacement string) (string, bool) {
-	return replaceMappingWithPrev(value, prevIsWord, rewriteMapping{Match: match, Replacement: replacement})
 }
 
 func replaceMappingWithPrev(value string, prevIsWord bool, m rewriteMapping) (string, bool) {

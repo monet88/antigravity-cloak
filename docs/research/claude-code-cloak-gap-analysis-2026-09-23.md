@@ -73,9 +73,13 @@ The header is parsed by one function for all clients (`parseExplicitClientMarker
   Every AGY target the CC table owns is live in the reverse for every CC request, whether
   or not CC declared the corresponding source.
 - `main.go:1054-1056` — `brandRestorationEnabled` is only ever set on the
-  `routeKindProtectedAGY` route (`main.go:934`). The generic response path calls
-  `reverseBrandInResponseBody` (`main.go:1122`) only on the `oh_my_pi` fall-through, so
-  CC assistant text keeps the literal `Antigravity`.
+  `routeKindProtectedAGY` route (`main.go:934`). At the time of this analysis the
+  generic response path called `reverseBrandInResponseBody` only on the `oh_my_pi`
+  fall-through, so CC assistant text kept the literal `Antigravity`. Both named
+  symbols and the line numbers above are the pre-PR-#46 state, kept as the
+  historical record; PR #46 replaced that call with the single
+  `reverseCloakedBrandBody` authority, so the seam to read today is
+  `reverseCloakedBrandBody`.
 
 **Conclusion:** the "identify the client by an explicit marker and enforce it" mechanism
 that OMP has, and that Codex adopted as an identity-only variant

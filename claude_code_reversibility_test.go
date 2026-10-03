@@ -8,22 +8,23 @@ import (
 )
 
 // Claude Code sends brand text that the forward rewrite renames onto Antigravity
-// wording. Tool NAMES and this particular brand TEXT are on two different
-// contracts:
+// wording. Tool NAMES, brand PROSE and the project instruction file are on three
+// different contracts:
 //
 //   - a tool name must come back exactly as the client spelled it, or the
 //     client cannot dispatch a call it was told about;
-//   - the project instruction file is one-way on purpose: CLAUDE.md becomes
-//     AGENTS.md and is not mapped back, because AGENTS.md is what the model was
-//     legitimately told the file is called. Reversing it would hand the client a
-//     filename that does not exist in the conversation the model was given.
+//   - brand prose the forward pass introduced is restored from the client's own
+//     reverse table, in the carrier the client actually reads (`content[].text`);
+//   - the project instruction file is one-way on purpose: a bare `CLAUDE.md`
+//     becomes `AGENTS.md` and is not mapped back, because `AGENTS.md` is what
+//     the model was legitimately told the file is called. Reversing it would
+//     hand the client a filename that does not exist in the conversation the
+//     model was given.
 //
-// Other claude_code brand tokens DO reverse (see claudeCodeReverseBrandMappings);
-// this test pins only the deliberate asymmetry.
-//
-// This pins both halves: the asymmetry is deliberate and easy to break by
-// someone adding a symmetric reverse rule.
-func TestClaudeCodeToolNamesReverseButBrandTextDoesNot(t *testing.T) {
+// The prose deliberately sits inside `content[]`: a root-level `text` field is
+// not a carrier this walk visits, so the brand assertions would hold with the
+// whole brand reverse deleted.
+func TestClaudeCodeToolNamesAndBrandProseReverseButTheBareFilenameDoesNot(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`model_prefixes: [agy]`)))
 
@@ -65,9 +66,10 @@ func TestClaudeCodeToolNamesReverseButBrandTextDoesNot(t *testing.T) {
 		t.Fatalf("forward request missing the Antigravity spellings: %s", forward)
 	}
 
-	// The model answers naming the cloaked tool and echoing the cloaked text.
-	upstream := `{"content":[{"type":"tool_use","name":"wp_run_workflow","input":{}}],
-		"text":"I updated AGENTS.md via the Antigravity SDK and will use teamwork_preview_layer."}`
+	// The model answers naming the cloaked tool and echoing the cloaked prose in
+	// the carrier the client reads: a content[] text block.
+	upstream := `{"content":[{"type":"tool_use","name":"wp_run_workflow","input":{}},` +
+		`{"type":"text","text":"I updated AGENTS.md via the Antigravity SDK and will use teamwork_preview_layer."}]}`
 	payload := responseInterceptRequestJSON(t, string(reqBody), upstream, "anthropic")
 	var mm map[string]any
 	if err := json.Unmarshal(payload, &mm); err != nil {
@@ -87,10 +89,18 @@ func TestClaudeCodeToolNamesReverseButBrandTextDoesNot(t *testing.T) {
 	if !strings.Contains(back, `"name":"Workflow"`) {
 		t.Fatalf("tool name not restored to Workflow: %s", back)
 	}
-	// Brand text: forward-only. Restoring it would make the client look for a
-	// CLAUDE.md that no longer exists in the conversation the model was given.
+	// Brand prose in the carrier the reverse walks: the vendor word, the SDK
+	// name and a declared tool named in prose all come back. Without this the
+	// two assertions below would hold with the brand reverse deleted.
+	if strings.Contains(back, "Antigravity SDK") || !strings.Contains(back, "Anthropic SDK") {
+		t.Fatalf("the vendor/SDK prose was not reversed: %s", back)
+	}
+	if !strings.Contains(back, "use Workflow") {
+		t.Fatalf("a declared tool named in prose was not restored: %s", back)
+	}
+	// The one-way exception: the bare instruction filename is never mapped back.
 	if strings.Contains(back, "CLAUDE.md") {
-		t.Fatalf("brand text was reversed to CLAUDE.md: %s", back)
+		t.Fatalf("bare AGENTS.md was reversed to CLAUDE.md: %s", back)
 	}
 	if !strings.Contains(back, "AGENTS.md") {
 		t.Fatalf("AGENTS.md should survive the response unchanged: %s", back)

@@ -142,12 +142,23 @@ accepting uncommitted work, the container-internal `git clone --no-local /src
 /build` carries **only committed state** and `git add -A` inside `/build` finds
 nothing to commit; the build then silently emits a binary of `HEAD` and drops
 every uncommitted edit. Overlay the host working tree onto the clone before
-committing, and assert the string you changed is present in the consumed source:
+committing, and assert the string you changed is present in the consumed
+source. Insert these lines **into `$BuildCommand`**, immediately after
+`test -z "$(git status --porcelain)"` and before the `CGO_ENABLED=1 ... go build`
+line: the detached checkout of `$CLOAK_BUILD_COMMIT` has to run first, because
+the deletion list is diffed against it, and `docker run --rm` removes the clone
+when it returns, so they cannot be run afterwards. The overlay's own commit
+leaves `/build` clean again, so that assertion keeps its meaning.
 
 ```sh
+# tar copies only files that exist, so a file deleted on the host survives in
+# /build and would be baked into the acceptance commit. Drop deletions before
+# extracting the host overlay.
+git -C /src diff --name-only --diff-filter=D "$CLOAK_BUILD_COMMIT" |
+  while read -r f; do git -C /build rm -q -- "$f" || true; done
 tar -C /src --exclude=.git --exclude=dist -cf - . | tar -C /build -xf -
-git add -A && git -c user.email=b@b -c user.name=b commit -m 'acceptance snapshot'
-grep -c '<the string you added>' main.go   # must be >= 1, or stop
+git -C /build add -A && git -C /build -c user.email=b@b -c user.name=b commit -m 'acceptance snapshot'
+grep -c '<the string you added>' /build/main.go   # must be >= 1, or stop
 ```
 
 Record both the host `git diff` sha256 and the built artifact sha256 whenever
@@ -571,12 +582,15 @@ client received: F:/CodeBase/omp-cloak/.git/.../sample.txt
 => read failed "Path not found" on two consecutive attempts
 ```
 
-Root cause: `ompProtectedReverseTable` is a single
-`{Match: "Antigravity", Replacement: "omp"}` entry and
-`replaceInsensitiveWithPrev` lowercases both sides, while the forward pass is
-authority-aware and the reverse is not. This violates the HARD contract that
+Root cause: at the time of that run `ompProtectedReverseTable` held only its
+protected `{Match: "Antigravity", Replacement: "omp"}` pair and
+`replaceMappingWithPrev` (the case-insensitive mapping walk) lowercases both
+sides, while the forward pass is authority-aware and the reverse is not. This
+violates the HARD contract that
 operational identifiers round-trip client-specifically. Fixed by the URL/path
-rule above, applied symmetrically. **No synthetic unit fixture exposes this**:
+rule above, applied symmetrically: the table now carries that pair plus the
+`.gemini/AGENTS.md` -> `.claude/CLAUDE.md` and `.gemini/` -> `.omp` path rules, so
+it is no longer a single entry. **No synthetic unit fixture exposes this**:
 fixtures like `/home/u/.gemini` are clean by construction, and only a real run
 whose working directory contains a brand word reveals it.
 
