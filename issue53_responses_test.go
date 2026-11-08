@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1542,6 +1543,94 @@ func TestIssue53_A14_StreamWithoutTerminalAndCompleteCleanup(t *testing.T) {
 	donePos := strings.Index(doneStr, "data: [DONE]")
 	if flushPos < 0 || donePos < 0 || flushPos > donePos {
 		t.Fatalf("expected attributable carry flush before [DONE] sentinel:\n%s", doneStr)
+	}
+
+	// Concurrent streaming and `request.complete` race regression:
+	// Exercises end-to-end Responses stream chunk callbacks (which populate and mutate
+	// `sess.brandCarries`) racing `request.complete` across the same request session.
+	const raceID = "a14-race-completion"
+	raceReqRes, _ := callResponsesRequestIntercept(t, raceID, "openai-response", "agy/gpt-5", reqBody, h)
+	raceCompRaw, err := json.Marshal(pluginapi.RequestCompletion{
+		RequestID: raceID,
+		Outcome:   pluginapi.RequestCompletionOutcome("canceled"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raceChunkReq := pluginapi.StreamChunkInterceptRequest{
+		RequestID:       raceID,
+		SourceFormat:    "openai-response",
+		Model:           "agy/gpt-5",
+		RequestedModel:  "agy/gpt-5",
+		ChunkIndex:      1,
+		RequestHeaders:  h,
+		RequestBody:     raceReqRes.Body,
+		OriginalRequest: raceReqRes.Body,
+		Body:            []byte("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_r\",\"output_index\":0,\"content_index\":0,\"delta\":\"Hold Antig\"}\n\n"),
+	}
+	raceChunkRaw, err := json.Marshal(raceChunkReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startRace := make(chan struct{})
+	var raceWG sync.WaitGroup
+	raceWG.Add(1)
+	go func() {
+		defer raceWG.Done()
+		<-startRace
+		for range 400 {
+			_, _ = handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, raceChunkRaw)
+		}
+	}()
+	close(startRace)
+	for range 400 {
+		_ = handleRequestComplete(raceCompRaw)
+	}
+	raceWG.Wait()
+	_ = handleRequestComplete(raceCompRaw)
+	if globalStreamManager.getSession("req:"+raceID) != nil {
+		t.Fatalf("expected stream session req:%s to be deleted after completion", raceID)
+	}
+}
+
+// A14 (race): `request.complete` must not read the session's brand-carry map.
+// The stream owner (the goroutine here) mutates it alone, so any completion-side
+// read of that map is unsynchronised and `-race` reports it. Meaningful only
+// under `-race`: without instrumentation the window is too narrow to rely on.
+func TestIssue53_A14_RequestCompleteConcurrentCarryRace(t *testing.T) {
+	isolateResponsesTestState(t)
+	const raceID = "a14-carry-race"
+	sess := newStreamSession("codex", nil)
+	sess.brandCarries["initial"] = &brandLane{carry: "Antig"}
+	compRaw, err := json.Marshal(pluginapi.RequestCompletion{
+		RequestID: raceID,
+		Outcome:   pluginapi.RequestCompletionOutcome("canceled"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for range 20000 {
+			sess.brandCarries["mutating"] = &brandLane{carry: "Antig"}
+			delete(sess.brandCarries, "mutating")
+		}
+	}()
+	close(start)
+	for range 600 {
+		globalStreamManager.mu.Lock()
+		globalStreamManager.sessions["req:"+raceID] = sess
+		globalStreamManager.mu.Unlock()
+		_ = handleRequestComplete(compRaw)
+		runtime.Gosched()
+	}
+	wg.Wait()
+	if globalStreamManager.getSession("req:"+raceID) != nil {
+		t.Fatalf("expected stream session req:%s to be deleted after completion", raceID)
 	}
 }
 

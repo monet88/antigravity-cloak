@@ -1,7 +1,7 @@
 # Spec: OpenAI Responses Wire Surface (cloak + reverse)
 
-Status: **final specification for implementation approval.**
-This phase edits this specification only. It does not implement code, change tests or dependencies, commit, push, create a PR, deploy, probe a live gateway, or change gateway configuration.
+Status: **approved specification — offline implementation complete.**
+The offline implementation and unit/lifecycle regression suite described by this specification are present in the repository (`main.go`, `responses_surface.go`, `issue53_responses_test.go`). Live rollout observations (U1, U5), gateway deployment, and live gateway configuration changes remain separate rollout actions (§12).
 Companion contracts: `CONTEXT.md` §1 (Brand Rewriting) and `docs/specs/system-conventions-sanitization.md`.
 
 **Evidence and compatibility profile, amended 2026-11-08**
@@ -336,7 +336,7 @@ Use `X-Cloak-Client: codex` for alias-plan fixtures when detection itself is not
 
 A5/A15 need fixtures derived from the pinned converter behaviors, not tests of a newly invented resolver against itself. Record the expected winning source declaration and emitted/reference name for both projections, including a case where their original outcomes differ. Existing host tests can supply the oracle inputs; no host import or new production dependency is required.
 
-Implementation regression gates: `go test ./...`, `go vet ./...` and the existing CGO/shared-library build procedure must pass. Keep the existing custom-mapping, request-scoped authority, OMP/admission and stream boundary suites. These commands and live acceptance are **not run by this spec-only phase**; specifying them is not a PASS claim.
+Implementation regression gates: `go test ./...`, `go vet ./...` and the existing CGO/shared-library build procedure must pass. Keep the existing custom-mapping, request-scoped authority, OMP/admission and stream boundary suites. Live gateway acceptance and rollout checks (§12) remain separate from the offline test suite.
 
 ## 12. Evidence gates and rollout
 
@@ -397,4 +397,4 @@ All `.ref/CLIProxyAPI` paths below are relative to the host pin in the header. P
 
 The 2026-11-08 amendment supersedes the previous content of §§1–13: it corrects the SDK/host evidence pin, resolves original-owner and duplicate-declaration handling, accounts for both actual lowering paths, restores selector values without reshaping, includes native custom-input deltas and their actual callback framing, clarifies terminal/transport boundaries, and replaces the independent custom-inverse proposal with compatibility-only scope. The current sections are the normative contract; earlier review conclusions and retracted draft claims are not evidence.
 
-This phase changes only `docs/specs/openai-responses-surface.md`. Preserve the existing `CONTEXT.md` WIP and ADR 0005 byte-for-byte. Implementation, test changes, commits, pushes, PRs, deployment and live gateway/config changes are separate work. Later amendments must be dated and identify the sections they supersede.
+The offline implementation in `main.go`, `responses_surface.go`, and `issue53_responses_test.go` implements this contract while preserving `CONTEXT.md` and ADR 0005. Live deployment and gateway configuration changes remain separate rollout work (§12). Later amendments must be dated and identify the sections they supersede.

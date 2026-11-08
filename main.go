@@ -217,9 +217,6 @@ func handleRequestComplete(request []byte) []byte {
 	}
 	debugLog("handleRequestComplete: RequestID=%q Outcome=%s", comp.RequestID, comp.Outcome)
 	if comp.RequestID != "" {
-		if sess := globalStreamManager.getSession("req:" + comp.RequestID); sess != nil && hasPendingBrandCarry(sess) {
-			debugLog("handleRequestComplete: dropping pending stream carries for RequestID=%q", comp.RequestID)
-		}
 		globalLifecycleManager.deleteRoute(comp.RequestID)
 		globalAliasPlanManager.delete(comp.RequestID)
 		globalStreamManager.deleteSession("req:" + comp.RequestID)
