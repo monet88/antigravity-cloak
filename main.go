@@ -217,6 +217,9 @@ func handleRequestComplete(request []byte) []byte {
 	}
 	debugLog("handleRequestComplete: RequestID=%q Outcome=%s", comp.RequestID, comp.Outcome)
 	if comp.RequestID != "" {
+		if sess := globalStreamManager.getSession("req:" + comp.RequestID); sess != nil && hasPendingBrandCarry(sess) {
+			debugLog("handleRequestComplete: dropping pending stream carries for RequestID=%q", comp.RequestID)
+		}
 		globalLifecycleManager.deleteRoute(comp.RequestID)
 		globalAliasPlanManager.delete(comp.RequestID)
 		globalStreamManager.deleteSession("req:" + comp.RequestID)
@@ -1006,6 +1009,10 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		debugLog("handleProtectedAGY: strict JSON decode failed")
 		return protected503Response(resp)
 	}
+	if format == "openai" && requestWireFamily(format, rootMap) != wireFamilyOpenAIChat {
+		debugLog("handleProtectedAGY: unsupported OpenAI wire family for ProtectedAGY")
+		return protected503Response(resp)
+	}
 	expectedChoiceCount := 1
 	if n, valid := jsonIndexValue(rootMap["n"]); valid && n > 1 {
 		expectedChoiceCount = n
@@ -1218,6 +1225,10 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		debugLog("handleRequestInterceptBefore: UA evidence client=%q", uaClient)
 	}
 
+	if handled, out := tryHandleOpenAIResponsesRequest(&req, resp, format, forcedClient, marker); handled {
+		return out
+	}
+
 	// Resolve the effective client. When forcedClient is set and has a table,
 	// use it directly; otherwise fall back to body-based detection.
 	effectiveClient := forcedClient
@@ -1381,9 +1392,9 @@ func handleResponseIntercept(request []byte) []byte {
 			}
 		}
 		if plan := globalAliasPlanManager.get(req.RequestID); plan != nil {
-			// A pinned plan is the sole reverse authority for tool names. If
-			// it has no match, do not fall through to global/static inversion:
-			// a target untouched by this request must remain untouched.
+			if plan.wireFamily == wireFamilyOpenAIResponses {
+				return handleOpenAIResponsesResponseIntercept(&req, plan)
+			}
 			modified, uncloaked := uncloakResponseBodyExact(req.Body, plan.reverse, plan.sourceFormat)
 			if !uncloaked {
 				modified = req.Body
@@ -1413,6 +1424,10 @@ func handleResponseIntercept(request []byte) []byte {
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleResponseIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+	}
+
+	if handled, out := tryHandleUncorrelatedResponsesResponse(&req, format); handled {
+		return out
 	}
 
 	if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
@@ -1511,6 +1526,10 @@ func handleStreamChunkIntercept(request []byte) []byte {
 			}
 		}
 		if plan := globalAliasPlanManager.get(req.RequestID); plan != nil {
+			if plan.wireFamily == wireFamilyOpenAIResponses {
+				resp := handleOpenAIResponsesStreamChunkIntercept(&req, plan)
+				return mustEnvelope(resp)
+			}
 			resp := globalStreamManager.processChunk(&req, plan.sourceFormat)
 			return mustEnvelope(resp)
 		}
@@ -1528,6 +1547,10 @@ func handleStreamChunkIntercept(request []byte) []byte {
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleStreamChunkIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+	}
+
+	if handled, resp := tryHandleUncorrelatedResponsesStreamChunk(&req, format); handled {
+		return mustEnvelope(resp)
 	}
 
 	if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
@@ -2775,6 +2798,9 @@ func sortedCarryKeys(sess *streamSession) []string {
 		keys = append(keys, k)
 	}
 	sort.SliceStable(keys, func(i, j int) bool {
+		if okI, okJ := compareResponsesCarryKeys(keys[i], keys[j], sess); okI || okJ {
+			return okI
+		}
 		ni, okI := laneIndexNum(keys[i])
 		nj, okJ := laneIndexNum(keys[j])
 		if okI != okJ {
@@ -2783,7 +2809,14 @@ func sortedCarryKeys(sess *streamSession) []string {
 		if ni != nj {
 			return ni < nj
 		}
-		si, sj := sess.brandCarries[keys[i]].seq, sess.brandCarries[keys[j]].seq
+		li, lj := sess.brandCarries[keys[i]], sess.brandCarries[keys[j]]
+		si, sj := 0, 0
+		if li != nil {
+			si = li.seq
+		}
+		if lj != nil {
+			sj = lj.seq
+		}
 		if si != sj {
 			return si < sj
 		}
@@ -3452,6 +3485,7 @@ type streamSession struct {
 	// instead of being carried past the finish_reason to the end of the stream.
 	// Set and cleared per event, so nothing leaks into the next one.
 	terminalChoices map[string]bool
+	responsesItems  map[int]*responsesOutputItemMeta
 }
 
 const (
@@ -3543,7 +3577,7 @@ func argumentReverseTableFor(client string) []rewriteMapping {
 // table in a prose lane. Resolving and flushing both go through here, so a
 // lane's hold decision and its flush decision can never use different tables.
 func laneReverseTable(sess *streamSession, laneKey string) []rewriteMapping {
-	if _, _, isArgs := toolArgsLaneParts(laneKey); isArgs {
+	if _, _, isArgs := toolArgsLaneParts(laneKey); isArgs || isResponsesArgumentLaneKey(laneKey) {
 		return argumentReverseTableFor(sess.client)
 	}
 	return brandReverseTableFor(sess.client)
@@ -3588,6 +3622,9 @@ type requestAliasPlan struct {
 	cachedUncloak   *cachedUncloakPattern
 	expected        int
 	disposition     atomic.Int32
+	wireFamily      string
+	selectorRecord  *responsesSelectorRecord
+	wsNoOp          bool
 }
 
 func (p *requestAliasPlan) getDisposition() streamDisposition {
