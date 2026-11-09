@@ -90,3 +90,23 @@
 - Historical client-side workaround: direct replay of the payload renamed to `<agent-conventions>` against `daily-cloudcode-pa.googleapis.com` returned 200 OK with streaming SSE response candidates.
 - Tested `omp/18.1.18` end-to-end with bash tool calling (`git status` and `echo 18.1.18`), executed and streamed successfully without 429.
 - Plugin-side `<conventions>` acceptance passed on 2026-09-12 with v0.5.1 at commit `5d35663`: two correlated requests returned HTTP 200, the original wrapper was absent upstream, and streamed `run_command` was restored to native OMP `bash`, which returned `5d35663`. See the [validated deployment evidence and repeatable runbook](docs/verification-checklist.md#validated-sanitization-deployment---2026-09-12). Unit and handler tests remain in `system_conventions_test.go`.
+
+---
+
+## Bug 004: Tier Scanner Broke on Every Valid Model Key (`tierArgsScanner` Issue #55)
+
+### Symptom
+
+New Issue #55 streaming tests: the tier scanner never translated a top-level `model` scalar after fragmentation; a deliberately-triggered "hold" never engaged. Localization discovered that the scanner marked itself `broken` at the CLOSE quote of the FIRST top-level key of every argument object (`{"model":` broke at `"` of the key).
+
+### Root Cause
+
+`tierArgsScanner.closeKeyToken` collects the JSON key literal BODY (the bytes between two quotes, excluding the latter). Feeding those bare body bytes directly to `json.Unmarshal` produced `invalid character 'm' looking for beginning of value` -> the scanner set `broken` and became raw afterwards with no logging.
+
+### Verified fix
+
+Wrap the collected body with quotes to rebuild a string literal: `literal = '"' + keyRaw + '"'` then `json.Unmarshal(literal, &decoded)`. Tests: the crate series in `issue55_agent_tier_test.go`.
+
+### Prevention / Fast path
+
+When a byte-level JSON scanner accumulates an escaped-string BODY, always rebuild the complete literal before `json.Unmarshal`; missing surrounding quotes degenerates into scanner-broken without any signal. Debug path: enable `CPA_FILTER_DEBUG` and trace the `agent tier lane ...` / `agent tier ...` wake-upe lines.

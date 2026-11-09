@@ -153,6 +153,12 @@ Oh My Pi's opening sentence `You are omp's trusted coding assistant.` is rewritt
 ### 5. Configuration Lifecycle
 Managed via `atomic.Pointer[filterConfig]`, enabling lock-free, zero-copy configuration reads on hot request and streaming paths with thread-safe live reconfiguration.
 
+### 5b. Claude Code Fingerprints — News URL & Agent Model Tiers (Issue #55)
+Two Claude Code identity words are handled by dedicated machinery (`issue55_agent_tier.go`), both for Anthropic Messages and OpenAI Chat Completions carriers resolved as `claude_code` and admitted through the alias plan:
+
+- **News URL sanitation (Contract A)**: In top-level `system` (Anthropic) or system/developer messages (OpenAI), the exact captured sentence — native `Claude` spelling *or* the replayed `Antigravity` spelling — carries `https://www.anthropic.com/news/claude-fable-5-mythos-5`; only the URL inside a recognized sentence is replaced with `https://antigravity.google`. It is request-only, one-way, follows `use_default_keywords`, and runs after all prose rewrites. No custom/prose pass runs over the sanitized URL.
+- **Reversible Agent model tiers (Contract B)**: An eligible native `Agent` declaration (captured schema shape: optional string `model`, description prefix `Optional model override for this agent.`, enum of exactly the four native tiers) has its enum translated to the upstream aliases `sonnet→gemini-flash`, `opus→gemini-pro`, `haiku→gemini-flash-lite`, `fable→gemini-argon` (declared order preserved) before CPA derives provider help. The pinned `requestTierAuthority` lives inside the alias `requestAliasPlan`; it owns three halves: the assistant tool-call history re-encodes native tiers to aliases on the next request, non-stream responses map aliases back to native tiers, and streamed argument fragments use a dedicated JSON-aware scanner (`tierArgsScanner`) that holds a partially-delivered top-level `model` scalar until its full decoded value is known (so `gemini-flash` never resolves while `-lite` is still arriving) and releases truncated scalars raw at a terminal. The scanner only ever touches the decoded top-level string `model` of an argument object whose wire identity is the eligible call's; the client-wide argument string-reversal tables are untouched and remain non-tier.
+
 ### 6. Upstream Safety Sanitization & Envelope Conventions (Google Cloud Code / Antigravity)
 - **System Conventions Sanitization**: A compatibility transformation of OMP's exact `<system-conventions>` wrapper to `<conventions>`, retaining the enclosed instructions. Its scope is system/developer prompt text on ProtectedAGY requests; it does not alter tool data or explicit non-AGY bypass traffic. See [ADR 0003](docs/adr/0003-sanitize-system-prompt-conventions-tag-for-google-upstream.md).
 - **Request Type Envelope Context**: OMP upstream omitted `requestType: "agent"` to prevent requests from being routed into Google's constrained agent quota bucket on consumer/free-tier accounts. CPA injects `requestType: "agent"` at the executor layer; on Antigravity Pro/paid tier accounts, this agent bucket is unconstrained and behaves normally without patching.
@@ -160,5 +166,5 @@ Managed via `atomic.Pointer[filterConfig]`, enabling lock-free, zero-copy config
 
 - `main.go`: Complete plugin implementation (lifecycle hooks, interceptors, brand rewriter, stream manager, configuration store).
 - `AGENTS.md`: Operational guide for building, testing, deploying, and debugging the plugin.
-- `docs/specs/`: Detailed technical specifications (e.g. `oh-my-pi-cloaking-spec.md`, `system-conventions-sanitization.md`).
+- `docs/specs/`: Detailed technical specifications (e.g. `oh-my-pi-cloaking-spec.md`, `system-conventions-sanitization.md`, `openai-responses-surface.md`).
 - `docs/adr/`: Architecture Decision Records.
