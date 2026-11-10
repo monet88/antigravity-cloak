@@ -163,19 +163,46 @@ const claudeAgentModelDescriptionPrefix = "Optional model override for this agen
 // request that advertised the translatable enum. No cross-request memory and no
 // second lifecycle manager: it dies with the plan at request.complete.
 type requestTierAuthority struct {
-	sourceName   string // native Claude Code declaration name, exactly "Agent"
+	sourceName   string // native Claude Code declaration name, base "Agent"
 	upstreamName string // the effective upstream identity from the plan's forward map
 }
 
-// ownsToolName reports whether a wire tool identity belongs to the pinned
-// declaration: either its native source name (after response-side restoration,
-// or before request-side cloaking) or its admitted upstream identity (a raw
-// upstream name only counts when the plan itself admitted that identity).
-func (t *requestTierAuthority) ownsToolName(name string) bool {
-	if t == nil {
+// ownsUpstreamName reports whether a wire identity is the pinned declaration's
+// ADMITTED upstream identity. Every wire-side decision (request history after
+// cloaking, and response/stream names before uncloaking) matches with this, so
+// a raw wire name that merely equals the native source name never grants
+// authority.
+func (t *requestTierAuthority) ownsUpstreamName(name string) bool {
+	return t != nil && t.upstreamName != "" && name == t.upstreamName
+}
+
+// agentTierModelDescription reads the captured model-help string.
+func agentTierModelDescription(schemaValue any) string {
+	schema, ok := schemaValue.(map[string]any)
+	if !ok {
+		return ""
+	}
+	props, _ := schema["properties"].(map[string]any)
+	model, _ := props["model"].(map[string]any)
+	description, _ := model["description"].(string)
+	return description
+}
+
+// agentTierDescriptionAltered reports whether the effective prose mappings
+// would rewrite the recognized model-help signature. Those mappings run after
+// detection, so the guard replays them exactly (same skipPath=true as
+// rewriteDescriptiveText) and asks whether the signature still opens the
+// forwarded description. A substring test cannot answer that: an operator rule
+// matching "id" inside "override" would disable the feature for nothing.
+func agentTierDescriptionAltered(description, client string) bool {
+	if description == "" || client == "" {
 		return false
 	}
-	return name == t.sourceName || (t.upstreamName != "" && name == t.upstreamName)
+	next := description
+	for _, m := range effectiveMappings(activeFilterConfig(), client) {
+		next, _ = replaceInsensitiveRule(next, m, true)
+	}
+	return !strings.HasPrefix(next, claudeAgentModelDescriptionPrefix)
 }
 
 func (t *requestTierAuthority) translateForward(value string) (string, bool) {
@@ -323,26 +350,53 @@ func detectAgentTierAuthority(requestBody []byte, sourceFormat string, plan *req
 		return nil
 	}
 	tools, _ := root["tools"].([]any)
+	type agentDeclaration struct {
+		name   string
+		schema any
+	}
+	// Exact duplicate source spellings survive alias-plan admission (the plan
+	// dedupes by source name), and distinct spellings can share a base identity
+	// when their targets differ. First-match selection would then make tier
+	// authority depend on declaration order, so require exactly one declaration
+	// with the native base identity; any duplicate acquires no authority.
+	var decls []agentDeclaration
 	for _, raw := range tools {
 		tool, ok := raw.(map[string]any)
 		if !ok {
 			continue
 		}
 		_, name, schema, ok := toolDeclarationParts(tool, sourceFormat)
-		if !ok || name != claudeAgentToolSourceName {
+		if !ok {
 			continue
 		}
-		target, hasTarget := plan.forward[name]
-		if !hasTarget || target == "" {
-			return nil
+		// The native identity is resolved through the existing namespace
+		// policy: a namespaced declaration (functions:Agent) owns the same
+		// base identity, so it is counted here too.
+		if _, base := splitToolNamespace(name); base != claudeAgentToolSourceName {
+			continue
 		}
-		if !agentTierSchemaEligible(schema) {
-			return nil
-		}
-		debugLog("agent tier: eligible declaration pinned source=%q upstream=%q", name, target)
-		return &requestTierAuthority{sourceName: name, upstreamName: target}
+		decls = append(decls, agentDeclaration{name: name, schema: schema})
 	}
-	return nil
+	if len(decls) != 1 {
+		if len(decls) > 1 {
+			debugLog("agent tier: %d declarations share base identity %q -> inactive", len(decls), claudeAgentToolSourceName)
+		}
+		return nil
+	}
+	decl := decls[0]
+	target, hasTarget := plan.forward[decl.name]
+	if !hasTarget || target == "" {
+		return nil
+	}
+	if !agentTierSchemaEligible(decl.schema) {
+		return nil
+	}
+	if agentTierDescriptionAltered(agentTierModelDescription(decl.schema), plan.client) {
+		debugLog("agent tier: model-help signature altered by prose mappings -> inactive")
+		return nil
+	}
+	debugLog("agent tier: eligible declaration pinned source=%q upstream=%q", decl.name, target)
+	return &requestTierAuthority{sourceName: decl.name, upstreamName: target}
 }
 
 // translateAgentTierEnum translates ONLY the eligible declaration's model enum
@@ -406,10 +460,15 @@ func applyTierArgsForwardHistory(root map[string]any, tier *requestTierAuthority
 		}
 		switch sourceFormat {
 		case "anthropic":
+			// Spec: the next request's ASSISTANT tool-call history is the only
+			// history carrier. A tool_use block in any other role grants none.
+			if role, _ := msg["role"].(string); role != "assistant" {
+				continue
+			}
 			contents, _ := msg["content"].([]any)
 			for _, cRaw := range contents {
 				block, ok := cRaw.(map[string]any)
-				if !ok || block["type"] != "tool_use" || !tier.ownsToolName(stringOf(block["name"])) {
+				if !ok || block["type"] != "tool_use" || !tier.ownsUpstreamName(stringOf(block["name"])) {
 					continue
 				}
 				input, ok := block["input"].(map[string]any)
@@ -426,7 +485,7 @@ func applyTierArgsForwardHistory(root map[string]any, tier *requestTierAuthority
 			}
 			for _, callRaw := range sliceOfMaps(msg["tool_calls"]) {
 				fn, _ := callRaw["function"].(map[string]any)
-				if fn == nil || !tier.ownsToolName(stringOf(fn["name"])) {
+				if fn == nil || !tier.ownsUpstreamName(stringOf(fn["name"])) {
 					continue
 				}
 				args, ok := fn["arguments"].(string)
@@ -445,48 +504,52 @@ func applyTierArgsForwardHistory(root map[string]any, tier *requestTierAuthority
 }
 
 // applyTierToResponseBody reverses the tier vocabulary on the non-stream
-// response body: Anthropic tool_use input maps and OpenAI decoded
-// function.arguments strings map upstream alias -> native tier, only for calls
-// owned by the pinned declaration and only at the top-level `model` scalar.
+// response body at exactly the carriers the spec names: Anthropic top-level
+// `content[].input` for `tool_use`, and OpenAI
+// `choices[].message.tool_calls[].function.arguments`. There is no general
+// recursive walk: nested objects that merely look like a call gain no
+// authority, and tool results or prose are never traversed.
 func applyTierToResponseBody(node any, tier *requestTierAuthority) (any, bool) {
 	if tier == nil {
 		return node, false
 	}
+	root, ok := node.(map[string]any)
+	if !ok {
+		return node, false
+	}
 	changed := false
-	switch typed := node.(type) {
-	case map[string]any:
-		if t, hasType := typed["type"].(string); hasType && t == "tool_use" && tier.ownsToolName(stringOf(typed["name"])) {
-			if input, ok := typed["input"].(map[string]any); ok {
-				if alterTopLevelModelScalar(input, tier.translateReverse) {
-					changed = true
-				}
+	for _, blockRaw := range sliceOfAny(root["content"]) {
+		block, ok := blockRaw.(map[string]any)
+		if !ok || block["type"] != "tool_use" || !tier.ownsUpstreamName(stringOf(block["name"])) {
+			continue
+		}
+		if input, ok := block["input"].(map[string]any); ok {
+			if alterTopLevelModelScalar(input, tier.translateReverse) {
+				changed = true
 			}
 		}
-		for _, callRaw := range sliceOfMaps(typed["tool_calls"]) {
-			fn, _ := callRaw["function"].(map[string]any)
-			if fn == nil || !tier.ownsToolName(stringOf(fn["name"])) {
+	}
+	for _, choiceRaw := range sliceOfAny(root["choices"]) {
+		choice, ok := choiceRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		message, _ := choice["message"].(map[string]any)
+		for _, callRaw := range sliceOfAny(message["tool_calls"]) {
+			call, ok := callRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			fn, _ := call["function"].(map[string]any)
+			if fn == nil || !tier.ownsUpstreamName(stringOf(fn["name"])) {
 				continue
 			}
 			args, ok := fn["arguments"].(string)
 			if !ok {
 				continue
 			}
-			next := patchJSONTopLevelModel(args, tier.translateReverse)
-			if next != args {
+			if next := patchJSONTopLevelModel(args, tier.translateReverse); next != args {
 				fn["arguments"] = next
-				changed = true
-			}
-		}
-		for key, child := range typed {
-			if next, one := applyTierToResponseBody(child, tier); one {
-				typed[key] = next
-				changed = true
-			}
-		}
-	case []any:
-		for i, child := range typed {
-			if next, one := applyTierToResponseBody(child, tier); one {
-				typed[i] = next
 				changed = true
 			}
 		}
@@ -636,6 +699,13 @@ func (s *tierArgsScanner) feed(text string) string {
 		// handed back in the order it arrived.
 		out.WriteByte(c)
 		if s.inString {
+			// The key token is captured as its RAW literal body, escapes
+			// included, so closeKeyToken decodes exactly what the wire spelled.
+			// Dropping them read "\u006dodel" as "006dodel" (a missed model key)
+			// and collapsed an unrelated "m\nodel" into "model" (corruption).
+			if s.topLevelKey && s.stringRole == tierScanKey && (s.escaped || c != '"') {
+				s.keyRaw = append(s.keyRaw, c)
+			}
 			if s.escaped {
 				s.escaped = false
 				continue
@@ -645,9 +715,6 @@ func (s *tierArgsScanner) feed(text string) string {
 				continue
 			}
 			if c != '"' {
-				if s.topLevelKey && s.stringRole == tierScanKey {
-					s.keyRaw = append(s.keyRaw, c)
-				}
 				continue
 			}
 			// Closing quote.
@@ -874,28 +941,165 @@ func (sess *streamSession) armTierLane(laneKey string) {
 	}
 }
 
-// armTierToolCall arms the lane for an OpenAI tool call whose named owner is
-// the pinned declaration, before the call's argument fragments are applied.
-func (sess *streamSession) armTierToolCall(laneKey, fnName string) {
-	if sess.tier != nil && sess.tier.ownsToolName(fnName) {
+// tierNameRetired marks a lane whose accumulated wire name can no longer be
+// the admitted upstream identity, so later fragments cannot re-open it.
+const tierNameRetired = "\x00"
+
+// armTierLaneFromRawName accumulates one raw wire-name fragment for a lane.
+// The lane arms only when the accumulated name is exactly the admitted
+// upstream identity, and loses ownership if a later fragment shows the name
+// was only a prefix of someone else's identity. Names are decided BEFORE
+// uncloaking, so the restored native spelling never earns authority.
+func (sess *streamSession) armTierLaneFromRawName(laneKey, fragment string) {
+	if sess.tier == nil || fragment == "" {
+		return
+	}
+	if sess.tierPendingNames == nil {
+		sess.tierPendingNames = make(map[string]string)
+	}
+	acc := sess.tierPendingNames[laneKey]
+	if acc == tierNameRetired {
+		return
+	}
+	// Some providers repeat the complete name on later fragments. That is not
+	// a continuation, so it must not revoke a lane it just earned - but the
+	// fragment text alone cannot prove repetition: two identical fragments are
+	// also how a longer identity (invoke_subagentinvoke_subagent) arrives. Only
+	// a lane that already streamed argument bytes may read it as a repeat.
+	if fragment == sess.tier.upstreamName && sess.tierArgsSeen[laneKey] {
+		sess.tierPendingNames[laneKey] = fragment
 		sess.armTierLane(laneKey)
+		return
+	}
+	acc += fragment
+	switch {
+	case acc == sess.tier.upstreamName:
+		sess.tierPendingNames[laneKey] = acc
+		sess.armTierLane(laneKey)
+	case strings.HasPrefix(sess.tier.upstreamName, acc):
+		sess.tierPendingNames[laneKey] = acc
+	case sess.tierLanes[laneKey] != nil:
+		sess.tierPendingNames[laneKey] = tierNameRetired
+		sess.revokeTierLane(laneKey)
+	default:
+		sess.tierPendingNames[laneKey] = tierNameRetired
 	}
 }
 
-// armTierContentBlock arms the lane for an Anthropic content block whose type
-// and name mark the pinned call; a completed input object is patched directly.
-func (sess *streamSession) armTierContentBlock(laneKey string, block map[string]any) {
-	if sess.tier == nil {
+// revokeTierLane drops ownership after the accumulated wire name diverged from
+// the admitted identity: the call belongs to another admitted tool. The
+// scanner is kept so bytes it already withheld are still delivered, but every
+// later scalar passes through untranslated.
+//
+// shortcut: a provider that keeps extending a name AFTER it already streamed
+// that call's arguments has already had those bytes translated. The wire
+// ordering (name before arguments) is what makes that unreachable; upgrade only
+// if a real provider violates it.
+func (sess *streamSession) revokeTierLane(laneKey string) {
+	lane := sess.tierLanes[laneKey]
+	if lane == nil || lane.scan == nil {
 		return
 	}
-	typ, _ := block["type"].(string)
-	if typ != "tool_use" || !sess.tier.ownsToolName(stringOf(block["name"])) {
+	lane.scan.translate = func(string) (string, bool) { return "", false }
+	debugLog("agent tier lane revoked key=%s", laneKey)
+}
+
+// armTierLanesFromRaw decides tier-lane ownership from a chunk's PRE-uncloak
+// wire names, before any restore pass can hand back the client's own spelling.
+// sse selects the framing of raw: framed events or one standalone JSON chunk.
+func armTierLanesFromRaw(sess *streamSession, raw []byte, format string, sse bool) {
+	if sess == nil || sess.tier == nil || len(raw) == 0 {
 		return
 	}
-	sess.armTierLane(laneKey)
+	visit := func(data map[string]any) {
+		if format == "anthropic" {
+			if data["type"] == "content_block_start" {
+				block, ok := data["content_block"].(map[string]any)
+				if !ok || stringOf(block["type"]) != "tool_use" {
+					return
+				}
+				laneKey := toolArgsLaneKey(laneKeyWithIndex("anthropic", data))
+				sess.armTierLaneFromRawName(laneKey, stringOf(block["name"]))
+				if input, ok := block["input"].(map[string]any); ok && len(input) > 0 {
+					sess.markTierArgsSeen(laneKey)
+				}
+				return
+			}
+			if delta, ok := data["delta"].(map[string]any); ok {
+				if text, _ := delta["partial_json"].(string); text != "" {
+					sess.markTierArgsSeen(toolArgsLaneKey(laneKeyWithIndex("anthropic", data)))
+				}
+			}
+			return
+		}
+		for _, choice := range sliceOfMaps(data["choices"]) {
+			for _, field := range []string{"delta", "message"} {
+				container, ok := choice[field].(map[string]any)
+				if !ok {
+					continue
+				}
+				for _, tRaw := range sliceOfMaps(container["tool_calls"]) {
+					fn, _ := tRaw["function"].(map[string]any)
+					if fn == nil {
+						continue
+					}
+					laneKey := openAIToolCallLaneKey(choice, tRaw)
+					sess.armTierLaneFromRawName(laneKey, stringOf(fn["name"]))
+					// Events are visited in wire order, so a coalesced chunk's
+					// repeat-name frame already sees the bytes of the argument
+					// frame that preceded it.
+					if args, _ := fn["arguments"].(string); args != "" {
+						sess.markTierArgsSeen(laneKey)
+					}
+				}
+			}
+		}
+	}
+	if !sse {
+		var data map[string]any
+		// json.Number, not float64: lane keys read tool-call indexes through
+		// jsonIndexValue, which accepts only the number-preserving decoder.
+		if err := safeUnmarshal(raw, &data); err != nil {
+			return
+		}
+		visit(data)
+		return
+	}
+	for _, ev := range splitSSEEventsForBrand(raw) {
+		for _, data := range sseEventDataMaps(ev) {
+			visit(data)
+		}
+	}
+}
+
+// armTierContentBlock patches a completed input object on a tool_use block
+// whose lane the raw wire name already armed. It translates through the LANE's
+// scanner translator, so a lane whose ownership was revoked passes the value
+// through unchanged.
+func (sess *streamSession) armTierContentBlock(laneKey string, block map[string]any) bool {
+	lane := sess.tierLanes[laneKey]
+	if sess.tier == nil || lane == nil || lane.scan == nil {
+		return false
+	}
+	if typ, _ := block["type"].(string); typ != "tool_use" {
+		return false
+	}
 	if input, ok := block["input"].(map[string]any); ok {
-		alterTopLevelModelScalar(input, sess.tier.translateReverse)
+		return alterTopLevelModelScalar(input, lane.scan.translate)
 	}
+	return false
+}
+
+// markTierArgsSeen records that argument bytes reached an ARMED lane. A lane
+// with no scanner is not owned, so nothing is recorded for it.
+func (sess *streamSession) markTierArgsSeen(laneKey string) {
+	if sess.tierLanes[laneKey] == nil {
+		return
+	}
+	if sess.tierArgsSeen == nil {
+		sess.tierArgsSeen = make(map[string]bool)
+	}
+	sess.tierArgsSeen[laneKey] = true
 }
 
 // tierLaneArmed reports whether this args lane must run the tier pass.
@@ -911,6 +1115,12 @@ func applyTierLane(sess *streamSession, laneKey, text string, terminal bool) (st
 	tierLane := sess.tierLanes[laneKey]
 	if tierLane == nil || tierLane.scan == nil {
 		return text, false
+	}
+	if text != "" {
+		if sess.tierArgsSeen == nil {
+			sess.tierArgsSeen = make(map[string]bool)
+		}
+		sess.tierArgsSeen[laneKey] = true
 	}
 	out := tierLane.scan.feed(text)
 	if terminal {

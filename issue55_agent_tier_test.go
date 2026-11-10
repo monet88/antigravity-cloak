@@ -135,26 +135,6 @@ func issue55Decode(t *testing.T, body []byte) map[string]any {
 	return root
 }
 
-// issue55ToolByName reads a forward declaration's schema.
-func issue55ToolByName(t *testing.T, root map[string]any, format, name string) map[string]any {
-	t.Helper()
-	tools, _ := root["tools"].([]any)
-	for _, raw := range tools {
-		tool, ok := raw.(map[string]any)
-		if !ok {
-			continue
-		}
-		_, toolName, schemaValue, ok := toolDeclarationParts(tool, format)
-		if !ok || toolName != name {
-			continue
-		}
-		schema, _ := schemaValue.(map[string]any)
-		return schema
-	}
-	t.Fatalf("forward body has no %q declaration: %s", name, root)
-	return nil
-}
-
 // ─────────────────────────── Contract A ───────────────────────────
 
 func TestIssue55NewsURLSanitizedBothCarriers(t *testing.T) {
@@ -448,21 +428,26 @@ func issue55BodyWithAgentSchema(schema map[string]any, format string) []byte {
 		tool = map[string]any{"type": "function", "function": map[string]any{"name": "Agent", "parameters": schema}}
 	}
 	var history any
+	var assistant map[string]any
 	if format == "anthropic" {
 		history = []any{
 			map[string]any{"type": "tool_use", "id": "tu1", "name": "Agent", "input": map[string]any{"model": "opus"}},
 		}
+		assistant = map[string]any{"role": "assistant", "content": history}
 	} else {
 		history = []any{
 			map[string]any{"id": "c1", "type": "function", "function": map[string]any{"name": "Agent", "arguments": `{"model":"opus"}`}},
 		}
+		// OpenAI carries tool calls in their own field; putting them under
+		// content left the real history gate untested.
+		assistant = map[string]any{"role": "assistant", "tool_calls": history}
 	}
 	root := map[string]any{
 		"model": "agy/gemini-3.8-flash",
 		"tools": []any{tool},
 		"messages": []any{
 			map[string]any{"role": "user", "content": "go"},
-			map[string]any{"role": "assistant", "content": history},
+			assistant,
 		},
 	}
 	raw, err := json.Marshal(root)
@@ -575,13 +560,13 @@ func issue55ReverseTierResponse(t *testing.T, upstream, reqID, format string) st
 	t.Helper()
 	issue55Admit(t, reqID, format, issue55FixtureBody(format))
 	respRaw, err := json.Marshal(pluginapi.ResponseInterceptRequest{
-		RequestID:         reqID,
-		SourceFormat:      format,
-		Model:             "agy/probe",
-		RequestedModel:    "agy/probe",
-		OriginalRequest:   nil,
-		RequestBody:       issue55FixtureBody(format),
-		Body:              []byte(upstream),
+		RequestID:       reqID,
+		SourceFormat:    format,
+		Model:           "agy/probe",
+		RequestedModel:  "agy/probe",
+		OriginalRequest: nil,
+		RequestBody:     issue55FixtureBody(format),
+		Body:            []byte(upstream),
 	})
 	if err != nil {
 		t.Fatalf("marshal response: %v", err)
@@ -859,4 +844,880 @@ func TestIssue55TierStreamOpenAIIgnoreUnrelatedCallLane(t *testing.T) {
 	}
 }
 
+// ─────────────── authority boundaries (Issue #55 gates) ───────────────
 
+// TestIssue55FilteredFlushKeepsUnselectedTierHold pins the standalone flush
+// ordering: only the lanes being delivered may be resolved. Resolving a tier
+// lane releases its withheld scalar, so resolving every lane first and
+// filtering afterwards dropped the bytes of a call that was still streaming.
+func TestIssue55FilteredFlushKeepsUnselectedTierHold(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-filtered-tier-hold"
+	root := issue55Decode(t, issue55FixtureBody("openai"))
+	root["n"] = 2 // two choices: finishing one must not disturb the other
+	raw, err := safeMarshal(root)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	issue55Admit(t, reqID, "openai", raw)
+
+	call := func(id, arguments string) string {
+		return `{"index":0,"id":"` + id + `","type":"function","function":{"name":"invoke_subagent","arguments":` +
+			string(mustMarshalJSON(t, arguments)) + `}}`
+	}
+	chunks := []string{
+		`{"id":"c","object":"chat.completion.chunk","choices":[` +
+			`{"index":0,"delta":{"tool_calls":[` + call("c1", `{"model":"gem`) + `]},"finish_reason":null},` +
+			`{"index":1,"delta":{"tool_calls":[` + call("c2", `{"model":"gem`) + `]},"finish_reason":null}]}`,
+		// Choice 0 finishes; choice 1 is still streaming.
+		`{"id":"c","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		`{"id":"c","object":"chat.completion.chunk","choices":[{"index":1,"delta":{"tool_calls":[` +
+			`{"index":0,"function":{"arguments":` + string(mustMarshalJSON(t, `ini-flash","prompt":"p"}`)) + `}}]},"finish_reason":null}]}`,
+		`{"id":"c","object":"chat.completion.chunk","choices":[{"index":1,"delta":{},"finish_reason":"tool_calls"}]}`,
+	}
+
+	args := map[int]string{}
+	for i, chunk := range chunks {
+		resp := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+			RequestID:    reqID,
+			SourceFormat: "openai",
+			Model:        "agy/probe",
+			ChunkIndex:   i,
+			Body:         []byte(chunk),
+		}, "openai")
+		if resp.DropChunk {
+			t.Fatalf("chunk %d was dropped", i)
+		}
+		delivered := resp.Body
+		if len(delivered) == 0 {
+			delivered = []byte(chunk)
+		}
+		for index, fragment := range issue55OpenAIChoiceArguments(t, delivered) {
+			args[index] += fragment
+		}
+		if i == 1 {
+			sess := globalStreamManager.getSession("req:" + reqID)
+			if sess == nil {
+				t.Fatal("session lost after choice 0 finished")
+			}
+			pending := 0
+			for key, lane := range sess.tierLanes {
+				if strings.HasPrefix(key, "openai:1") && lane.scan.hasPendingHold() {
+					pending++
+				}
+			}
+			if pending == 0 {
+				t.Fatal("finishing choice 0 released choice 1's withheld scalar")
+			}
+		}
+	}
+	if got, want := args[1], `{"model":"sonnet","prompt":"p"}`; got != want {
+		t.Fatalf("choice 1 args = %q, want %q", got, want)
+	}
+}
+
+// issue55OpenAIChoiceArguments joins the tool-call argument fragments a chunk
+// carries, keyed by choice index.
+func issue55OpenAIChoiceArguments(t *testing.T, body []byte) map[int]string {
+	t.Helper()
+	var root map[string]any
+	if safeUnmarshal(body, &root) != nil {
+		return nil
+	}
+	out := map[int]string{}
+	for _, cRaw := range sliceOfAny(root["choices"]) {
+		choice, _ := cRaw.(map[string]any)
+		index, ok := jsonIndexValue(choice["index"])
+		if !ok {
+			index = 0
+		}
+		delta, _ := choice["delta"].(map[string]any)
+		if delta == nil {
+			delta, _ = choice["message"].(map[string]any)
+		}
+		for _, callRaw := range sliceOfAny(delta["tool_calls"]) {
+			call, _ := callRaw.(map[string]any)
+			fn, _ := call["function"].(map[string]any)
+			if fragment, ok := fn["arguments"].(string); ok {
+				out[index] += fragment
+			}
+		}
+	}
+	return out
+}
+
+// TestIssue55TierScannerDecodesEscapedModelKey proves the scanner reads the
+// key as the JSON literal it is: an escaped spelling of "model" is still the
+// model key, so its value keeps the tier decision and gets translated.
+func TestIssue55TierScannerDecodesEscapedModelKey(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-escaped-model-key"
+	issue55Admit(t, reqID, "openai", issue55FixtureBody("openai"))
+	nameFrame := "data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_subagent"}}]}}]}` + "\n\n"
+	got := issue55DeliverStream(t, reqID, "openai", []string{
+		nameFrame,
+		issue55ArgFrame("openai", 0, `{"\u006dodel":"gemini-pro","prompt":"p"}`),
+	})
+	if !strings.Contains(got, `"\u006dodel":"opus"`) {
+		t.Fatalf("escaped model key was not translated: %q", got)
+	}
+}
+
+// TestIssue55TierScannerKeepsEscapedLookalikeKeyLiteral is the corrupting half:
+// "m\nodel" decodes to a key that is NOT "model", so its value must pass raw.
+func TestIssue55TierScannerKeepsEscapedLookalikeKeyLiteral(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-escaped-lookalike-key"
+	issue55Admit(t, reqID, "openai", issue55FixtureBody("openai"))
+	nameFrame := "data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_subagent"}}]}}]}` + "\n\n"
+	got := issue55DeliverStream(t, reqID, "openai", []string{
+		nameFrame,
+		issue55ArgFrame("openai", 0, `{"m\nodel":"gemini-pro"}`),
+	})
+	if want := `{"m\nodel":"gemini-pro"}`; got != want {
+		t.Fatalf("lookalike key was corrupted: %q, want %q", got, want)
+	}
+}
+
+// TestIssue55TierStaysActiveWhenACustomMappingOnlyTouchesAWordInterior proves
+// the signature guard replays the real rewrite instead of a substring scan: an
+// operator rule for "id" never matches inside "override", the prefix survives,
+// and Contract B stays active.
+func TestIssue55TierStaysActiveWhenACustomMappingOnlyTouchesAWordInterior(t *testing.T) {
+	isolateRequestAliasPlan(t)
+	cfg := defaultFilterConfig()
+	cfg.CustomMappings = []rewriteMapping{{Match: "id", Replacement: "zz"}}
+	applyFilterConfig(cfg)
+	body := mustMarshalJSON(t, map[string]any{
+		"model":    "agy/probe",
+		"tools":    []any{issue55AgentTool("anthropic")},
+		"system":   []any{map[string]any{"type": "text", "text": "x"}},
+		"messages": []any{map[string]any{"role": "user", "content": "go"}},
+	})
+	callRaw, err := json.Marshal(pluginapi.RequestInterceptRequest{
+		RequestID: "issue55-guard-word-interior", SourceFormat: "anthropic",
+		Model: "agy/probe", RequestedModel: "agy/probe", Body: body,
+		Headers: map[string][]string{"X-Cloak-Client": {"claude_code"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, code := handlePluginCall("request.intercept_before", callRaw)
+	if code != 0 {
+		t.Fatalf("code=%d envelope=%s", code, raw)
+	}
+	forward := string(decodeEnvelopeBody(t, raw))
+	if !strings.Contains(forward, claudeAgentTierAliases["sonnet"]) {
+		t.Fatalf("tier enum stayed native although the prefix survived: %s", forward)
+	}
+	if plan := globalAliasPlanManager.get("issue55-guard-word-interior"); plan == nil || plan.tier == nil {
+		t.Fatal("tier authority was dropped for an untouched signature")
+	}
+}
+
+// issue55AssistantToolUses returns the assistant history tool_use inputs keyed
+// by their wire name.
+func issue55AssistantToolUses(root map[string]any) map[string]map[string]any {
+	out := map[string]map[string]any{}
+	for _, mRaw := range sliceOfAny(root["messages"]) {
+		msg, _ := mRaw.(map[string]any)
+		for _, cRaw := range sliceOfAny(msg["content"]) {
+			block, _ := cRaw.(map[string]any)
+			if block["type"] != "tool_use" {
+				continue
+			}
+			input, _ := block["input"].(map[string]any)
+			out[stringOf(block["name"])] = input
+		}
+	}
+	return out
+}
+
+// TestIssue55TierAuthorityIgnoresAnotherToolsAgentAlias proves the native
+// spelling is not a fallback: when another admitted declaration is cloaked TO
+// "Agent", only the pinned upstream identity grants tier authority.
+func TestIssue55TierAuthorityIgnoresAnotherToolsAgentAlias(t *testing.T) {
+	isolateRequestAliasPlan(t)
+	cfg := defaultFilterConfig()
+	mappings := copyToolMappings(cfg.ToolMappings)
+	mappings["claude_code"]["OtherTool"] = "Agent"
+	cfg.ToolMappings = mappings
+	applyFilterConfig(cfg)
+
+	otherTool := map[string]any{
+		"name": "OtherTool",
+		"input_schema": map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"model": map[string]any{"type": "string"}},
+		},
+	}
+	root := map[string]any{
+		"model":  "agy/probe",
+		"tools":  []any{issue55AgentTool("anthropic"), otherTool},
+		"system": []any{map[string]any{"type": "text", "text": "x"}},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "go"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "tu1", "name": "Agent", "input": map[string]any{"model": "opus"}},
+				map[string]any{"type": "tool_use", "id": "tu2", "name": "OtherTool", "input": map[string]any{"model": "opus"}},
+			}},
+		},
+	}
+	body, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callRaw, err := json.Marshal(pluginapi.RequestInterceptRequest{
+		RequestID: "issue55-conflicting-agent-alias", SourceFormat: "anthropic",
+		Model: "agy/probe", RequestedModel: "agy/probe", Body: body,
+		Headers: map[string][]string{"X-Cloak-Client": {"claude_code"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, code := handlePluginCall("request.intercept_before", callRaw)
+	if code != 0 {
+		t.Fatalf("code=%d envelope=%s", code, raw)
+	}
+	forward := issue55Decode(t, decodeEnvelopeBody(t, raw))
+	uses := issue55AssistantToolUses(forward)
+	if got := uses["invoke_subagent"]["model"]; got != claudeAgentTierAliases["opus"] {
+		t.Fatalf("owned history call not translated: %v", uses)
+	}
+	if got := uses["Agent"]["model"]; got != "opus" {
+		t.Fatalf("another tool's Agent alias gained tier authority: %v", uses)
+	}
+}
+
+// TestIssue55TierNamespacedAgentDeclaration resolves the native identity
+// through the existing namespace policy while pinning the exact spelling.
+func TestIssue55TierNamespacedAgentDeclaration(t *testing.T) {
+	isolateRequestAliasPlan(t)
+	agent := issue55AgentTool("anthropic")
+	agent["name"] = "functions:Agent"
+	root := map[string]any{
+		"model":  "agy/probe",
+		"tools":  []any{agent},
+		"system": []any{map[string]any{"type": "text", "text": "x"}},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "go"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "tu1", "name": "functions:Agent", "input": map[string]any{"model": "opus"}},
+			}},
+		},
+	}
+	body, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forward := issue55Decode(t, issue55Admit(t, "issue55-namespaced-agent", "anthropic", body))
+	decl, _ := sliceOfAny(forward["tools"])[0].(map[string]any)
+	if stringOf(decl["name"]) != "functions:invoke_subagent" {
+		t.Fatalf("namespaced declaration not cloaked: %v", decl["name"])
+	}
+	model, _ := decl["input_schema"].(map[string]any)["properties"].(map[string]any)["model"].(map[string]any)
+	enum, _ := model["enum"].([]any)
+	want := []any{"gemini-flash", "gemini-pro", "gemini-flash-lite", "gemini-argon"}
+	if fmt.Sprint(enum) != fmt.Sprint(want) {
+		t.Fatalf("enum = %v, want %v", enum, want)
+	}
+	if got := issue55AssistantToolUses(forward)["functions:invoke_subagent"]["model"]; got != "gemini-pro" {
+		t.Fatalf("namespaced history not translated: %v", got)
+	}
+}
+
+// TestIssue55TierAuthoritySurvivesSessionCleanup proves the tier pinned in the
+// alias plan is re-attached when a disposable stream session is rebuilt.
+func TestIssue55TierAuthoritySurvivesSessionCleanup(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-stream-cleanup"
+	issue55Admit(t, reqID, "anthropic", issue55FixtureBody("anthropic"))
+	globalStreamManager.deleteSession("req:" + reqID)
+
+	frames := []string{
+		"event: content_block_start\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu","name":"invoke_subagent","input":{}}}` + "\n\n",
+		issue55ArgFrame("anthropic", 1, `{"model":"gemini-pro","prompt":"p"}`),
+		"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":1}` + "\n\n",
+	}
+	got := issue55DeliverStream(t, reqID, "anthropic", frames)
+	if want := `{"model":"opus","prompt":"p"}`; got != want {
+		t.Fatalf("streamed args after cleanup = %q, want %q", got, want)
+	}
+}
+
+// TestIssue55TierStreamAnthropicSplitKey splits the top-level key itself across
+// events: the scanner must not lose the key/colon boundary.
+func TestIssue55TierStreamAnthropicSplitKey(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-stream-anthropic-key"
+	issue55Admit(t, reqID, "anthropic", issue55FixtureBody("anthropic"))
+
+	frames := []string{
+		"event: content_block_start\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu","name":"invoke_subagent","input":{}}}` + "\n\n",
+		issue55ArgFrame("anthropic", 1, `{"mo`),
+		issue55ArgFrame("anthropic", 1, `del":"gemini-flash-lite","prompt":"p"}`),
+		"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":1}` + "\n\n",
+	}
+	got := issue55DeliverStream(t, reqID, "anthropic", frames)
+	if want := `{"model":"haiku","prompt":"p"}`; got != want {
+		t.Fatalf("split-key args = %q, want %q", got, want)
+	}
+}
+
+// TestIssue55TierFullCycle runs forward enum/history -> response reversal ->
+// next request's assistant history, all through the real dispatcher.
+func TestIssue55TierFullCycle(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	forward := issue55Decode(t, issue55Admit(t, "issue55-cycle-1", "anthropic", issue55FixtureBody("anthropic")))
+	if !strings.Contains(string(mustMarshalJSON(t, forward)), claudeAgentTierAliases["fable"]) {
+		t.Fatalf("forward pass did not advertise the alias vocabulary")
+	}
+
+	upstream := `{"id":"m","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tu1","name":"invoke_subagent","input":{"model":"gemini-argon","prompt":"p"}}]}`
+	out := issue55ReverseTierResponse(t, upstream, "issue55-cycle-2", "anthropic")
+	if !strings.Contains(out, `"model":"fable"`) {
+		t.Fatalf("response did not restore the native tier: %s", out)
+	}
+
+	root := map[string]any{
+		"model":  "agy/probe",
+		"tools":  []any{issue55AgentTool("anthropic")},
+		"system": []any{map[string]any{"type": "text", "text": "x"}},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "go"},
+			map[string]any{"role": "assistant", "content": []any{
+				map[string]any{"type": "tool_use", "id": "tu1", "name": "Agent", "input": map[string]any{"model": "fable", "prompt": "p"}},
+			}},
+		},
+	}
+	next := issue55Decode(t, issue55Admit(t, "issue55-cycle-3", "anthropic", mustMarshalJSON(t, root)))
+	if got := issue55AssistantToolUses(next)["invoke_subagent"]["model"]; got != "gemini-argon" {
+		t.Fatalf("continuation history not re-encoded: %v", got)
+	}
+}
+
+func mustMarshalJSON(t *testing.T, v any) []byte {
+	t.Helper()
+	raw, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return raw
+}
+
+// TestIssue55TierStreamOpenAIIncompleteScalarAtFinishReleasedInline proves an
+// incomplete scalar arriving in the finish_reason event itself is released raw
+// in that event, not stranded past the terminal (there is no [DONE] here).
+func TestIssue55TierStreamOpenAIIncompleteScalarAtFinishReleasedInline(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-stream-openai-finish-hold"
+	issue55Admit(t, reqID, "openai", issue55FixtureBody("openai"))
+
+	finish, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{
+			"index":         0,
+			"finish_reason": "stop",
+			"delta": map[string]any{"tool_calls": []any{map[string]any{
+				"index":    0,
+				"function": map[string]any{"arguments": `{"model":"gem`},
+			}}},
+		}},
+	})
+	frames := []string{
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
+		"data: " + string(finish) + "\n\n",
+	}
+	got := issue55DeliverStream(t, reqID, "openai", frames)
+	if want := `{"model":"gem`; got != want {
+		t.Fatalf("terminal release = %q, want raw release %q", got, want)
+	}
+}
+
+// TestIssue55TierContentBlockStartInputReversed covers a populated tool_use
+// input arriving in content_block_start: the patch must reach the client.
+func TestIssue55TierContentBlockStartInputReversed(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-stream-start-input"
+	issue55Admit(t, reqID, "anthropic", issue55FixtureBody("anthropic"))
+	frame := "event: content_block_start\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu","name":"invoke_subagent","input":{"model":"gemini-pro"}}}` + "\n\n"
+	resp := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: reqID, SourceFormat: "anthropic", Model: "agy/probe", ChunkIndex: 0, Body: []byte(frame),
+	}, "anthropic")
+	out := string(resp.Body)
+	if !strings.Contains(out, `"model":"opus"`) || strings.Contains(out, "gemini-pro") {
+		t.Fatalf("content_block_start input not reversed: %s", out)
+	}
+}
+
+// TestIssue55NewsURLIsClaudeCodeOnly proves codex traffic keeps the sentence
+// untouched, even though it is admitted through an alias plan.
+func TestIssue55NewsURLIsClaudeCodeOnly(t *testing.T) {
+	isolateRequestAliasPlan(t)
+	body := mustMarshalJSON(t, map[string]any{
+		"model": "agy/probe",
+		"tools": []any{map[string]any{"type": "function", "function": map[string]any{
+			"name": "exec", "parameters": map[string]any{"type": "object", "properties": map[string]any{}},
+		}}},
+		"messages": []any{
+			map[string]any{"role": "system", "content": issue55NewsNative},
+			map[string]any{"role": "user", "content": "go"},
+		},
+	})
+	callRaw, err := json.Marshal(pluginapi.RequestInterceptRequest{
+		RequestID: "issue55-codex-news", SourceFormat: "openai",
+		Model: "agy/probe", RequestedModel: "agy/probe", Body: body,
+		Headers: map[string][]string{"X-Cloak-Client": {"codex"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, code := handlePluginCall("request.intercept_before", callRaw)
+	if code != 0 {
+		t.Fatalf("code=%d envelope=%s", code, raw)
+	}
+	forward := string(decodeEnvelopeBody(t, raw))
+	if !strings.Contains(forward, claudeNewsURL) {
+		t.Fatalf("codex system sentence lost its URL: %s", forward)
+	}
+}
+
+// TestIssue55TierInactiveWhenProseMappingsAlterSignature: the forwarded help
+// string is what the spec recognizes, so a prose mapping that rewrites it must
+// leave the tier feature inactive.
+func TestIssue55TierInactiveWhenProseMappingsAlterSignature(t *testing.T) {
+	isolateRequestAliasPlan(t)
+	cfg := defaultFilterConfig()
+	cfg.CustomMappings = []rewriteMapping{{
+		Match:       claudeAgentModelDescriptionPrefix,
+		Replacement: "Rewritten by an operator rule.",
+	}}
+	applyFilterConfig(cfg)
+	body := mustMarshalJSON(t, map[string]any{
+		"model":    "agy/probe",
+		"tools":    []any{issue55AgentTool("anthropic")},
+		"system":   []any{map[string]any{"type": "text", "text": "x"}},
+		"messages": []any{map[string]any{"role": "user", "content": "go"}},
+	})
+	callRaw, err := json.Marshal(pluginapi.RequestInterceptRequest{
+		RequestID: "issue55-prose-altered", SourceFormat: "anthropic",
+		Model: "agy/probe", RequestedModel: "agy/probe", Body: body,
+		Headers: map[string][]string{"X-Cloak-Client": {"claude_code"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, code := handlePluginCall("request.intercept_before", callRaw)
+	if code != 0 {
+		t.Fatalf("code=%d envelope=%s", code, raw)
+	}
+	forward := string(decodeEnvelopeBody(t, raw))
+	if strings.Contains(forward, claudeAgentTierAliases["sonnet"]) {
+		t.Fatalf("tier enum translated despite an altered help signature: %s", forward)
+	}
+	if plan := globalAliasPlanManager.get("issue55-prose-altered"); plan == nil || plan.tier != nil {
+		t.Fatalf("tier authority pinned despite an altered help signature")
+	}
+}
+
+// TestIssue55TierResponseIgnoresNestedCallShape: only the spec's top-level
+// carriers gain authority; a nested object shaped like a call is untouched.
+func TestIssue55TierResponseIgnoresNestedCallShape(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	resp := `{"content":[{"type":"tool_use","name":"invoke_subagent","input":{"model":"gemini-pro","nested":{"type":"tool_use","name":"invoke_subagent","input":{"model":"gemini-pro"}}}}]}`
+	out := issue55ReverseTierResponse(t, resp, "issue55-nested-call-shape", "anthropic")
+	root := issue55Decode(t, []byte(out))
+	block, _ := sliceOfAny(root["content"])[0].(map[string]any)
+	input, _ := block["input"].(map[string]any)
+	if input["model"] != "opus" {
+		t.Fatalf("top-level call not reversed: %s", out)
+	}
+	nested, _ := input["nested"].(map[string]any)
+	nestedInput, _ := nested["input"].(map[string]any)
+	if nestedInput["model"] != "gemini-pro" {
+		t.Fatalf("nested call shape was mutated: %s", out)
+	}
+}
+
+// ───────── pre-uncloak wire identity (Issue #55 Contract B) ─────────
+
+// A raw upstream name that merely equals the client's NATIVE spelling is not
+// the admitted upstream identity, so it must not borrow the pinned
+// declaration's tier authority. Only the admitted upstream identity reverses.
+
+func TestIssue55TierIgnoresRawNativeNameInAnthropicResponse(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	resp := `{"content":[{"type":"tool_use","id":"tu","name":"Agent","input":{"model":"gemini-pro","prompt":"p"}}]}`
+	out := issue55ReverseTierResponse(t, resp, "issue55-raw-agent-anthropic", "anthropic")
+	if out == "" {
+		// An empty envelope body means pass-through: the host forwards the
+		// upstream body unchanged.
+		out = resp
+	}
+	if strings.Contains(out, `"model":"opus"`) {
+		t.Fatalf("raw native wire name gained tier authority: %s", out)
+	}
+	if !strings.Contains(out, `"model":"gemini-pro"`) {
+		t.Fatalf("unowned wire argument was mutated: %s", out)
+	}
+}
+
+func TestIssue55TierIgnoresRawNativeNameInOpenAIResponse(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	resp := `{"choices":[{"message":{"tool_calls":[{"index":0,"type":"function","function":{"name":"Agent","arguments":"{\"model\":\"gemini-pro\",\"prompt\":\"p\"}"}}]}}]}`
+	out := issue55ReverseTierResponse(t, resp, "issue55-raw-agent-openai", "openai")
+	if out == "" {
+		out = resp
+	}
+	if strings.Contains(out, `opus`) {
+		t.Fatalf("raw native wire name gained tier authority: %s", out)
+	}
+	if !strings.Contains(out, `gemini-pro`) {
+		t.Fatalf("unowned wire argument was mutated: %s", out)
+	}
+}
+
+func TestIssue55TierIgnoresRawNativeNameInAnthropicStream(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-raw-agent-stream-anthropic"
+	issue55Admit(t, reqID, "anthropic", issue55FixtureBody("anthropic"))
+	frames := []string{
+		"event: content_block_start\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu","name":"Agent","input":{}}}` + "\n\n",
+		issue55ArgFrame("anthropic", 1, `{"model":"gemini-pro","prompt":"p"}`),
+		"event: content_block_stop\n" + `data: {"type":"content_block_stop","index":1}` + "\n\n",
+	}
+	got := issue55DeliverStream(t, reqID, "anthropic", frames)
+	want := `{"model":"gemini-pro","prompt":"p"}`
+	if got != want {
+		t.Fatalf("streamed args = %q, want unowned passthrough %q", got, want)
+	}
+}
+
+func TestIssue55TierIgnoresRawNativeNameInOpenAIStream(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-raw-agent-stream-openai"
+	issue55Admit(t, reqID, "openai", issue55FixtureBody("openai"))
+	frames := []string{
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"Agent"}}]}}]}` + "\n\n",
+		issue55ArgFrame("openai", 0, `{"model":"gemini-pro","prompt":"p"}`),
+	}
+	got := issue55DeliverStream(t, reqID, "openai", frames)
+	want := `{"model":"gemini-pro","prompt":"p"}`
+	if got != want {
+		t.Fatalf("streamed args = %q, want unowned passthrough %q", got, want)
+	}
+}
+
+// A wire name split across chunks is still the admitted identity once
+// completed, so the lane must arm from the accumulated fragments.
+func TestIssue55TierStreamSplitUpstreamNameStillReverses(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-stream-split-name"
+	issue55Admit(t, reqID, "openai", issue55FixtureBody("openai"))
+	frames := []string{
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_"}}]}}]}` + "\n\n",
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"subagent"}}]}}]}` + "\n\n",
+		issue55ArgFrame("openai", 0, `{"model":"gemini-pro","prompt":"p"}`),
+	}
+	got := issue55DeliverStream(t, reqID, "openai", frames)
+	want := `{"model":"opus","prompt":"p"}`
+	if got != want {
+		t.Fatalf("streamed args = %q, want admitted-identity reversal %q", got, want)
+	}
+}
+
+// Two declarations that share the native base identity are both admitted when
+// their source spelling is identical, so first-match selection would make tier
+// authority depend on declaration order. Either order must acquire none.
+func TestIssue55TierDuplicateAgentDeclarationsAcquireNoAuthority(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	ineligible := issue55AgentSchema()
+	props, _ := ineligible["properties"].(map[string]any)
+	props["model"].(map[string]any)["enum"] = []any{"sonnet", "opus", "haiku"}
+	for _, order := range []string{"eligible-first", "ineligible-first"} {
+		tools := []any{
+			issue55AgentTool("anthropic"),
+			map[string]any{"name": "Agent", "input_schema": ineligible},
+		}
+		if order == "ineligible-first" {
+			tools[0], tools[1] = tools[1], tools[0]
+		}
+		root := map[string]any{
+			"model":  "agy/probe",
+			"tools":  tools,
+			"system": []any{map[string]any{"type": "text", "text": "x"}},
+			"messages": []any{
+				map[string]any{"role": "user", "content": "go"},
+				map[string]any{"role": "assistant", "content": []any{
+					map[string]any{"type": "tool_use", "id": "tu1", "name": "Agent", "input": map[string]any{"model": "opus", "prompt": "x"}},
+				}},
+			},
+		}
+		body, err := json.Marshal(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		forward := issue55Admit(t, "issue55-dup-agent-"+order, "anthropic", body)
+		uses := issue55AssistantToolUses(issue55Decode(t, forward))
+		for name, input := range uses {
+			if input["model"] != "opus" {
+				t.Fatalf("%s: duplicate declaration %q gained tier authority: %v", order, name, uses)
+			}
+		}
+	}
+}
+
+// A standalone (unframed) chunk decodes its tool-call indexes through the
+// number-preserving decoder, so ownership stays on the call the upstream named
+// and never crosses to another index.
+func TestIssue55TierStandaloneArmingKeepsToolCallIndexes(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-standalone-index"
+	issue55Admit(t, reqID, "openai", issue55FixtureBody("openai"))
+	chunk := `{"choices":[{"index":0,"delta":{"tool_calls":[` +
+		`{"index":0,"id":"c1","type":"function","function":{"name":"run_command","arguments":"{\"model\":\"gemini-pro\"}"}},` +
+		`{"index":1,"id":"c2","type":"function","function":{"name":"invoke_subagent","arguments":"{\"model\":\"gemini-pro\"}"}}]}}]}`
+	resp := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: reqID, SourceFormat: "openai", Model: "agy/probe", ChunkIndex: 0, Body: []byte(chunk),
+	}, "openai")
+	out := string(resp.Body)
+	unowned := strings.Index(out, `\"model\":\"gemini-pro\"`)
+	owned := strings.Index(out, `\"model\":\"opus\"`)
+	if unowned < 0 || owned < 0 || owned < unowned {
+		t.Fatalf("standalone lane ownership crossed calls: %s", out)
+	}
+}
+
+// A wire name that only starts with the admitted identity is someone else's
+// call: once the next fragment diverges, the lane must lose tier authority.
+func TestIssue55TierStreamDivergingNameRevokesAuthority(t *testing.T) {
+	isolateRequestAliasPlan(t)
+	cfg := defaultFilterConfig()
+	mappings := copyToolMappings(cfg.ToolMappings)
+	mappings["claude_code"]["OtherTool"] = "invoke_subagent_extra"
+	cfg.ToolMappings = mappings
+	applyFilterConfig(cfg)
+	root := map[string]any{
+		"model": "agy/probe",
+		"tools": []any{
+			issue55AgentTool("openai"),
+			map[string]any{"type": "function", "function": map[string]any{
+				"name": "OtherTool", "parameters": map[string]any{"type": "object", "properties": map[string]any{}},
+			}},
+		},
+		"messages": []any{map[string]any{"role": "user", "content": "go"}},
+	}
+	body, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callRaw, err := json.Marshal(pluginapi.RequestInterceptRequest{
+		RequestID: "issue55-diverging-name", SourceFormat: "openai",
+		Model: "agy/probe", RequestedModel: "agy/probe", Body: body,
+		Headers: map[string][]string{"X-Cloak-Client": {"claude_code"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, code := handlePluginCall("request.intercept_before", callRaw)
+	if code != 0 {
+		t.Fatalf("code=%d envelope=%s", code, raw)
+	}
+	frames := []string{
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"_extra"}}]}}]}` + "\n\n",
+		issue55ArgFrame("openai", 0, `{"model":"gemini-pro","prompt":"p"}`),
+	}
+	got := issue55DeliverStream(t, "issue55-diverging-name", "openai", frames)
+	want := `{"model":"gemini-pro","prompt":"p"}`
+	if got != want {
+		t.Fatalf("streamed args = %q, want unowned passthrough %q", got, want)
+	}
+}
+
+// A fragment that equals the admitted identity is only a repeated complete
+// name when the lane has no partial prefix pending; after "invoke_" it is the
+// continuation of a longer identity owned by another declared tool.
+func TestIssue55TierStreamResetFragmentDoesNotArm(t *testing.T) {
+	isolateRequestAliasPlan(t)
+	cfg := defaultFilterConfig()
+	mappings := copyToolMappings(cfg.ToolMappings)
+	mappings["claude_code"]["OtherTool"] = "invoke_invoke_subagent"
+	cfg.ToolMappings = mappings
+	applyFilterConfig(cfg)
+	root := map[string]any{
+		"model": "agy/probe",
+		"tools": []any{
+			issue55AgentTool("openai"),
+			map[string]any{"type": "function", "function": map[string]any{
+				"name": "OtherTool", "parameters": map[string]any{"type": "object", "properties": map[string]any{}},
+			}},
+		},
+		"messages": []any{map[string]any{"role": "user", "content": "go"}},
+	}
+	body, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callRaw, err := json.Marshal(pluginapi.RequestInterceptRequest{
+		RequestID: "issue55-reset-fragment", SourceFormat: "openai",
+		Model: "agy/probe", RequestedModel: "agy/probe", Body: body,
+		Headers: map[string][]string{"X-Cloak-Client": {"claude_code"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, code := handlePluginCall("request.intercept_before", callRaw)
+	if code != 0 {
+		t.Fatalf("code=%d envelope=%s", code, raw)
+	}
+	frames := []string{
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_"}}]}}]}` + "\n\n",
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
+		issue55ArgFrame("openai", 0, `{"model":"gemini-pro","prompt":"p"}`),
+	}
+	got := issue55DeliverStream(t, "issue55-reset-fragment", "openai", frames)
+	want := `{"model":"gemini-pro","prompt":"p"}`
+	if got != want {
+		t.Fatalf("streamed args = %q, want unowned passthrough %q", got, want)
+	}
+}
+
+// Two fragments that each equal the admitted identity may be one longer name
+// (`invoke_subagentinvoke_subagent`); with no argument bytes in between the
+// lane must treat the second as a continuation, not a repetition.
+func TestIssue55TierStreamDoubledFullNameFragmentsDoNotArm(t *testing.T) {
+	isolateRequestAliasPlan(t)
+	cfg := defaultFilterConfig()
+	mappings := copyToolMappings(cfg.ToolMappings)
+	mappings["claude_code"]["OtherTool"] = "invoke_subagentinvoke_subagent"
+	cfg.ToolMappings = mappings
+	applyFilterConfig(cfg)
+	root := map[string]any{
+		"model": "agy/probe",
+		"tools": []any{
+			issue55AgentTool("openai"),
+			map[string]any{"type": "function", "function": map[string]any{
+				"name": "OtherTool", "parameters": map[string]any{"type": "object", "properties": map[string]any{}},
+			}},
+		},
+		"messages": []any{map[string]any{"role": "user", "content": "go"}},
+	}
+	body, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callRaw, err := json.Marshal(pluginapi.RequestInterceptRequest{
+		RequestID: "issue55-doubled-name", SourceFormat: "openai",
+		Model: "agy/probe", RequestedModel: "agy/probe", Body: body,
+		Headers: map[string][]string{"X-Cloak-Client": {"claude_code"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, code := handlePluginCall("request.intercept_before", callRaw)
+	if code != 0 {
+		t.Fatalf("code=%d envelope=%s", code, raw)
+	}
+	frames := []string{
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
+		issue55ArgFrame("openai", 0, `{"model":"gemini-pro","prompt":"p"}`),
+	}
+	got := issue55DeliverStream(t, "issue55-doubled-name", "openai", frames)
+	want := `{"model":"gemini-pro","prompt":"p"}`
+	if got != want {
+		t.Fatalf("streamed args = %q, want unowned passthrough %q", got, want)
+	}
+}
+
+// A provider that repeats the complete name after argument bytes have already
+// arrived is re-announcing the same call, so the lane keeps its authority.
+func TestIssue55TierStreamRepeatedNameAfterArgumentsKeepsAuthority(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-repeat-name-after-args"
+	issue55Admit(t, reqID, "openai", issue55FixtureBody("openai"))
+	frames := []string{
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
+		issue55ArgFrame("openai", 0, `{"model":"gem`),
+		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
+		issue55ArgFrame("openai", 0, `ini-pro"}`),
+	}
+	got := issue55DeliverStream(t, reqID, "openai", frames)
+	want := `{"model":"opus"}`
+	if got != want {
+		t.Fatalf("streamed args = %q, want translated %q", got, want)
+	}
+}
+
+// The same repeat-after-arguments stream can arrive as one coalesced chunk:
+// the arming pass must count argument bytes that precede the repeated name
+// inside that chunk, not only bytes from earlier chunks.
+func TestIssue55TierStreamCoalescedRepeatedNameKeepsAuthority(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-coalesced-repeat"
+	issue55Admit(t, reqID, "openai", issue55FixtureBody("openai"))
+	name := "data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_subagent"}}]}}]}` + "\n\n"
+	argsOpen := "data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"model\":\"gem"}}]}}]}` + "\n\n"
+	nameAgain := "data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"invoke_subagent"}}]}}]}` + "\n\n"
+	argsClose := "data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ini-pro\"}"}}]}}]}` + "\n\n"
+	resp := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: reqID, SourceFormat: "openai", Model: "agy/probe", ChunkIndex: 0,
+		Body: []byte(name + argsOpen + nameAgain + argsClose),
+	}, "openai")
+	got := streamedToolArgumentText(t, "openai", resp.Body)
+	if got != `{"model":"opus"}` {
+		t.Fatalf("coalesced streamed args = %q, want translated", got)
+	}
+}
+
+// A revoked Anthropic lane must not translate a later block-start input: the
+// lane keeps its scanner so bytes already held still drain, but its translator
+// is neutralised.
+func TestIssue55TierStreamRevokedBlockStartInputUntouched(t *testing.T) {
+	isolateRequestAliasPlan(t)
+	cfg := defaultFilterConfig()
+	mappings := copyToolMappings(cfg.ToolMappings)
+	mappings["claude_code"]["OtherTool"] = "invoke_subagent_extra"
+	cfg.ToolMappings = mappings
+	applyFilterConfig(cfg)
+	root := map[string]any{
+		"model": "agy/probe",
+		"tools": []any{
+			issue55AgentTool("anthropic"),
+			map[string]any{"name": "OtherTool", "input_schema": map[string]any{
+				"type": "object", "properties": map[string]any{"model": map[string]any{"type": "string"}},
+			}},
+		},
+		"system":   []any{map[string]any{"type": "text", "text": "x"}},
+		"messages": []any{map[string]any{"role": "user", "content": "go"}},
+	}
+	body, err := json.Marshal(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callRaw, err := json.Marshal(pluginapi.RequestInterceptRequest{
+		RequestID: "issue55-revoked-block-start", SourceFormat: "anthropic",
+		Model: "agy/probe", RequestedModel: "agy/probe", Body: body,
+		Headers: map[string][]string{"X-Cloak-Client": {"claude_code"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, code := handlePluginCall("request.intercept_before", callRaw)
+	if code != 0 {
+		t.Fatalf("code=%d envelope=%s", code, raw)
+	}
+	first := "event: content_block_start\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu","name":"invoke_subagent","input":{}}}` + "\n\n"
+	second := "event: content_block_start\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu","name":"invoke_subagent_extra","input":{"model":"gemini-pro"}}}` + "\n\n"
+	resp := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+		RequestID: "issue55-revoked-block-start", SourceFormat: "anthropic", Model: "agy/probe",
+		ChunkIndex: 0, Body: []byte(first + second),
+	}, "anthropic")
+	out := string(resp.Body)
+	if strings.Contains(out, `"model":"opus"`) {
+		t.Fatalf("revoked lane translated its block-start input: %s", out)
+	}
+	if !strings.Contains(out, `"model":"gemini-pro"`) {
+		t.Fatalf("unowned input was lost or mutated: %s", out)
+	}
+}

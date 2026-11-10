@@ -1329,11 +1329,11 @@ func handleRequestInterceptBefore(request []byte) []byte {
 
 			// Issue #55 Contract A: after the prose rewrites, the recognized
 			// news sentence (native or default-cloaked spelling) has its URL
-			// replaced with the neutral root. Runs only when the default
-			// keyword set is enabled, and it is an authority of its own: no
-			// custom/prose pass runs over the freshly sanitized URL. Skipped
-			// on the deferred /v1/responses surface.
-			if !responsesCarrier && cfg.UseDefaultKeywords && sanitizeSystemNewsURL(rootMap, format) {
+			// replaced with the neutral root. Runs only for a claude_code
+			// request with the default keyword set enabled, and it is an
+			// authority of its own: no custom/prose pass runs over the freshly
+			// sanitized URL. Skipped on the deferred /v1/responses surface.
+			if !responsesCarrier && effectiveClient == "claude_code" && cfg.UseDefaultKeywords && sanitizeSystemNewsURL(rootMap, format) {
 				changed = true
 			}
 
@@ -1358,7 +1358,7 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		if client != "" {
 			cached := requestScopedUncloakPattern(client, req.Body, format)
 			if cached != nil && cached.re != nil {
-			globalStreamManager.resetSession("req:"+req.RequestID, client, cached, requestChoiceCount(req.Body))
+				globalStreamManager.resetSession("req:"+req.RequestID, client, cached, requestChoiceCount(req.Body))
 			}
 		} else if marker.present && !marker.valid {
 			debugLog("handleRequestInterceptBefore: negative client resolution recorded for RequestID=%s", req.RequestID)
@@ -1417,14 +1417,18 @@ func handleResponseIntercept(request []byte) []byte {
 			// A pinned plan is the sole reverse authority for tool names. If
 			// it has no match, do not fall through to global/static inversion:
 			// a target untouched by this request must remain untouched.
-			modified, uncloaked := uncloakResponseBodyExact(req.Body, plan.reverse, plan.sourceFormat)
-			if !uncloaked {
-				modified = req.Body
-			}
-			// Issue #55 Contract B: reverse the tier vocabulary for calls owned
-			// by the pinned declaration, after the names have been restored.
+			// Issue #55 Contract B: the tier pass runs on the RAW upstream body,
+			// where a wire name is the identity the request actually admitted.
+			// Running it after restoration would let a raw name that merely
+			// equals the client's native spelling borrow the pinned authority.
+			modified := req.Body
+			uncloaked := false
 			if next, c := applyTierResponseBodyBytes(modified, plan.tier); c {
 				modified = next
+				uncloaked = true
+			}
+			if m, c := uncloakResponseBodyExact(modified, plan.reverse, plan.sourceFormat); c {
+				modified = m
 				uncloaked = true
 			}
 			// Brand text introduced by the request path is restored here
@@ -2270,7 +2274,9 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 			// argument tier lane. Name and arguments can arrive separately;
 			// a completed input object is patched directly here.
 			if cb, ok := data["content_block"].(map[string]any); ok {
-				sess.armTierContentBlock(toolArgsLaneKey(laneKey), cb)
+				if sess.armTierContentBlock(toolArgsLaneKey(laneKey), cb) {
+					changed = true
+				}
 			}
 		}
 		apply(data, "text", laneKey)
@@ -2327,9 +2333,7 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 					continue
 				}
 				callLane := openAIToolCallLaneKey(choice, tRaw)
-				// Issue #55 Contract B: arm the call's tier lane from its
-				// named owner before any argument fragment is applied.
-				sess.armTierToolCall(callLane, stringOf(fn["name"]))
+				// The tier lane was armed from the pre-uncloak wire name.
 				apply(fn, "arguments", callLane)
 			}
 		}
@@ -2349,7 +2353,6 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 					continue
 				}
 				callLane := openAIToolCallLaneKey(choice, tRaw)
-				sess.armTierToolCall(callLane, stringOf(fn["name"]))
 				apply(fn, "arguments", callLane)
 			}
 		}
@@ -2401,6 +2404,11 @@ func sliceOfMaps(raw any) []map[string]any {
 			out = append(out, m)
 		}
 	}
+	return out
+}
+
+func sliceOfAny(raw any) []any {
+	out, _ := raw.([]any)
 	return out
 }
 
@@ -2871,12 +2879,23 @@ func laneArrivalSeq(sess *streamSession, key string) int {
 }
 
 // orderedBrandFlushes resolves the final text of every held carry in
-// deterministic lane order (sortedCarryKeys). This does not mutate lane state
-// — callers drain only once the flushed text is safely delivered.
+// deterministic lane order (sortedCarryKeys).
 func orderedBrandFlushes(sess *streamSession) []brandFlush {
+	return orderedBrandFlushesFor(sess, nil)
+}
+
+// orderedBrandFlushesFor resolves only the lanes keep admits. Resolution is NOT
+// state-free: releasing a tier lane's withheld scalar clears its hold, so a
+// lane resolved here and then dropped by a caller's filter would lose those
+// bytes while their brand carry stayed undrained. Filtered flush sites must
+// therefore pass their predicate here instead of filtering the result.
+func orderedBrandFlushesFor(sess *streamSession, keep func(string) bool) []brandFlush {
 	keys := sortedCarryKeys(sess)
 	flushes := make([]brandFlush, 0, len(keys))
 	for _, k := range keys {
+		if keep != nil && !keep(k) {
+			continue
+		}
 		text := ""
 		if lane := sess.brandCarries[k]; lane != nil && lane.carry != "" {
 			text = resolveLaneFlushText(sess, k, lane.carry, lane.lastIsWord)
@@ -3028,26 +3047,24 @@ func sseContainsOpenAIDone(sse []byte) bool {
 // A key in skip is held back for the opposite reason: the event being
 // processed is appending to that lane, so its carry can still complete there.
 func (m *streamSessionManager) generateBrandFlushEventsFiltered(sess *streamSession, format string, only []string, skip map[string]bool) [][]byte {
-	flushes := orderedBrandFlushes(sess)
+	var keep func(string) bool
 	if only != nil || skip != nil {
-		filtered := flushes[:0]
-		for _, f := range flushes {
-			if skip[f.key] {
-				continue
+		keep = func(k string) bool {
+			if skip[k] {
+				return false
 			}
 			if only == nil {
-				filtered = append(filtered, f)
-				continue
+				return true
 			}
-			for _, k := range only {
-				if f.key == k || strings.HasPrefix(f.key, k+reverseBrandLaneSuffix) {
-					filtered = append(filtered, f)
-					break
+			for _, o := range only {
+				if k == o || strings.HasPrefix(k, o+reverseBrandLaneSuffix) {
+					return true
 				}
 			}
+			return false
 		}
-		flushes = filtered
 	}
+	flushes := orderedBrandFlushesFor(sess, keep)
 	if len(flushes) == 0 {
 		return nil
 	}
@@ -3253,23 +3270,22 @@ func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []
 		}
 		root = map[string]any{}
 	}
-	flushes := orderedBrandFlushes(sess)
+	var keep func(string) bool
 	if only != nil {
-		selected := flushes[:0:0]
-		for _, f := range flushes {
-			for _, k := range only {
-				// A cloaked-brand session keeps one lane per carrier under the
-				// choice's key - the choice's prose lane plus a lane per streamed
-				// tool call - so a finished choice ("openai:0") flushes the lanes
-				// it opened ("openai:0\x00tool0"), not only its own key.
-				if f.key == k || strings.HasPrefix(f.key, k+reverseBrandLaneSuffix) {
-					selected = append(selected, f)
-					break
+		keep = func(k string) bool {
+			// A cloaked-brand session keeps one lane per carrier under the
+			// choice's key - the choice's prose lane plus a lane per streamed
+			// tool call - so a finished choice ("openai:...0") flushes the lanes
+			// it opened ("openai:...0\x00tool0"), not only its own key.
+			for _, o := range only {
+				if k == o || strings.HasPrefix(k, o+reverseBrandLaneSuffix) {
+					return true
 				}
 			}
+			return false
 		}
-		flushes = selected
 	}
+	flushes := orderedBrandFlushesFor(sess, keep)
 	if len(flushes) == 0 {
 		return nil, false
 	}
@@ -3546,6 +3562,16 @@ type streamSession struct {
 	// tierLanes holds one tier scanner state per argument lane that a named
 	// eligible call opened, keyed like the brand argument lanes.
 	tierLanes map[string]*streamTierLane
+	// tierPendingNames accumulates the wire-name fragments a lane has received
+	// so far, so a name split across chunks still resolves to the admitted
+	// upstream identity. A decided lane holds its accumulated name or the
+	// retired sentinel.
+	tierPendingNames map[string]string
+	// tierArgsSeen records that argument bytes already reached a lane. Without
+	// it, a later complete-name fragment is indistinguishable from the second
+	// half of a longer identity, so only a lane that already streamed
+	// arguments may treat that fragment as a repetition.
+	tierArgsSeen map[string]bool
 }
 
 const (
@@ -4263,7 +4289,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		}
 		if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
 			if protectedRoute.getDisposition() == streamDispositionNone {
-					m.ensureSession(key, "oh_my_pi", protectedRoute.cachedUncloak, protectedRoute.expected)
+				m.ensureSession(key, "oh_my_pi", protectedRoute.cachedUncloak, protectedRoute.expected)
 			}
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
@@ -4272,7 +4298,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
 			debugLog("StreamSessionManager: header-init UA evidence key=%s client=%s", key, uaClient)
 			if cached := requestScopedUncloakPattern(uaClient, detectSrc, format); cached != nil && cached.re != nil {
-			m.resetSession(key, uaClient, cached, n)
+				m.resetSession(key, uaClient, cached, n)
 			}
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
@@ -4281,7 +4307,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		if client != "" {
 			cached := requestScopedUncloakPattern(client, detectSrc, format)
 			if cached != nil && cached.re != nil {
-			m.resetSession(key, client, cached, n)
+				m.resetSession(key, client, cached, n)
 			}
 		}
 		return pluginapi.StreamChunkInterceptResponse{}
@@ -4389,6 +4415,9 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		sess.updatedAt = time.Now()
 		m.mu.Unlock()
 
+		// Issue #55 Contract B: ownership is decided from the names the
+		// upstream actually sent, before any restore pass runs.
+		armTierLanesFromRaw(sess, completeEvents, format, true)
 		var modified []byte
 		changed := false
 		if cached != nil && cached.re != nil {
@@ -4465,6 +4494,9 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 	sess.updatedAt = time.Now()
 	m.mu.Unlock()
 
+	// Issue #55 Contract B: ownership is decided from the names the upstream
+	// actually sent, before any restore pass runs.
+	armTierLanesFromRaw(sess, req.Body, format, false)
 	var modified []byte
 	changed := false
 	if cached != nil && cached.re != nil {
@@ -4534,7 +4566,7 @@ func (m *streamSessionManager) ensureFallbackSession(req *pluginapi.StreamChunkI
 	if uaClient, ok := resolveUserAgentClient(req.RequestHeaders); ok {
 		if cached := requestScopedUncloakPattern(uaClient, src, format); cached != nil && cached.re != nil {
 			debugLog("StreamSessionManager: fallback UA evidence key=%s client=%s", key, uaClient)
-		return m.ensureSession(key, uaClient, cached, n)
+			return m.ensureSession(key, uaClient, cached, n)
 		}
 	}
 	if len(src) == 0 {
@@ -7290,7 +7322,10 @@ func applySemanticBrandLane(sess *streamSession, laneKey, text string) (string, 
 	// "model" scalar translates, a partial one is withheld until its decision
 	// is known, and the withheld suffix only rejoins through the flush paths.
 	if _, _, isArgs := toolArgsLaneParts(laneKey); isArgs && sess.tierLaneArmed(laneKey) {
-		tiered, tierChanged := applyTierLane(sess, laneKey, next, false)
+		// noHold means this choice is finishing in this event: an incomplete
+		// scalar is released raw inline, in its own argument carrier, instead
+		// of being stranded past the finish_reason.
+		tiered, tierChanged := applyTierLane(sess, laneKey, next, noHold)
 		return tiered, tierChanged || changed
 	}
 	return next, changed

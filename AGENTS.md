@@ -20,14 +20,17 @@ coding-CLI traffic as Antigravity. Two jobs:
    registry line, and a reverse authority. A competitor product name owns no
    table, so a request that merely mentions one is left
    alone. Two carve-outs: a client's opening identity sentence is replaced
-   **whole** (terminal, so it needs no reverse), and one approved deliberate
-   one-way convention - the bare `CLAUDE.md` -> `AGENTS.md` filename rule
-   owned by `claude_code`. Its target `AGENTS.md` is the neutral context
+   **whole** (terminal, so it needs no reverse), and two approved deliberate
+   one-way conventions, both owned by `claude_code` - the bare `CLAUDE.md` ->
+   `AGENTS.md` filename rule and the Issue #55 news-link URL replacement, which
+   rewrites one fixed vendor sentence's URL to `https://antigravity.google` and
+   never restores that exact URL (an echoed host still follows the ordinary
+   official-domain reverse rule to `claude.ai`). The filename rule's target `AGENTS.md` is the neutral context
    filename every client already reads, so it is never reverse-restored as a
    bare filename; the path-qualified `.gemini/...` restoration is unaffected.
    Two approved non-bijective pairs (SDK, Workflow) are named in `CONTEXT.md` §1.
    **The detailed Brand Rewriting contract - every forward/reverse rule, the
-   non-bijective pairs, the one-way filename convention, the exclusions and the
+   non-bijective pairs, the one-way conventions, the exclusions and the
    whole-segment path rules - is `CONTEXT.md` §1, which is canonical; `main.go`'s
    tables are the source of truth for behaviour.**
 2. Tool-name cloaking: rename a client's native tool names to Antigravity tool
@@ -40,7 +43,8 @@ coding-CLI traffic as Antigravity. Two jobs:
 - Module: github.com/monet88/antigravity-cloak
 - Go: 1.26.0. Depends on github.com/router-for-me/CLIProxyAPI/v7 v7.2.143
   (SDK sdk/pluginapi, sdk/pluginabi). Plugin ABI version is 1.
-- Source layout: `main.go` (plugin core). Go unit tests (`*_test.go`) reside at
+- Source layout: `main.go` (plugin core) and `issue55_agent_tier.go` (Issue #55
+  Claude Code news-URL sanitation and reversible Agent model tiers). Go unit tests (`*_test.go`) reside at
   the repository root alongside `main.go` for `package main`, while `tests/` is
   dedicated to integration/e2e test scripts (`.py`, `.sh`). Upstream references
   are cloned under `.ref/` (gitignored workspace), not part of the module.

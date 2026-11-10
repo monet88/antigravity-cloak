@@ -110,3 +110,24 @@ Wrap the collected body with quotes to rebuild a string literal: `literal = '"' 
 ### Prevention / Fast path
 
 When a byte-level JSON scanner accumulates an escaped-string BODY, always rebuild the complete literal before `json.Unmarshal`; missing surrounding quotes degenerates into scanner-broken without any signal. Debug path: enable `CPA_FILTER_DEBUG` and trace the `agent tier lane ...` / `agent tier ...` wake-upe lines.
+
+---
+
+## Bug 005: Escaped Keys and Filtered Flushes Broke Tier Reversal (Issue #55)
+
+### Symptom
+
+Two defects an offline happy-path test cannot see. (a) The tier scanner missed an escaped spelling of the model key (`{"\u006dodel":"gemini-pro"}` was forwarded untranslated) while an unrelated key whose escaped bytes collapse to the same letters (`{"m\nodel":"gemini-pro"}`) had its value rewritten to `"opus"` — corruption, not a miss. (b) A standalone (non-SSE) chunk that finished choice 0 flushed every lane first and filtered afterwards, so choice 1's still-streaming `"model"` scalar was released by `releaseHold` into text that was then discarded; the next chunk continued from an already-drained scanner and the client received truncated arguments.
+
+### Root Cause
+
+(a) `tierArgsScanner.feed` appended key bytes only outside the escape handling, dropping `\` and the escaped character, so `keyRaw` was neither the wire spelling nor the decoded one. `closeKeyToken` decodes `keyRaw` as a JSON string literal, so it must receive the RAW body including escapes.
+(b) `orderedBrandFlushes` resolved every lane before callers applied `only`/`skip`. Resolution is stateful for tier lanes: `applyTierLane(..., terminal=true)` calls `scan.releaseHold`.
+
+### Verified fix
+
+(a) Capture the raw key literal (`s.escaped || c != '"'` appends), letting `closeKeyToken`'s `json.Unmarshal` decode exactly what arrived. (b) `orderedBrandFlushesFor(sess, keep)` filters keys BEFORE resolution, and both filtered flush sites (`generateBrandFlushEventsFiltered`, `flushBrandStandalone`) pass their predicate into it. Regression tests: `TestIssue55TierScannerDecodesEscapedModelKey`, `TestIssue55TierScannerKeepsEscapedLookalikeKeyLiteral`, `TestIssue55FilteredFlushKeepsUnselectedTierHold` — each verified to fail when its guard is removed.
+
+### Prevention / Fast path
+
+A flush helper that resolves state before the caller chooses what to deliver is a latent byte-drop; push the predicate into the resolver. For byte scanners, capture raw literals and decode once, and always test a lookalike that must stay untouched — a test that only checks the intended translation passes against a corrupting matcher.
