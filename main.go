@@ -314,6 +314,15 @@ func normalizeSourceFormat(sourceFormat string) string {
 	}
 }
 
+// carriesOpenAIResponses reports whether the RAW source format identifies the
+// OpenAI Responses wire surface. Issue #55 defers its two new transformations
+// there: the shared helpers key on the normalized carrier, so the entry points
+// check the raw spelling before Contract A/Contract B run. Normal behavior on
+// that surface is unchanged.
+func carriesOpenAIResponses(rawSourceFormat string) bool {
+	return strings.EqualFold(strings.TrimSpace(rawSourceFormat), "openai-response")
+}
+
 // modelAllowsCloak reports whether cloaking should run for the current model.
 // When ModelPrefixes is empty (the default), cloaking runs for every model so
 // behavior matches the upstream "cloak by client" design. When non-empty,
@@ -1268,9 +1277,23 @@ func handleRequestInterceptBefore(request []byte) []byte {
 			}
 
 			changed := false
+			// Issue #55 Contract B: translate the eligible declaration's
+			// model-tier enum FIRST, while the declaration still carries its
+			// native identity, so CPA's provider conversion derives its help
+			// from the translated enum. The tool-call history is re-encoded
+			// the same way after name cloaking has resolved the identities.
+			// Skipped on the deferred /v1/responses surface.
+			responsesCarrier := carriesOpenAIResponses(req.SourceFormat)
+			if !responsesCarrier && plan.tier != nil && translateAgentTierEnum(rootMap, plan.tier, format) {
+				changed = true
+			}
 			if len(plan.forward) > 0 {
 				toolCloaked := cloakToolNames(rootMap, plan.forward, format)
 				changed = changed || toolCloaked
+			}
+
+			if !responsesCarrier && plan.tier != nil && applyTierArgsForwardHistory(rootMap, plan.tier, format) {
+				changed = true
 			}
 
 			// Brand rewriting (same steps as rewriteRequestBodyWithClient).
@@ -1302,6 +1325,16 @@ func handleRequestInterceptBefore(request []byte) []byte {
 					rootMap["system"] = next
 					changed = true
 				}
+			}
+
+			// Issue #55 Contract A: after the prose rewrites, the recognized
+			// news sentence (native or default-cloaked spelling) has its URL
+			// replaced with the neutral root. Runs only for a claude_code
+			// request with the default keyword set enabled, and it is an
+			// authority of its own: no custom/prose pass runs over the freshly
+			// sanitized URL. Skipped on the deferred /v1/responses surface.
+			if !responsesCarrier && effectiveClient == "claude_code" && cfg.UseDefaultKeywords && sanitizeSystemNewsURL(rootMap, format) {
+				changed = true
 			}
 
 			debugLog("handleRequestInterceptBefore: alias plan rewritten=%t client=%s", changed, effectiveClient)
@@ -1384,9 +1417,19 @@ func handleResponseIntercept(request []byte) []byte {
 			// A pinned plan is the sole reverse authority for tool names. If
 			// it has no match, do not fall through to global/static inversion:
 			// a target untouched by this request must remain untouched.
-			modified, uncloaked := uncloakResponseBodyExact(req.Body, plan.reverse, plan.sourceFormat)
-			if !uncloaked {
-				modified = req.Body
+			// Issue #55 Contract B: the tier pass runs on the RAW upstream body,
+			// where a wire name is the identity the request actually admitted.
+			// Running it after restoration would let a raw name that merely
+			// equals the client's native spelling borrow the pinned authority.
+			modified := req.Body
+			uncloaked := false
+			if next, c := applyTierResponseBodyBytes(modified, plan.tier); c {
+				modified = next
+				uncloaked = true
+			}
+			if m, c := uncloakResponseBodyExact(modified, plan.reverse, plan.sourceFormat); c {
+				modified = m
+				uncloaked = true
 			}
 			// Brand text introduced by the request path is restored here
 			// independently of the tool-name plan: none of those tokens can
@@ -2226,6 +2269,16 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 	}
 	if format == "anthropic" {
 		laneKey := laneKeyWithIndex("anthropic", data)
+		if data["type"] == "content_block_start" {
+			// Issue #55 Contract B: a named eligible tool call arms the block's
+			// argument tier lane. Name and arguments can arrive separately;
+			// a completed input object is patched directly here.
+			if cb, ok := data["content_block"].(map[string]any); ok {
+				if sess.armTierContentBlock(toolArgsLaneKey(laneKey), cb) {
+					changed = true
+				}
+			}
+		}
 		apply(data, "text", laneKey)
 		if cb, ok := data["content_block"].(map[string]any); ok {
 			apply(cb, "text", laneKey)
@@ -2279,7 +2332,9 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 				if fn == nil {
 					continue
 				}
-				apply(fn, "arguments", openAIToolCallLaneKey(choice, tRaw))
+				callLane := openAIToolCallLaneKey(choice, tRaw)
+				// The tier lane was armed from the pre-uncloak wire name.
+				apply(fn, "arguments", callLane)
 			}
 		}
 		// The final standalone chunk of some providers carries the whole turn as
@@ -2297,7 +2352,8 @@ func (m *streamSessionManager) reverseCloakedBrandStreamingMap(data map[string]a
 				if fn == nil {
 					continue
 				}
-				apply(fn, "arguments", openAIToolCallLaneKey(choice, tRaw))
+				callLane := openAIToolCallLaneKey(choice, tRaw)
+				apply(fn, "arguments", callLane)
 			}
 		}
 	}
@@ -2348,6 +2404,11 @@ func sliceOfMaps(raw any) []map[string]any {
 			out = append(out, m)
 		}
 	}
+	return out
+}
+
+func sliceOfAny(raw any) []any {
+	out, _ := raw.([]any)
 	return out
 }
 
@@ -2472,12 +2533,16 @@ func (m *streamSessionManager) reverseFlushCloakedBrandLanes(sess *streamSession
 			continue
 		}
 		lane := sess.brandCarries[key]
-		if lane == nil || lane.carry == "" {
-			continue
+		text := ""
+		if lane != nil && lane.carry != "" {
+			text = resolveLaneFlushText(sess, key, lane.carry, lane.lastIsWord)
+			lane.setCarry("")
+			lane.lastIsWord = false
+		} else {
+			// Issue #55 Contract B: a tier-pending-only lane still flushes its
+			// withheld scalar here (raw when it never completed).
+			text = resolveTierFlushText(sess, key, "")
 		}
-		text, _ := replaceInsensitiveSetWithPrev(lane.carry, lane.lastIsWord, laneReverseTable(sess, key))
-		lane.setCarry("")
-		lane.lastIsWord = false
 		if text == "" {
 			continue
 		}
@@ -2774,6 +2839,18 @@ func sortedCarryKeys(sess *streamSession) []string {
 		}
 		keys = append(keys, k)
 	}
+	// Issue #55 Contract B: a tier lane that withholds a pending scalar is a
+	// flush candidate even when its brand carry is empty, so the held bytes
+	// reach the client in their argument carrier before a terminal.
+	for k, tierLane := range sess.tierLanes {
+		if tierLane == nil || tierLane.scan == nil || !tierLane.scan.hasPendingHold() {
+			continue
+		}
+		if lane := sess.brandCarries[k]; lane != nil && lane.carry != "" {
+			continue
+		}
+		keys = append(keys, k)
+	}
 	sort.SliceStable(keys, func(i, j int) bool {
 		ni, okI := laneIndexNum(keys[i])
 		nj, okJ := laneIndexNum(keys[j])
@@ -2783,7 +2860,7 @@ func sortedCarryKeys(sess *streamSession) []string {
 		if ni != nj {
 			return ni < nj
 		}
-		si, sj := sess.brandCarries[keys[i]].seq, sess.brandCarries[keys[j]].seq
+		si, sj := laneArrivalSeq(sess, keys[i]), laneArrivalSeq(sess, keys[j])
 		if si != sj {
 			return si < sj
 		}
@@ -2792,15 +2869,47 @@ func sortedCarryKeys(sess *streamSession) []string {
 	return keys
 }
 
+// laneArrivalSeq reads the order in which a lane first began holding bytes:
+// its brand carry if it holds one, otherwise the tier scanner's own stamp.
+// Both are recorded against the same session counter, so the two kinds of hold
+// compare directly.
+func laneArrivalSeq(sess *streamSession, key string) int {
+	seq := 0
+	if lane := sess.brandCarries[key]; lane != nil && lane.carry != "" {
+		seq = lane.seq
+	}
+	if tierLane := sess.tierLanes[key]; tierLane != nil && tierLane.seq != 0 && (seq == 0 || tierLane.seq < seq) {
+		seq = tierLane.seq
+	}
+	return seq
+}
+
 // orderedBrandFlushes resolves the final text of every held carry in
-// deterministic lane order (sortedCarryKeys). This does not mutate lane state
-// — callers drain only once the flushed text is safely delivered.
+// deterministic lane order (sortedCarryKeys).
 func orderedBrandFlushes(sess *streamSession) []brandFlush {
+	return orderedBrandFlushesFor(sess, nil)
+}
+
+// orderedBrandFlushesFor resolves only the lanes keep admits. Resolution is NOT
+// state-free: releasing a tier lane's withheld scalar clears its hold, so a
+// lane resolved here and then dropped by a caller's filter would lose those
+// bytes while their brand carry stayed undrained. Filtered flush sites must
+// therefore pass their predicate here instead of filtering the result.
+func orderedBrandFlushesFor(sess *streamSession, keep func(string) bool) []brandFlush {
 	keys := sortedCarryKeys(sess)
 	flushes := make([]brandFlush, 0, len(keys))
 	for _, k := range keys {
-		lane := sess.brandCarries[k]
-		text, _ := replaceInsensitiveSetWithPrev(lane.carry, lane.lastIsWord, laneReverseTable(sess, k))
+		if keep != nil && !keep(k) {
+			continue
+		}
+		text := ""
+		if lane := sess.brandCarries[k]; lane != nil && lane.carry != "" {
+			text = resolveLaneFlushText(sess, k, lane.carry, lane.lastIsWord)
+		} else {
+			// Tier-pending-only lane: the withheld scalar resolves (or is
+			// released raw) with no brand text to combine.
+			text = resolveTierFlushText(sess, k, "")
+		}
 		if text == "" {
 			continue
 		}
@@ -2832,7 +2941,10 @@ func hasPendingBrandCarry(sess *streamSession) bool {
 			return true
 		}
 	}
-	return false
+	// Issue #55 Contract B: a withheld tier scalar is pending too — the session
+	// must stay alive until a later fragment resolves it or a terminal releases
+	// it raw.
+	return hasPendingTierHold(sess)
 }
 
 // anthropicTerminalKindFromMap reports whether an Anthropic data map is part
@@ -2941,26 +3053,24 @@ func sseContainsOpenAIDone(sse []byte) bool {
 // A key in skip is held back for the opposite reason: the event being
 // processed is appending to that lane, so its carry can still complete there.
 func (m *streamSessionManager) generateBrandFlushEventsFiltered(sess *streamSession, format string, only []string, skip map[string]bool) [][]byte {
-	flushes := orderedBrandFlushes(sess)
+	var keep func(string) bool
 	if only != nil || skip != nil {
-		filtered := flushes[:0]
-		for _, f := range flushes {
-			if skip[f.key] {
-				continue
+		keep = func(k string) bool {
+			if skip[k] {
+				return false
 			}
 			if only == nil {
-				filtered = append(filtered, f)
-				continue
+				return true
 			}
-			for _, k := range only {
-				if f.key == k || strings.HasPrefix(f.key, k+reverseBrandLaneSuffix) {
-					filtered = append(filtered, f)
-					break
+			for _, o := range only {
+				if k == o || strings.HasPrefix(k, o+reverseBrandLaneSuffix) {
+					return true
 				}
 			}
+			return false
 		}
-		flushes = filtered
 	}
+	flushes := orderedBrandFlushesFor(sess, keep)
 	if len(flushes) == 0 {
 		return nil
 	}
@@ -3151,7 +3261,7 @@ func requestChoiceCount(body []byte) int {
 // its lane, so the flush resolves that token and hands it back inside the same
 // chunk shape the protocol expects.
 func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []byte, format string, only []string) ([]byte, bool) {
-	if sess == nil || len(sess.brandCarries) == 0 {
+	if sess == nil || (len(sess.brandCarries) == 0 && !hasPendingTierHold(sess)) {
 		return nil, false
 	}
 	if sess.client == "" || sess.client == negativeClientResolution {
@@ -3166,23 +3276,22 @@ func (m *streamSessionManager) flushBrandStandalone(sess *streamSession, body []
 		}
 		root = map[string]any{}
 	}
-	flushes := orderedBrandFlushes(sess)
+	var keep func(string) bool
 	if only != nil {
-		selected := flushes[:0:0]
-		for _, f := range flushes {
-			for _, k := range only {
-				// A cloaked-brand session keeps one lane per carrier under the
-				// choice's key - the choice's prose lane plus a lane per streamed
-				// tool call - so a finished choice ("openai:0") flushes the lanes
-				// it opened ("openai:0\x00tool0"), not only its own key.
-				if f.key == k || strings.HasPrefix(f.key, k+reverseBrandLaneSuffix) {
-					selected = append(selected, f)
-					break
+		keep = func(k string) bool {
+			// A cloaked-brand session keeps one lane per carrier under the
+			// choice's key - the choice's prose lane plus a lane per streamed
+			// tool call - so a finished choice ("openai:...0") flushes the lanes
+			// it opened ("openai:...0\x00tool0"), not only its own key.
+			for _, o := range only {
+				if k == o || strings.HasPrefix(k, o+reverseBrandLaneSuffix) {
+					return true
 				}
 			}
+			return false
 		}
-		flushes = selected
 	}
+	flushes := orderedBrandFlushesFor(sess, keep)
 	if len(flushes) == 0 {
 		return nil, false
 	}
@@ -3452,6 +3561,23 @@ type streamSession struct {
 	// instead of being carried past the finish_reason to the end of the stream.
 	// Set and cleared per event, so nothing leaks into the next one.
 	terminalChoices map[string]bool
+	// tier is the session's Issue #55 Agent model-tier authority, pinned at
+	// creation time only when the request's alias plan admitted one. nil means
+	// the session runs no tier pass.
+	tier *requestTierAuthority
+	// tierLanes holds one tier scanner state per argument lane that a named
+	// eligible call opened, keyed like the brand argument lanes.
+	tierLanes map[string]*streamTierLane
+	// tierPendingNames accumulates the wire-name fragments a lane has received
+	// so far, so a name split across chunks still resolves to the admitted
+	// upstream identity. A decided lane holds its accumulated name or the
+	// retired sentinel.
+	tierPendingNames map[string]string
+	// tierArgsSeen records that argument bytes already reached a lane. Without
+	// it, a later complete-name fragment is indistinguishable from the second
+	// half of a longer identity, so only a lane that already streamed
+	// arguments may treat that fragment as a repetition.
+	tierArgsSeen map[string]bool
 }
 
 const (
@@ -3588,6 +3714,11 @@ type requestAliasPlan struct {
 	cachedUncloak   *cachedUncloakPattern
 	expected        int
 	disposition     atomic.Int32
+	// tier is the pinned Issue #55 Agent model-tier authority. It is set only
+	// when the request declared an eligible native Agent declaration; a nil
+	// tier activates no tier behavior anywhere on the request/response/stream
+	// cycle. It lives and dies with the plan (request.complete cleanup).
+	tier *requestTierAuthority
 }
 
 func (p *requestAliasPlan) getDisposition() streamDisposition {
@@ -3815,10 +3946,19 @@ func admitRequestAliasPlan(req *pluginapi.RequestInterceptRequest, client string
 	}
 	plan.sourceFormat = normalizeSourceFormat(req.SourceFormat)
 	plan.expected = requestChoiceCount(req.Body)
+	// Pin the Agent model-tier authority BEFORE the session is created, so
+	// every path that rebuilds the session from the plan carries it (spec:
+	// active reversal survives reload and disposable cleanup). Detection reads
+	// the RAW client body and resolves through the plan's forward map; it
+	// mutates nothing. Skipped on the deferred /v1/responses surface.
+	if !carriesOpenAIResponses(req.SourceFormat) {
+		plan.tier = detectAgentTierAuthority(req.Body, plan.sourceFormat, plan)
+	}
 	if err := globalAliasPlanManager.set(req.RequestID, plan); err != nil {
 		return nil, err
 	}
 	globalStreamManager.resetSession("req:"+req.RequestID, plan.client, plan.cachedUncloak, plan.expected)
+	globalStreamManager.attachTier("req:"+req.RequestID, plan.tier)
 	return plan, nil
 }
 
@@ -4005,7 +4145,8 @@ func (m *streamSessionManager) sessionKey(req *pluginapi.StreamChunkInterceptReq
 
 // resetSession (re)initializes the session for a fresh stream start, clearing
 // any stale tail left by an aborted previous incarnation of the same key.
-// expected is the request's choice count ("n"); omitted means 1.
+// expected is the request's choice count ("n"); omitted means 1. Callers that
+// own tier authority pin it on the fresh session right after this call.
 func (m *streamSessionManager) resetSession(key, client string, cached *cachedUncloakPattern, expected ...int) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -4024,6 +4165,22 @@ func newStreamSession(client string, cached *cachedUncloakPattern, expected ...i
 		updatedAt:    time.Now(),
 		brandCarries: make(map[string]*brandLane),
 		expected:     n,
+	}
+}
+
+// attachTier pins a session's Issue #55 tier authority. It runs right after the
+// session is (re)created inside the ordering fence between the request pass and
+// the stream pass for the same RequestID, so the tier is always pinned before
+// any chunk processing begins. Absent sessions are skipped: a deleted session
+// is re-created later from the plan that still owns the tier.
+func (m *streamSessionManager) attachTier(key string, tier *requestTierAuthority) {
+	if tier == nil || key == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sess := m.sessions[key]; sess != nil {
+		sess.tier = tier
 	}
 }
 
@@ -4132,6 +4289,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		if aliasPlan != nil {
 			if aliasPlan.getDisposition() == streamDispositionNone {
 				m.ensureSession(key, aliasPlan.client, aliasPlan.cachedUncloak, aliasPlan.expected)
+				m.attachTier(key, aliasPlan.tier)
 			}
 			return pluginapi.StreamChunkInterceptResponse{}
 		}
@@ -4183,6 +4341,7 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 			}
 			if aliasPlan.getDisposition() == streamDispositionNone {
 				sess = m.ensureSession(key, aliasPlan.client, aliasPlan.cachedUncloak, aliasPlan.expected)
+				m.attachTier(key, aliasPlan.tier)
 			}
 		} else if protectedRoute != nil && protectedRoute.routeKind == routeKindProtectedAGY {
 			if protectedRoute.getDisposition() == streamDispositionPayloadActive {
@@ -4262,6 +4421,9 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 		sess.updatedAt = time.Now()
 		m.mu.Unlock()
 
+		// Issue #55 Contract B: ownership is decided from the names the
+		// upstream actually sent, before any restore pass runs.
+		armTierLanesFromRaw(sess, completeEvents, format, true)
 		var modified []byte
 		changed := false
 		if cached != nil && cached.re != nil {
@@ -4338,6 +4500,9 @@ func (m *streamSessionManager) processChunk(req *pluginapi.StreamChunkInterceptR
 	sess.updatedAt = time.Now()
 	m.mu.Unlock()
 
+	// Issue #55 Contract B: ownership is decided from the names the upstream
+	// actually sent, before any restore pass runs.
+	armTierLanesFromRaw(sess, req.Body, format, false)
 	var modified []byte
 	changed := false
 	if cached != nil && cached.re != nil {
@@ -7158,6 +7323,17 @@ func applySemanticBrandLane(sess *streamSession, laneKey, text string) (string, 
 	lane := getBrandLane(sess, laneKey)
 	next, changed := applyBrandLaneSet(text, lane, laneReverseTable(sess, laneKey), noHold)
 	stampLaneArrival(sess, lane)
+	// Issue #55 Contract B: an armed argument lane passes the resolved brand
+	// text through the structured tier scanner — a complete decoded top-level
+	// "model" scalar translates, a partial one is withheld until its decision
+	// is known, and the withheld suffix only rejoins through the flush paths.
+	if _, _, isArgs := toolArgsLaneParts(laneKey); isArgs && sess.tierLaneArmed(laneKey) {
+		// noHold means this choice is finishing in this event: an incomplete
+		// scalar is released raw inline, in its own argument carrier, instead
+		// of being stranded past the finish_reason.
+		tiered, tierChanged := applyTierLane(sess, laneKey, next, noHold)
+		return tiered, tierChanged || changed
+	}
 	return next, changed
 }
 
