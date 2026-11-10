@@ -490,6 +490,15 @@ func TestIssue55AgentTierMustMatchEligibleSignature(t *testing.T) {
 		func(m map[string]any) { // model is required
 			m["required"] = []any{"description", "prompt", "model"}
 		},
+		func(m map[string]any) { // required present but not an array
+			m["required"] = "model"
+		},
+		func(m map[string]any) { // required array with a non-string member
+			m["required"] = []any{"description", "prompt", "model", 7}
+		},
+		func(m map[string]any) { // required present with the wrong container type
+			m["required"] = map[string]any{"model": true}
+		},
 	} {
 		schema := issue55AgentSchema()
 		mutate(schema)
@@ -1719,5 +1728,81 @@ func TestIssue55TierStreamRevokedBlockStartInputUntouched(t *testing.T) {
 	}
 	if !strings.Contains(out, `"model":"gemini-pro"`) {
 		t.Fatalf("unowned input was lost or mutated: %s", out)
+	}
+}
+
+func sse(data string) string { return "data: " + data + "\n\n" }
+
+// A lane can withhold bytes for the tier scanner without ever holding brand
+// text, so stampLaneArrival never fires for it. Without an arrival stamp of its
+// own its seq stays 0, which sortedCarryKeys reads as "arrived first" and
+// flushes ahead of a sibling carry that really did arrive earlier.
+func TestIssue55TierOnlyHeldLaneKeepsArrivalOrder(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-tier-hold-order"
+	issue55Admit(t, reqID, "openai", issue55FixtureBody("openai"))
+	chunks := []string{
+		// 1: the tool call starts, arming the lane with nothing held yet.
+		sse(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"invoke_subagent"}}]}}]}`),
+		// 2: the same choice's prose holds a partial brand token.
+		sse(`{"choices":[{"index":0,"delta":{"content":"made by Antigrav"}}]}`),
+		// 3: the argument lane starts withholding a tier scalar.
+		sse(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"model\": \"gem"}}]}}]}`),
+	}
+	sess := globalStreamManager.getSession("req:" + reqID)
+	if sess == nil {
+		t.Fatal("session was not registered")
+	}
+	for i, chunk := range chunks {
+		globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+			RequestID: reqID, SourceFormat: "openai", Model: "agy/probe", ChunkIndex: i, Body: []byte(chunk),
+		}, "openai")
+	}
+	flushes := orderedBrandFlushes(sess)
+	if len(flushes) != 2 {
+		t.Fatalf("want two held lanes, got %d: %+v", len(flushes), flushes)
+	}
+	proseKey := openAIChoiceLaneKey(map[string]any{"index": 0})
+	argsKey := openAIChoiceLaneKey(map[string]any{"index": 0}) + reverseBrandLaneSuffix + "tool0"
+	if flushes[0].key != proseKey || flushes[1].key != argsKey {
+		t.Fatalf("flush order = %q then %q, want the earlier brand carry %q before %q",
+			flushes[0].key, flushes[1].key, proseKey, argsKey)
+	}
+}
+
+// The same ordering has to survive a hold that keeps growing: a lane's arrival
+// is when it FIRST withheld bytes, so a further fragment of the same held
+// scalar must not re-stamp it behind text that arrived in between.
+func TestIssue55TierHoldKeepsFirstArrivalAcrossFragments(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+	const reqID = "issue55-tier-hold-growth"
+	issue55Admit(t, reqID, "openai", issue55FixtureBody("openai"))
+	sess := globalStreamManager.getSession("req:" + reqID)
+	if sess == nil {
+		t.Fatal("session was not registered")
+	}
+	chunks := []string{
+		// 1: arm the lane, then start withholding a tier scalar.
+		sse(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"invoke_subagent"}}]}}]}`),
+		sse(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"model\": \"gem"}}]}}]}`),
+		// 2: prose arrives while the scalar is still held.
+		sse(`{"choices":[{"index":0,"delta":{"content":"made by Antigrav"}}]}`),
+		// 3: the held scalar grows, but the lane's arrival is unchanged.
+		sse(`{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"ini"}}]}}]}`),
+	}
+	for i, chunk := range chunks {
+		globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{
+			RequestID: reqID, SourceFormat: "openai", Model: "agy/probe", ChunkIndex: i, Body: []byte(chunk),
+		}, "openai")
+	}
+	flushes := orderedBrandFlushes(sess)
+	if len(flushes) != 2 {
+		t.Fatalf("want two held lanes, got %d: %+v", len(flushes), flushes)
+	}
+	proseKey := openAIChoiceLaneKey(map[string]any{"index": 0})
+	argsKey := openAIChoiceLaneKey(map[string]any{"index": 0}) + reverseBrandLaneSuffix + "tool0"
+	if flushes[0].key != argsKey || flushes[1].key != proseKey {
+		t.Fatalf("flush order = %q then %q, want the lane that began holding first %q before %q",
+			flushes[0].key, flushes[1].key, argsKey, proseKey)
 	}
 }

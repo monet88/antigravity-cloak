@@ -174,7 +174,7 @@ Key debug lines to grep:
 - handleRequestInterceptBefore: alias plan rewritten=%t client=%s - alias plan forward cloak applied.
 - handleRequestInterceptBefore: alias plan client=%s with missing RequestID -> 503 - missing correlation rejected with HTTP 503 tool_cloak_required.
 - request alias admission rejected RequestID=%q client=%q: %v - alias plan collision, duplicate RequestID, or parse error rejected with HTTP 503 tool_cloak_required.
-- agent tier: eligible declaration pinned source=... upstream=... / agent tier: enum translated source=... - Issue #55 Contract B authority pinned and enum translated (absent = tier feature inactive).
+- agent tier: eligible declaration pinned source=... upstream=... / agent tier: enum translated source=... - Issue #55 Contract B authority pinned and enum translated. These lines exist only when CPA_FILTER_DEBUG is on; with debug off nothing is written, so absence proves nothing either way.
 - agent tier lane armed key=... / agent tier lane <lane> terminal=%t -> %q - per-call stream tier scanner armed and resolving (Issue #55).
 - buildUncloakTable: toolNames=%v client=%s and cloakedClient=%s - detection.
   client= / cloakedClient=claude_code means detection worked; empty means it did

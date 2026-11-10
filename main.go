@@ -2869,13 +2869,19 @@ func sortedCarryKeys(sess *streamSession) []string {
 	return keys
 }
 
-// laneArrivalSeq reads a brand lane's arrival order, 0 for a brand-free tier
-// lane that has no seq of its own yet.
+// laneArrivalSeq reads the order in which a lane first began holding bytes:
+// its brand carry if it holds one, otherwise the tier scanner's own stamp.
+// Both are recorded against the same session counter, so the two kinds of hold
+// compare directly.
 func laneArrivalSeq(sess *streamSession, key string) int {
-	if lane := sess.brandCarries[key]; lane != nil {
-		return lane.seq
+	seq := 0
+	if lane := sess.brandCarries[key]; lane != nil && lane.carry != "" {
+		seq = lane.seq
 	}
-	return 0
+	if tierLane := sess.tierLanes[key]; tierLane != nil && tierLane.seq != 0 && (seq == 0 || tierLane.seq < seq) {
+		seq = tierLane.seq
+	}
+	return seq
 }
 
 // orderedBrandFlushes resolves the final text of every held carry in

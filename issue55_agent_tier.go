@@ -324,9 +324,17 @@ func agentTierSchemaEligible(schemaValue any) bool {
 		}
 		seen[value] = true
 	}
-	if required, ok := schema["required"].([]any); ok {
-		for _, member := range required {
-			if name, ok := member.(string); ok && name == "model" {
+	// A required list that is present but not a string array is not a schema
+	// this signature recognizes: it may still demand the tier, so it is not
+	// eligible rather than silently accepted.
+	if required, present := schema["required"]; present {
+		members, ok := required.([]any)
+		if !ok {
+			return false
+		}
+		for _, member := range members {
+			name, ok := member.(string)
+			if !ok || name == "model" {
 				return false
 			}
 		}
@@ -926,6 +934,11 @@ func (s *tierArgsScanner) hasPendingHold() bool {
 // isolated per request and per call.
 type streamTierLane struct {
 	scan *tierArgsScanner
+	// seq is when this lane FIRST began withholding bytes. It cannot borrow the
+	// brand lane's stamp: the brand pass runs first on every argument fragment
+	// and clears that stamp when the lane holds no brand text, so a growing hold
+	// would look like a fresh arrival on each fragment.
+	seq int
 }
 
 func (sess *streamSession) armTierLane(laneKey string) {
@@ -1123,6 +1136,14 @@ func applyTierLane(sess *streamSession, laneKey, text string, terminal bool) (st
 		sess.tierArgsSeen[laneKey] = true
 	}
 	out := tierLane.scan.feed(text)
+	if tierLane.scan.hasPendingHold() {
+		if tierLane.seq == 0 {
+			sess.laneSeq++
+			tierLane.seq = sess.laneSeq
+		}
+	} else {
+		tierLane.seq = 0
+	}
 	if terminal {
 		var extra strings.Builder
 		tierLane.scan.releaseHold(&extra)
