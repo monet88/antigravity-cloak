@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
@@ -809,5 +810,96 @@ omp_prompt_sanitizations:
 				t.Fatalf("first tool = %q, want %q", gotTool, tc.wantFirstTool)
 			}
 		})
+	}
+}
+
+// TestSystemConventionsRFC2119AllLineEndings covers the spec's request-seam
+// clause: built-in RFC 2119 presets (canonical and mixed-case spellings) must
+// sanitize across all three OMP prompt line endings (LF, CRLF, CR) on both
+// agy/* OMP routes, with use_default_keywords disabled.
+func TestSystemConventionsRFC2119AllLineEndings(t *testing.T) {
+	endingName := func(ending string) string {
+		name := strings.ReplaceAll(ending, "\n", "lf")
+		return strings.ReplaceAll(name, "\r", "cr")
+	}
+	for _, ending := range []string{"\n", "\r\n", "\r"} {
+		for _, tc := range []struct {
+			name      string
+			signature string
+		}{
+			{name: "keywords-signature", signature: "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."},
+			{name: "legacy-signature-mixed-case", signature: "Rfc 2119: Must, Required, Should, Recommended, May, Optional."},
+		} {
+			promptIn := "header" + ending + tc.signature + ending + "tail"
+			promptOut := "header" + ending + "Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL." + ending + "tail"
+			subtest := tc.name + "-eol-" + endingName(ending)
+			t.Run("protected-agy-"+subtest, func(t *testing.T) {
+				isolateOMPMeasurement(t)
+				raw, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")))
+				if code != 0 {
+					t.Fatalf("reconfigure code = %d, body = %s", code, raw)
+				}
+				root := map[string]any{
+					"system": promptIn,
+					"messages": []any{
+						map[string]any{"role": "developer", "content": promptIn},
+					},
+					"tools": []any{},
+				}
+				var result pluginapi.RequestInterceptResponse
+				ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest("rfc2119-eol-protected", "anthropic", ompMeasurementJSON(t, root)), &result)
+				if result.Terminate {
+					t.Fatalf("unexpected termination: %s", result.ResponseBody)
+				}
+				var got map[string]any
+				if err := json.Unmarshal(result.Body, &got); err != nil {
+					t.Fatal(err)
+				}
+				if got["system"] != promptOut {
+					t.Fatalf("system got %q, want %q", got["system"], promptOut)
+				}
+				if dev := got["messages"].([]any)[0].(map[string]any)["content"]; dev != promptOut {
+					t.Fatalf("developer message got %q, want %q", dev, promptOut)
+				}
+			})
+			t.Run("ua-omp-"+subtest, func(t *testing.T) {
+				isolateOMPMeasurement(t)
+				raw, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")))
+				if code != 0 {
+					t.Fatalf("reconfigure code = %d, body = %s", code, raw)
+				}
+				root := map[string]any{
+					"system": promptIn,
+					"messages": []any{
+						map[string]any{"role": "developer", "content": promptIn},
+					},
+					"tools": []any{},
+				}
+				req := pluginapi.RequestInterceptRequest{
+					RequestID: "rfc2119-eol-ua", SourceFormat: "anthropic",
+					Model: "agy/gemini-3.8-flash", RequestedModel: "gemini-3.8-flash",
+					Body:    ompMeasurementJSON(t, root),
+					Headers: map[string][]string{"User-Agent": {"omp/18.18.8"}},
+				}
+				var result pluginapi.RequestInterceptResponse
+				ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, req, &result)
+				if result.Terminate {
+					t.Fatalf("unexpected termination: %s", result.ResponseBody)
+				}
+				if len(result.Body) == 0 {
+					t.Fatalf("expected sanitized body in response, got empty Body")
+				}
+				var got map[string]any
+				if err := json.Unmarshal(result.Body, &got); err != nil {
+					t.Fatal(err)
+				}
+				if got["system"] != promptOut {
+					t.Fatalf("system got %q, want %q", got["system"], promptOut)
+				}
+				if dev := got["messages"].([]any)[0].(map[string]any)["content"]; dev != promptOut {
+					t.Fatalf("developer message got %q, want %q", dev, promptOut)
+				}
+			})
+		}
 	}
 }

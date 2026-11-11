@@ -32,35 +32,26 @@ type ompSanitizationRule struct {
 
 const ompRFC2119KeywordsReplacement = "Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
 
+// ompSanitizationPreset builds a built-in preset, deriving lowerMatch and the
+// ASCII fast-scan flag from the match text instead of restating them by hand.
+// lowerMatch doubles as the case-insensitive override key in
+// buildOMPSanitizationRules even for case-sensitive presets.
+func ompSanitizationPreset(match, replacement string, caseSensitive bool) ompSanitizationRule {
+	lower := strings.ToLower(match)
+	return ompSanitizationRule{
+		match:         match,
+		lowerMatch:    lower,
+		replacement:   replacement,
+		caseSensitive: caseSensitive,
+		asciiOnly:     isASCIIString(match) && isASCIIString(lower) && len(lower) == len(match),
+	}
+}
+
 var defaultOMPSanitizationPresets = []ompSanitizationRule{
-	{
-		match:         "<system-conventions>",
-		lowerMatch:    "<system-conventions>",
-		replacement:   "<conventions>",
-		caseSensitive: true,
-		asciiOnly:     true,
-	},
-	{
-		match:         "</system-conventions>",
-		lowerMatch:    "</system-conventions>",
-		replacement:   "</conventions>",
-		caseSensitive: true,
-		asciiOnly:     true,
-	},
-	{
-		match:         "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
-		lowerMatch:    "rfc 2119 keywords: must, required, should, recommended, may, optional.",
-		replacement:   ompRFC2119KeywordsReplacement,
-		caseSensitive: false,
-		asciiOnly:     true,
-	},
-	{
-		match:         "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.",
-		lowerMatch:    "rfc 2119: must, required, should, recommended, may, optional.",
-		replacement:   ompRFC2119KeywordsReplacement,
-		caseSensitive: false,
-		asciiOnly:     true,
-	},
+	ompSanitizationPreset("<system-conventions>", "<conventions>", true),
+	ompSanitizationPreset("</system-conventions>", "</conventions>", true),
+	ompSanitizationPreset("RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.", ompRFC2119KeywordsReplacement, false),
+	ompSanitizationPreset("RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.", ompRFC2119KeywordsReplacement, false),
 }
 
 func buildOMPSanitizationRules(entries []ompSanitizationEntry) []ompSanitizationRule {

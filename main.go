@@ -6137,6 +6137,11 @@ func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
 // deterministically instead of body-based detection. Both brand rewriting and
 // tool cloaking only run when a supported client has been resolved; if no
 // supported client is resolved, the request body is returned unmutated.
+//
+// runOMPPromptSanitization (only the User-Agent-resolved Oh My Pi agy/* legacy
+// path; callers compute the gate because only they hold the request context)
+// splits the conversation pass around sanitizeOMPPrompt: brand prose first,
+// sanitization second, tool-alias prose last.
 func rewriteRequestBodyForClient(body []byte, sourceFormat string, forcedClient string, runOMPPromptSanitization bool) ([]byte, bool, string) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {

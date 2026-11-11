@@ -25,7 +25,7 @@ func TestIssue49_ForwardPathSegmentPerClient(t *testing.T) {
 		{"oh_my_pi", `{"system":"see /home/u/.omp/agent/AGENTS.md"}`, "/home/u/.gemini/agent/AGENTS.md"},
 		{"oh_my_pi", `{"system":"see C:\\Users\\u\\.omp\\agent"}`, `C:\\Users\\u\\.gemini\\agent`},
 	} {
-		got, changed, _ := rewriteRequestBodyWithClient([]byte(tc.in), "openai", tc.client)
+		got, changed, _ := rewriteRequestBodyForClient([]byte(tc.in), "openai", tc.client, false)
 		if !changed || !strings.Contains(string(got), tc.want) {
 			t.Errorf("%s: got %s, want it to contain %s", tc.client, got, tc.want)
 		}
@@ -54,7 +54,7 @@ func TestIssue49_HomeDirectoryIsRemappedEverywhere(t *testing.T) {
 		{"codex", `{"system":"see /home/u/.codex/config.toml"}`, "/home/u/.gemini/config.toml"},
 		{"codex", `{"system":"see C:\\Users\\u\\.codex\\config.toml"}`, `C:\\Users\\u\\.gemini\\config.toml`},
 	} {
-		got, changed, _ := rewriteRequestBodyWithClient([]byte(tc.in), "openai", tc.client)
+		got, changed, _ := rewriteRequestBodyForClient([]byte(tc.in), "openai", tc.client, false)
 		if !changed {
 			t.Errorf("%s: a client home directory was left alone.\n in: %s", tc.client, tc.in)
 			continue
@@ -77,7 +77,7 @@ func TestIssue49_HomeDirectoryIsRemappedEverywhere(t *testing.T) {
 		{"claude_code", `{"system":"see /home/u/.claude-backup/x"}`},
 		{"codex", `{"system":"see /home/u/.codex-backup/x"}`},
 	} {
-		if _, changed, _ := rewriteRequestBodyWithClient([]byte(tc.in), "openai", tc.client); changed {
+		if _, changed, _ := rewriteRequestBodyForClient([]byte(tc.in), "openai", tc.client, false); changed {
 			t.Errorf("%s: a lookalike directory was rewritten: %s", tc.client, tc.in)
 		}
 	}
@@ -227,8 +227,8 @@ func TestIssue49_NoCrossClientGuessing(t *testing.T) {
 func TestIssue49_OperationalDomainRoundTrips(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
-	body, changed, _ := rewriteRequestBodyWithClient(
-		[]byte(`{"system":"docs at https://claude.ai/new"}`), "openai", "claude_code")
+	body, changed, _ := rewriteRequestBodyForClient(
+		[]byte(`{"system":"docs at https://claude.ai/new"}`), "openai", "claude_code", false)
 	if !changed || !strings.Contains(string(body), "https://antigravity.google/new") {
 		t.Fatalf("forward domain remap failed: %s", body)
 	}
@@ -261,7 +261,7 @@ func TestIssue49_OMPRemovesBlanketPreservePolicy(t *testing.T) {
 		{`{"system":"at /home/user/.omp/agent"}`, `"at /home/user/.gemini/agent"`},
 		{`{"system":"at C:\\Users\\monet\\.omp\\agent"}`, `"at C:\\Users\\monet\\.gemini\\agent"`},
 	} {
-		got, changed, _ := rewriteRequestBodyWithClient([]byte(tc.in), "openai", "oh_my_pi")
+		got, changed, _ := rewriteRequestBodyForClient([]byte(tc.in), "openai", "oh_my_pi", false)
 		if !changed {
 			t.Errorf("%s was not rewritten: %s", tc.in, got)
 			continue
@@ -278,14 +278,14 @@ func TestIssue49_OMPRemovesBlanketPreservePolicy(t *testing.T) {
 	for _, in := range []string{
 		`{"system":"at /home/user/profile.omp/agent"}`,
 	} {
-		got, changed, _ := rewriteRequestBodyWithClient([]byte(in), "openai", "oh_my_pi")
+		got, changed, _ := rewriteRequestBodyForClient([]byte(in), "openai", "oh_my_pi", false)
 		if !changed || !strings.Contains(string(got), ".antigravity") {
 			t.Errorf("%s must still mask the brand: %s", in, got)
 		}
 	}
 	// ".omp-backup" is inside a real path element but is not the configuration
 	// directory, so it is left byte-for-byte alone.
-	bBackup, changedBackup, _ := rewriteRequestBodyWithClient([]byte(`{"system":"at /home/user/.omp-backup/agent"}`), "openai", "oh_my_pi")
+	bBackup, changedBackup, _ := rewriteRequestBodyForClient([]byte(`{"system":"at /home/user/.omp-backup/agent"}`), "openai", "oh_my_pi", false)
 	if changedBackup {
 		t.Errorf(".omp-backup must be left alone: %s", bBackup)
 	}
@@ -345,8 +345,8 @@ func TestIssue49_BareHomeDirectoryRoundTrips(t *testing.T) {
 		{"oh_my_pi", "see ~/.omp"},
 	} {
 		// The forward pass really does produce the bare form.
-		fwd, changed, _ := rewriteRequestBodyWithClient(
-			[]byte(`{"system":"see ~/`+pathSegmentFor(tc.client)+`"}`), "openai", tc.client)
+		fwd, changed, _ := rewriteRequestBodyForClient(
+			[]byte(`{"system":"see ~/`+pathSegmentFor(tc.client)+`"}`), "openai", tc.client, false)
 		if !changed || !strings.Contains(string(fwd), "~/.gemini") {
 			t.Errorf("%s: forward pass did not produce the bare .gemini form: %s", tc.client, fwd)
 		}
@@ -487,8 +487,8 @@ func TestContextGroupRoundTrips(t *testing.T) {
 		{"oh_my_pi", "read ~/.omp/agent/AGENTS.md", "read ~/.gemini/agent/AGENTS.md"},
 		{"oh_my_pi", "load .omp/AGENTS.md", "load .gemini/AGENTS.md"},
 	} {
-		got, changed, _ := rewriteRequestBodyWithClient(
-			[]byte(`{"system":`+strconv.Quote(tc.in)+`}`), "anthropic", tc.client)
+		got, changed, _ := rewriteRequestBodyForClient(
+			[]byte(`{"system":`+strconv.Quote(tc.in)+`}`), "anthropic", tc.client, false)
 		out := tc.in
 		if changed {
 			out = systemText(t, got)

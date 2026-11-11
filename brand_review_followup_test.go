@@ -122,8 +122,8 @@ func TestEscapedWindowsAbsolutePathRestoresExactlyOnEveryCarrier(t *testing.T) {
 	// symmetric in the carrier that survives as JSON text.
 	t.Run("forward escaped", func(t *testing.T) {
 		const in = `read C:\Users\u\.claude\CLAUDE.md now`
-		body, changed, _ := rewriteRequestBodyWithClient(
-			[]byte(`{"system":`+strconv.Quote(in)+`}`), "openai", "claude_code")
+		body, changed, _ := rewriteRequestBodyForClient(
+			[]byte(`{"system":`+strconv.Quote(in)+`}`), "openai", "claude_code", false)
 		if !changed {
 			t.Fatal("forward pass made no change")
 		}
@@ -280,8 +280,8 @@ func TestCodexIdentityVendorProseAndCasing(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	forced := func(in string) string {
 		t.Helper()
-		body, changed, _ := rewriteRequestBodyWithClient(
-			[]byte(`{"system":`+strconv.Quote(in)+`}`), "openai", "codex")
+		body, changed, _ := rewriteRequestBodyForClient(
+			[]byte(`{"system":`+strconv.Quote(in)+`}`), "openai", "codex", false)
 		if !changed {
 			return in
 		}
@@ -340,8 +340,8 @@ func TestCodexIdentityVendorProseAndCasing(t *testing.T) {
 
 	// The routing field is operational, never prose: the model name is not
 	// rewritten even though the same words in the prompt are.
-	body, changed, _ := rewriteRequestBodyWithClient(
-		[]byte(`{"model":"agy/gpt-6-codex","system":`+strconv.Quote(codexIdentityLine)+`}`), "openai", "codex")
+	body, changed, _ := rewriteRequestBodyForClient(
+		[]byte(`{"model":"agy/gpt-6-codex","system":`+strconv.Quote(codexIdentityLine)+`}`), "openai", "codex", false)
 	if !changed {
 		t.Fatal("forward pass made no change")
 	}

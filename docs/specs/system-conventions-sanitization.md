@@ -36,7 +36,9 @@ See [ADR 0003](../adr/0003-sanitize-system-prompt-conventions-tag-for-google-ups
      on `Model` or `RequestedModel` (retaining precedence over `model_prefixes`).
   2. `User-Agent` OMP on `agy/*`: verified `User-Agent: omp/...` without
      `X-Cloak-Client` when `isAGYRoute` and `modelAllowsCloak` hold on normalized
-     `anthropic` or `openai` Chat Completions / Messages carriers.
+     `anthropic` or `openai` Chat Completions / Messages carriers. Any
+     `X-Cloak-Client` header value — valid or invalid — suppresses this route:
+     the UA fallback requires an absent explicit marker.
 - Excluded routes and carriers: `ExplicitOMPNonAGYBypass` (non-`agy/*`),
   non-`agy/*` `User-Agent: omp/...` traffic, unmarked no-UA requests, other
   clients (`claude_code`, `codex`), and deferred `/v1/responses` (`openai-response`)

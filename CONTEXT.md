@@ -7,7 +7,7 @@
 ## Core Concepts & Glossary
 
 ### 1. Brand Rewriting
-Replaces the resolved client's own identity keywords with `Antigravity` in the request's `system` field and `system`-role messages.
+Replaces the resolved client's own identity keywords with `Antigravity` in the request's `system` field and `system`-role messages (the `ProtectedAGY` route also rewrites `developer`-role messages, mirroring the OpenAI Chat Completions carrier).
 - **One table per client**: The built-in forward tables are declared per client (`claudeCodeBrandMappings`, `codexBrandMappings`, `ompBrandMappings`), registered in `brandMappingsByClient`. `claude_code` and `codex` register their reverse tables (`claudeCodeReverseBrandMappings`, `codexReverseBrandMappings`) in `reverseBrandMappingsByClient`; Oh My Pi's reverse authority is the protected `ompProtectedReverseTable`, which `brandReverseTableFor` selects for that client instead of a registered reverse table. The resolved client selects exactly one table. This is what makes the reverse unambiguous: `Antigravity` is produced only by the owning client, so it inverts back to that client's own word (`Claude`, `Codex`, or — through the protected lane — `omp`) and to nothing else. Adding a client is one forward table plus one registry line, and its reverse authority (Oh My Pi's is the protected lane's own table).
 - **Competitor names are not rewritten**: A product name that belongs to no supported client (`Cursor`, `Devin`, `OpenCode`, ...) has no owning table and is left in place. Over-masking them was what made the bare `Antigravity` token invertible only by guessing.
 - **Default Keywords**: Preconfigured built-in rewrite mappings for known coding assistants.
