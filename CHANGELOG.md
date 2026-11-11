@@ -6,6 +6,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-11-11
+
+### Changed
+- **PR #60 code-review hardening (Issue #59).** Deleted the `rewriteRequestBody` / `rewriteRequestBodyWithClient` test shims so tests call `rewriteRequestBodyForClient` directly (the OMP-sanitization arm is now reachable from tests), derived the built-in OMP preset `lowerMatch` / ASCII fast-scan flags via `ompSanitizationPreset` instead of hand-restated lowercase literals, documented the `runOMPPromptSanitization` two-sequence rewrite behavior, fixed the `CONTEXT.md` §1 brand-rewriting scope drift (`ProtectedAGY` also rewrites `developer`-role messages), documented that any `X-Cloak-Client` header value suppresses the UA-resolved OMP sanitization route, and added RFC 2119 LF/CRLF/CR line-ending coverage across both `agy/*` OMP routes. No behavior change.
+
 ## [0.7.1] - 2026-11-11
 
 ### Added
@@ -247,7 +252,8 @@ source `4e946ac` (SHA256
 - Initial plugin implementation.
 - Added repository metadata, MIT license, and release build workflow.
 
-[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/monet88/antigravity-cloak/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/monet88/antigravity-cloak/compare/v0.7.0...v0.7.1
 [0.6.0]: https://github.com/monet88/antigravity-cloak/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/monet88/antigravity-cloak/compare/v0.5.1...v0.5.2
