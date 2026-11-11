@@ -1339,6 +1339,7 @@ func handleRequestInterceptBefore(request []byte) []byte {
 	}
 
 	forcedClient := ""
+	uaResolvedOMP := false
 	if marker.present {
 		if marker.valid {
 			forcedClient = marker.client
@@ -1347,6 +1348,7 @@ func handleRequestInterceptBefore(request []byte) []byte {
 		}
 	} else if uaClient, ok := resolveUserAgentClient(req.Headers); ok {
 		forcedClient = uaClient
+		uaResolvedOMP = uaClient == "oh_my_pi"
 		debugLog("handleRequestInterceptBefore: UA evidence client=%q", uaClient)
 	}
 
@@ -1475,7 +1477,10 @@ func handleRequestInterceptBefore(request []byte) []byte {
 	}
 
 	// Legacy path: clients without alias-plan support.
-	body, rewritten, client := rewriteRequestBodyWithClient(req.Body, format, forcedClient)
+	sanitizeOMPConventions := uaResolvedOMP && isAGY &&
+		(format == "openai" || format == "anthropic") &&
+		!carriesOpenAIResponses(req.SourceFormat)
+	body, rewritten, client := rewriteRequestBodyInternal(req.Body, format, forcedClient, sanitizeOMPConventions)
 	debugLog("handleRequestInterceptBefore: rewritten=%t client=%s Body=%s", rewritten, client, string(body))
 	if req.RequestID != "" {
 		if client != "" {
@@ -6497,6 +6502,10 @@ func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
 // cloaking only run when a supported client has been resolved; if no supported
 // client is resolved, the request body is returned unmutated.
 func rewriteRequestBodyWithClient(body []byte, sourceFormat string, forcedClient string) ([]byte, bool, string) {
+	return rewriteRequestBodyInternal(body, sourceFormat, forcedClient, false)
+}
+
+func rewriteRequestBodyInternal(body []byte, sourceFormat string, forcedClient string, sanitizeOMPConventions bool) ([]byte, bool, string) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {
 		return nil, false, ""
@@ -6548,6 +6557,9 @@ func rewriteRequestBodyWithClient(body []byte, sourceFormat string, forcedClient
 				changed = true
 			}
 		}
+	}
+	if sanitizeOMPConventions && sanitizeProtectedSystemConventions(rootMap) {
+		changed = true
 	}
 	if !changed {
 		return nil, false, client

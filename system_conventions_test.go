@@ -466,3 +466,302 @@ func TestSanitizeSystemConventionsZeroAllocsOnMiss(t *testing.T) {
 		t.Fatalf("allocs on non-matching prompt = %v, want 0", allocs)
 	}
 }
+
+func TestSystemConventionsUserAgentOMPRouteGate(t *testing.T) {
+	const promptOriginal = "<system-conventions>\n" +
+		"RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` = `MUST NOT`.\n" +
+		"RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
+		"custom-ua-fingerprint\n" +
+		"</system-conventions>"
+	const promptSanitized = "<conventions>\n" +
+		"Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` = `MUST NOT`.\n" +
+		"Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
+		"custom-ua-safe\n" +
+		"</conventions>"
+
+	configureTestRules := func(t *testing.T, extraYAML string) {
+		t.Helper()
+		cfgYAML := "use_default_keywords: false\n" +
+			"omp_prompt_sanitizations:\n" +
+			"  \"custom-ua-fingerprint\": \"custom-ua-safe\"\n" +
+			extraYAML
+		raw, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(cfgYAML)))
+		if code != 0 {
+			t.Fatalf("reconfigure code = %d, body = %s", code, raw)
+		}
+		var env map[string]any
+		mustUnmarshalJSON(t, raw, &env)
+		if env["ok"] != true {
+			t.Fatalf("reconfigure failed: %s", raw)
+		}
+	}
+
+	for _, format := range []string{"anthropic", "openai"} {
+		for _, route := range []struct {
+			name           string
+			model          string
+			requestedModel string
+		}{
+			{name: "model-agy", model: "agy/gemini-3.8-flash", requestedModel: "gemini-3.8-flash"},
+			{name: "requested-model-agy", model: "gemini-3.8-flash-high", requestedModel: "agy/gemini-3.8-flash"},
+		} {
+			t.Run("ua-omp-"+format+"-"+route.name, func(t *testing.T) {
+				isolateOMPMeasurement(t)
+				configureTestRules(t, "")
+
+				textBlock := map[string]any{
+					"type":          "text",
+					"text":          promptOriginal,
+					"cache_control": map[string]any{"type": "ephemeral", "note": promptOriginal},
+				}
+				inputTextBlock := map[string]any{
+					"type": "input_text",
+					"text": promptOriginal,
+				}
+				imageBlock := map[string]any{
+					"type": "image",
+					"text": promptOriginal,
+				}
+				// Tool-free and brand-free turn: sanitization alone must trigger serialization.
+				root := map[string]any{
+					"system": promptOriginal,
+					"messages": []any{
+						map[string]any{"role": "system", "content": []any{textBlock, inputTextBlock, imageBlock}},
+						map[string]any{"role": "developer", "content": promptOriginal},
+						map[string]any{"role": "user", "content": promptOriginal},
+						map[string]any{"role": "assistant", "content": promptOriginal},
+						map[string]any{"role": "tool", "content": promptOriginal},
+					},
+				}
+
+				req := pluginapi.RequestInterceptRequest{
+					RequestID:      "ua-omp-" + format + "-" + route.name,
+					SourceFormat:   format,
+					Model:          route.model,
+					RequestedModel: route.requestedModel,
+					Body:           ompMeasurementJSON(t, root),
+					Headers:        map[string][]string{"User-Agent": {"omp/18.18.8"}},
+				}
+				var result pluginapi.RequestInterceptResponse
+				ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, req, &result)
+				if result.Terminate {
+					t.Fatalf("unexpected termination: %s", result.ResponseBody)
+				}
+				if len(result.Body) == 0 {
+					t.Fatalf("expected sanitized body in response, got empty Body")
+				}
+
+				root["system"] = promptSanitized
+				textBlock["text"] = promptSanitized
+				inputTextBlock["text"] = promptSanitized
+				root["messages"].([]any)[1].(map[string]any)["content"] = promptSanitized
+
+				var got map[string]any
+				if err := json.Unmarshal(result.Body, &got); err != nil {
+					t.Fatal(err)
+				}
+				if !reflect.DeepEqual(got, root) {
+					t.Fatalf("unexpected transformed request:\ngot  %s\nwant %s", result.Body, ompMeasurementJSON(t, root))
+				}
+			})
+		}
+	}
+
+	makeTools := func(format string, names ...string) []any {
+		out := make([]any, 0, len(names))
+		for _, name := range names {
+			if format == "openai" || format == "openai-response" {
+				out = append(out, map[string]any{"type": "function", "function": map[string]any{"name": name, "parameters": map[string]any{"type": "object"}}})
+			} else {
+				out = append(out, map[string]any{"name": name, "input_schema": map[string]any{"type": "object"}})
+			}
+		}
+		return out
+	}
+	firstToolName := func(format string, got map[string]any) string {
+		first := got["tools"].([]any)[0].(map[string]any)
+		if format == "openai" || format == "openai-response" {
+			return first["function"].(map[string]any)["name"].(string)
+		}
+		return first["name"].(string)
+	}
+
+	t.Run("ua-omp-combined-tools-brand-and-sanitization", func(t *testing.T) {
+		isolateOMPMeasurement(t)
+		raw, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`
+use_default_keywords: true
+omp_prompt_sanitizations:
+  "custom-ua-fingerprint": "custom-ua-safe"
+`)))
+		if code != 0 {
+			t.Fatalf("reconfigure code = %d, body = %s", code, raw)
+		}
+		root := map[string]any{
+			"system": "<system-conventions>You use Oh My Pi. Use bash tool.\nRFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\ncustom-ua-fingerprint</system-conventions>",
+			"messages": []any{
+				map[string]any{"role": "developer", "content": "Oh My Pi rule: RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."},
+			},
+			"tools": makeTools("openai", "bash"),
+		}
+		var result pluginapi.RequestInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, pluginapi.RequestInterceptRequest{
+			RequestID: "ua-omp-combined", SourceFormat: "openai",
+			Model: "agy/gemini-3.8-flash", RequestedModel: "agy/gemini-3.8-flash",
+			Body: ompMeasurementJSON(t, root), Headers: map[string][]string{"User-Agent": {"omp/18.18.8"}},
+		}, &result)
+		var got map[string]any
+		mustUnmarshalJSON(t, result.Body, &got)
+		wantSys := "<conventions>You use Antigravity. Use run_command tool.\nNormative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\ncustom-ua-safe</conventions>"
+		wantDev := "Antigravity rule: Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
+		if got["system"] != wantSys || got["messages"].([]any)[0].(map[string]any)["content"] != wantDev || firstToolName("openai", got) != "run_command" {
+			t.Fatalf("unexpected combined output: %s", result.Body)
+		}
+	})
+
+	for _, tc := range []struct {
+		name            string
+		extraCfg        string
+		format          string
+		model           string
+		headers         map[string][]string
+		msgRole         string
+		tools           []string
+		wantFirstTool   string // empty means zero body mutation expected
+		wantClearHeader bool
+	}{
+		{
+			name:    "non-agy-tool-free",
+			format:  "openai",
+			model:   "openai/gpt-5",
+			headers: map[string][]string{"User-Agent": {"omp/18.18.8"}},
+			msgRole: "developer",
+		},
+		{
+			name:          "non-agy-with-omp-tool",
+			format:        "openai",
+			model:         "openai/gpt-5",
+			headers:       map[string][]string{"User-Agent": {"omp/18.18.8"}},
+			msgRole:       "developer",
+			tools:         []string{"read"},
+			wantFirstTool: "view_file",
+		},
+		{
+			name:     "agy-blocked-by-model-prefixes",
+			extraCfg: "model_prefixes:\n  - unrelated/\n",
+			format:   "openai",
+			model:    "agy/gemini-3.8-flash",
+			headers:  map[string][]string{"User-Agent": {"omp/18.18.8"}},
+			msgRole:  "developer",
+		},
+		{
+			name:            "invalid-explicit-marker-tool-free",
+			format:          "openai",
+			model:           "agy/gemini-3.8-flash",
+			headers:         map[string][]string{"X-Cloak-Client": {"invalid"}, "User-Agent": {"omp/18.18.8"}},
+			msgRole:         "developer",
+			wantClearHeader: true,
+		},
+		{
+			name:            "invalid-explicit-marker-with-omp-tools",
+			format:          "openai",
+			model:           "agy/gemini-3.8-flash",
+			headers:         map[string][]string{"X-Cloak-Client": {"invalid"}, "User-Agent": {"omp/18.18.8"}},
+			msgRole:         "developer",
+			tools:           []string{"read", "write", "edit", "bash", "hub"},
+			wantFirstTool:   "view_file",
+			wantClearHeader: true,
+		},
+		{
+			name:          "unmarked-no-ua-with-omp-tools",
+			format:        "anthropic",
+			model:         "agy/gemini-3.8-flash",
+			msgRole:       "developer",
+			tools:         []string{"read", "write", "edit", "bash", "hub"},
+			wantFirstTool: "view_file",
+		},
+		{
+			name:            "claude-code-on-agy",
+			format:          "anthropic",
+			model:           "agy/claude-sonnet-4-6",
+			headers:         map[string][]string{"X-Cloak-Client": {"claude_code"}},
+			msgRole:         "system",
+			tools:           []string{"Bash", "Read"},
+			wantFirstTool:   "run_command",
+			wantClearHeader: true,
+		},
+		{
+			name:            "codex-on-agy",
+			format:          "openai",
+			model:           "agy/gemini-3.8-flash",
+			headers:         map[string][]string{"X-Cloak-Client": {"codex"}},
+			msgRole:         "developer",
+			tools:           []string{"exec_command"},
+			wantFirstTool:   "run_command",
+			wantClearHeader: true,
+		},
+		{
+			name:    "deferred-openai-response-tool-free",
+			format:  "openai-response",
+			model:   "agy/gemini-3.8-flash",
+			headers: map[string][]string{"User-Agent": {"omp/18.18.8"}},
+			msgRole: "developer",
+		},
+		{
+			name:          "deferred-openai-response-with-omp-tool",
+			format:        "openai-response",
+			model:         "agy/gemini-3.8-flash",
+			headers:       map[string][]string{"User-Agent": {"omp/18.18.8"}},
+			msgRole:       "developer",
+			tools:         []string{"read"},
+			wantFirstTool: "view_file",
+		},
+		{
+			name:    "unsupported-gemini-format",
+			format:  "gemini",
+			model:   "agy/gemini-3.8-flash",
+			headers: map[string][]string{"User-Agent": {"omp/18.18.8"}},
+			msgRole: "developer",
+		},
+	} {
+		t.Run("negative/"+tc.name, func(t *testing.T) {
+			isolateOMPMeasurement(t)
+			configureTestRules(t, tc.extraCfg)
+
+			root := map[string]any{
+				"system": promptOriginal,
+				"messages": []any{
+					map[string]any{"role": tc.msgRole, "content": promptOriginal},
+				},
+			}
+			if len(tc.tools) > 0 {
+				root["tools"] = makeTools(tc.format, tc.tools...)
+			}
+			var result pluginapi.RequestInterceptResponse
+			ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, pluginapi.RequestInterceptRequest{
+				RequestID: "neg-" + tc.name, SourceFormat: tc.format,
+				Model: tc.model, RequestedModel: tc.model,
+				Body: ompMeasurementJSON(t, root), Headers: tc.headers,
+			}, &result)
+			if result.Terminate {
+				t.Fatalf("unexpected rejection: %s", result.ResponseBody)
+			}
+			if tc.wantClearHeader && !reflect.DeepEqual(result.ClearHeaders, []string{"X-Cloak-Client"}) {
+				t.Fatalf("expected X-Cloak-Client cleared, got %v", result.ClearHeaders)
+			}
+			if tc.wantFirstTool == "" {
+				if len(result.Body) != 0 {
+					t.Fatalf("expected zero body mutation, got: %s", result.Body)
+				}
+				return
+			}
+			var got map[string]any
+			mustUnmarshalJSON(t, result.Body, &got)
+			if got["system"] != promptOriginal || got["messages"].([]any)[0].(map[string]any)["content"] != promptOriginal {
+				t.Fatalf("prompt was unexpectedly sanitized: %s", result.Body)
+			}
+			if gotTool := firstToolName(tc.format, got); gotTool != tc.wantFirstTool {
+				t.Fatalf("first tool = %q, want %q", gotTool, tc.wantFirstTool)
+			}
+		})
+	}
+}
