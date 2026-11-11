@@ -156,12 +156,17 @@ jobs:
       - name: Install Zig toolchain
         # go-cross/cgo-actions installs Zig via `snap install zig`, which failed
         # three consecutive release runs with "unable to contact snap store"
-        # (v0.7.2, 2026-11-11). Install Zig directly instead and drive the
-        # windows/arm64 cross build with the same zcc/z++ wrappers the action
-        # used.
-        uses: mlugg/setup-zig@v1
-        with:
-          version: 0.14.1
+        # (v0.7.2, 2026-11-11). Install the official ziglang.org tarball
+        # directly (mlugg/setup-zig's community mirror also 404'd) and drive
+        # the windows/arm64 cross build with the same zcc/z++ wrappers the
+        # action used.
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
+          mkdir -p /tmp/zig-unpack
+          tar -xJf /tmp/zig.tar.xz -C /tmp/zig-unpack
+          sudo mv "$(find /tmp/zig-unpack -maxdepth 1 -type d -name 'zig-*' | head -1)" /usr/local/zig
+          echo "/usr/local/zig" >> "$GITHUB_PATH"
 
       - name: Build Windows ARM64 shared library
         timeout-minutes: 45
