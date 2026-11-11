@@ -2,7 +2,7 @@
 
 ## Overview
 
-`antigravity-cloak` is a dynamic Go C-shared plugin (`buildmode=c-shared`) for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) v7 (ABI version 1). Its purpose is to disguise traffic from AI coding CLI assistants (Claude Code, OpenAI Codex, Oh My Pi) as Antigravity when communicating with upstream LLM providers.
+`antigravity-cloak` is a dynamic Go C-shared plugin (`buildmode=c-shared`) for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) v7 (ABI version 1). Its purpose is to disguise traffic from AI coding CLI assistants (Claude Code, OpenAI Codex, Oh My Pi) as Antigravity when communicating with upstream LLM providers. Dependencies: `CLIProxyAPI/v7` SDK (`sdk/pluginapi`, `sdk/pluginabi`) and `gopkg.in/yaml.v3`.
 
 ## Core Concepts & Glossary
 
@@ -169,5 +169,7 @@ Two Claude Code identity words are handled by dedicated machinery (`issue55_agen
 - `issue55_agent_tier.go`: Issue #55 Claude Code fingerprint machinery (news-URL sanitation, reversible Agent model tiers and the JSON-aware argument scanner).
 - `omp_prompt_sanitization.go`: Oh My Pi `agy/*` prompt sanitization (`<system-conventions>`, RFC 2119 normative header presets, and live `omp_prompt_sanitizations` config/matcher).
 - `AGENTS.md`: Operational guide for building, testing, deploying, and debugging the plugin.
+- `CODING_STANDARDS.md`: Code conventions, naming patterns, testing standards, and rules for brand/tool mapping changes.
+- `CONTRIBUTING.md`: Getting started, development workflow, and documentation update guide.
 - `docs/specs/`: Detailed technical specifications (e.g. `oh-my-pi-cloaking-spec.md`, `system-conventions-sanitization.md`).
-- `docs/adr/`: Architecture Decision Records.
+- `docs/adr/`: Architecture Decision Records (stream sessions, client classification, upstream sanitization, Codex wire-position cloaking, client modules refactor).

@@ -277,6 +277,21 @@ Important invariants:
 
 The step-by-step procedure for deploying custom plugin binaries to remote VPS instances via the CLIProxyAPI management API (`/v0/management`) is documented in **[docs/deployment/vps.md](docs/deployment/vps.md)**.
 
+## Post-merge documentation checklist
+
+After each PR merge, review and update these three files if the change touched
+clients, mappings, activation rules, build/deploy procedures, or conventions:
+
+1. **[CONTEXT.md](CONTEXT.md)** — canonical domain reference (mapping tables,
+   activation model, glossary, key files list).
+2. **[CODING_STANDARDS.md](CODING_STANDARDS.md)** — code conventions, naming
+   patterns, brand/tool mapping rules, testing standards.
+3. **[CONTRIBUTING.md](CONTRIBUTING.md)** — prerequisites, development workflow,
+   ADR table, repository layout.
+
+Not every merge needs all three. A pure bug fix with no new patterns or
+mappings may need none. A new client or a new subsystem file needs all three.
+
 ## Gotchas recap
 
 - Build, deploy, and file ops are one-shell-each on Windows PowerShell; avoid
