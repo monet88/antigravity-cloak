@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 )
@@ -344,6 +345,49 @@ func TestHandlePluginCallUnknownMethodReturnsErrorEnvelope(t *testing.T) {
 	}
 	if envelope.Error.Code != "unknown_method" {
 		t.Fatalf("error code = %q, want unknown_method", envelope.Error.Code)
+	}
+}
+
+func TestHandlePluginCallRegisterVersionMatchesRegistry(t *testing.T) {
+	const wantVersion = "0.7.1"
+
+	raw, code := handlePluginCall("plugin.register", nil)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; body=%s", code, raw)
+	}
+
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Metadata struct {
+				Version string `json:"Version"`
+			} `json:"metadata"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("ok = false, want true; raw=%s", raw)
+	}
+
+	registryRaw, err := os.ReadFile("registry.json")
+	if err != nil {
+		t.Fatalf("read registry.json: %v", err)
+	}
+	var registry struct {
+		Plugins []struct {
+			Version string `json:"version"`
+		} `json:"plugins"`
+	}
+	mustUnmarshalJSON(t, registryRaw, &registry)
+	if len(registry.Plugins) == 0 {
+		t.Fatalf("registry.json plugins is empty")
+	}
+
+	if envelope.Result.Metadata.Version != wantVersion {
+		t.Errorf("Metadata.Version = %q, want %q", envelope.Result.Metadata.Version, wantVersion)
+	}
+	if registry.Plugins[0].Version != wantVersion || registry.Plugins[0].Version != envelope.Result.Metadata.Version {
+		t.Errorf("registry.json plugins[0].version = %q, want %q (Metadata.Version = %q)", registry.Plugins[0].Version, wantVersion, envelope.Result.Metadata.Version)
 	}
 }
 
