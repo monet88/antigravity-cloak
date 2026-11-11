@@ -161,11 +161,10 @@ jobs:
         # the windows/arm64 cross build with the same zcc/z++ wrappers the
         # action used.
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           curl -fsSL -o /tmp/zig.tar.xz https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz
-          mkdir -p /tmp/zig-unpack
-          tar -xJf /tmp/zig.tar.xz -C /tmp/zig-unpack
-          sudo mv "$(find /tmp/zig-unpack -maxdepth 1 -type d -name 'zig-*' | head -1)" /usr/local/zig
+          sudo mkdir -p /usr/local/zig
+          sudo tar -xJf /tmp/zig.tar.xz -C /usr/local/zig --strip-components=1
           test -x /usr/local/zig/zig
           /usr/local/zig/zig version
 
