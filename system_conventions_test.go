@@ -115,3 +115,354 @@ func TestSystemConventionsRequestScope(t *testing.T) {
 		}
 	}
 }
+
+func TestSystemConventionsBuiltInRFC2119PresetsOnProtectedAGY(t *testing.T) {
+	const promptOriginal = "<system-conventions>\n" +
+		"RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` = `MUST NOT`; `AVOID` = `SHOULD NOT`.\n" +
+		"RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER`=`MUST NOT`; `AVOID`=`SHOULD NOT`.\n" +
+		"RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` = `MUST NOT`.\n" +
+		"RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
+		"rfc 2119 KEYWORDS: must, required, should, recommended, may, optional.\n" +
+		"Rfc 2119: Must, Required, Should, Recommended, May, Optional.\n" +
+		"- Normative modals: MUST, NEVER, SHOULD, MAY. The RFC 2119 word *is* the instruction.\n" +
+		"See system-conventions.md and <SYSTEM-CONVENTIONS> and <system-conventions-extra>.\n" +
+		"</system-conventions>"
+
+	const promptSanitized = "<conventions>\n" +
+		"Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` = `MUST NOT`; `AVOID` = `SHOULD NOT`.\n" +
+		"Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER`=`MUST NOT`; `AVOID`=`SHOULD NOT`.\n" +
+		"Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` = `MUST NOT`.\n" +
+		"Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
+		"Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
+		"Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
+		"- Normative modals: MUST, NEVER, SHOULD, MAY. The RFC 2119 word *is* the instruction.\n" +
+		"See system-conventions.md and <SYSTEM-CONVENTIONS> and <system-conventions-extra>.\n" +
+		"</conventions>"
+
+	for _, format := range []string{"anthropic", "openai"} {
+		t.Run(format, func(t *testing.T) {
+			isolateOMPMeasurement(t)
+			rawCfg, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`
+use_default_keywords: false
+model_prefixes:
+  - unrelated/
+`)))
+			if code != 0 {
+				t.Fatalf("reconfigure code = %d, body = %s", code, rawCfg)
+			}
+
+			textBlock := map[string]any{
+				"type":          "text",
+				"text":          promptOriginal,
+				"cache_control": map[string]any{"type": "ephemeral", "note": promptOriginal},
+			}
+			inputTextBlock := map[string]any{
+				"type": "input_text",
+				"text": promptOriginal,
+			}
+			imageBlock := map[string]any{
+				"type": "image",
+				"text": promptOriginal,
+			}
+			toolUseBlock := map[string]any{
+				"type":  "tool_use",
+				"text":  promptOriginal,
+				"input": map[string]any{"text": promptOriginal},
+			}
+			tool := map[string]any{
+				"name":         "read",
+				"description":  promptOriginal,
+				"input_schema": map[string]any{"type": "object", "description": promptOriginal},
+			}
+			if format == "openai" {
+				tool = map[string]any{
+					"type": "function",
+					"function": map[string]any{
+						"name":        "read",
+						"description": promptOriginal,
+						"parameters":  map[string]any{"type": "object", "description": promptOriginal},
+					},
+				}
+			}
+
+			root := map[string]any{
+				"system": promptOriginal,
+				"messages": []any{
+					map[string]any{"role": "system", "content": []any{textBlock, inputTextBlock, imageBlock, toolUseBlock}},
+					map[string]any{"role": "developer", "content": promptOriginal},
+					map[string]any{"role": "user", "content": promptOriginal},
+					map[string]any{"role": "assistant", "content": promptOriginal},
+					map[string]any{"role": "tool", "content": promptOriginal},
+				},
+				"tools": []any{tool},
+			}
+
+			reqID := "rfc2119-protected-" + format
+			req := ompMeasurementRequest(reqID, format, ompMeasurementJSON(t, root))
+			var result pluginapi.RequestInterceptResponse
+			ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, req, &result)
+			if result.Terminate {
+				t.Fatalf("unexpected termination: %s", result.ResponseBody)
+			}
+
+			root["system"] = promptSanitized
+			textBlock["text"] = promptSanitized
+			inputTextBlock["text"] = promptSanitized
+			root["messages"].([]any)[1].(map[string]any)["content"] = promptSanitized
+			if format == "openai" {
+				tool["function"].(map[string]any)["name"] = "view_file"
+			} else {
+				tool["name"] = "view_file"
+			}
+
+			var got map[string]any
+			if err := json.Unmarshal(result.Body, &got); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, root) {
+				t.Fatalf("unexpected transformed request:\ngot %s\nwant %s", result.Body, ompMeasurementJSON(t, root))
+			}
+
+			// Idempotence at the ABI boundary: running an already-sanitized prompt again produces identical prompt text.
+			idemRoot := map[string]any{
+				"system": promptSanitized,
+				"messages": []any{
+					map[string]any{"role": "system", "content": promptSanitized},
+					map[string]any{"role": "developer", "content": []any{map[string]any{"type": "input_text", "text": promptSanitized}}},
+				},
+				"tools": []any{},
+			}
+			var idemResult pluginapi.RequestInterceptResponse
+			ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(reqID+"-idem", format, ompMeasurementJSON(t, idemRoot)), &idemResult)
+			var gotIdem map[string]any
+			if err := json.Unmarshal(idemResult.Body, &gotIdem); err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(gotIdem, idemRoot) {
+				t.Fatalf("sanitization was not idempotent:\ngot %s\nwant %s", idemResult.Body, ompMeasurementJSON(t, idemRoot))
+			}
+
+			// Inbound-only: response and stream paths must never reverse Normative keywords or <conventions>.
+			assistantText := "Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. <conventions>ok</conventions>"
+			respPayload := []byte(`{"choices":[{"index":0,"message":{"role":"assistant","content":"` + assistantText + `"}}]}`)
+			sseFrame := []byte(`data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"` + assistantText + `"}}]}` + "\n\n")
+			if format == "anthropic" {
+				respPayload = []byte(`{"content":[{"type":"text","text":"` + assistantText + `"}]}`)
+				sseFrame = []byte(`event: content_block_delta` + "\n" + `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"` + assistantText + `"}}` + "\n\n")
+			}
+			var respOut pluginapi.ResponseInterceptResponse
+			ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+				RequestID: reqID, SourceFormat: format, Model: "agy/measurement",
+				OriginalRequest: result.Body, RequestBody: result.Body, Body: respPayload,
+			}, &respOut)
+			if len(respOut.Body) != 0 && !bytes.Equal(respOut.Body, respPayload) {
+				t.Fatalf("response unexpectedly mutated sanitized phrases: %s", respOut.Body)
+			}
+
+			var chunkOut pluginapi.StreamChunkInterceptResponse
+			ompMeasurementCall(t, pluginabi.MethodResponseInterceptStreamChunk, pluginapi.StreamChunkInterceptRequest{
+				RequestID: reqID, SourceFormat: format, Model: "agy/measurement", ChunkIndex: 0, Body: sseFrame,
+			}, &chunkOut)
+			emitted := appendOMPMeasurementWire(nil, sseFrame, chunkOut)
+			if !bytes.Equal(emitted, sseFrame) {
+				t.Fatalf("stream chunk unexpectedly mutated sanitized phrases: %s", emitted)
+			}
+		})
+	}
+
+	t.Run("openai-response-deferred-carrier-skipped", func(t *testing.T) {
+		isolateOMPMeasurement(t)
+		root := map[string]any{
+			"system": promptOriginal,
+			"messages": []any{
+				map[string]any{"role": "developer", "content": promptOriginal},
+			},
+			"tools": []any{
+				map[string]any{"type": "function", "function": map[string]any{"name": "read", "parameters": map[string]any{"type": "object"}}},
+			},
+		}
+		req := ompMeasurementRequest("rfc2119-openai-response", "openai-response", ompMeasurementJSON(t, root))
+		var result pluginapi.RequestInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, req, &result)
+		if result.Terminate {
+			t.Fatalf("unexpected termination: %s", result.ResponseBody)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(result.Body, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got["system"] != promptOriginal {
+			t.Fatalf("openai-response top-level system was sanitized: %v", got["system"])
+		}
+		devContent := got["messages"].([]any)[0].(map[string]any)["content"]
+		if devContent != promptOriginal {
+			t.Fatalf("openai-response developer message was sanitized: %v", devContent)
+		}
+	})
+}
+
+func TestOMPPromptSanitizationsReconfigureAndPrecedence(t *testing.T) {
+	runProtectedPrompt := func(t *testing.T, id, prompt string) string {
+		t.Helper()
+		root := map[string]any{
+			"system": prompt,
+			"messages": []any{
+				map[string]any{"role": "developer", "content": prompt},
+			},
+			"tools": []any{},
+		}
+		var result pluginapi.RequestInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(id, "anthropic", ompMeasurementJSON(t, root)), &result)
+		if result.Terminate {
+			t.Fatalf("unexpected termination: %s", result.ResponseBody)
+		}
+		var got map[string]any
+		if err := json.Unmarshal(result.Body, &got); err != nil {
+			t.Fatal(err)
+		}
+		sys, _ := got["system"].(string)
+		dev, _ := got["messages"].([]any)[0].(map[string]any)["content"].(string)
+		if sys != dev {
+			t.Fatalf("system (%q) and developer (%q) diverged", sys, dev)
+		}
+		return sys
+	}
+
+	t.Run("null-uses-builtins", func(t *testing.T) {
+		isolateOMPMeasurement(t)
+		raw, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`
+omp_prompt_sanitizations: null
+`)))
+		if code != 0 {
+			t.Fatalf("code = %d, body = %s", code, raw)
+		}
+		got := runProtectedPrompt(t, "null-builtins", "<system-conventions>RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. <SYSTEM-CONVENTIONS></system-conventions>")
+		want := "<conventions>Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. <SYSTEM-CONVENTIONS></conventions>"
+		if got != want {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("object-override-strip-custom-literal-and-nonrecursive", func(t *testing.T) {
+		isolateOMPMeasurement(t)
+		raw, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`
+use_default_keywords: false
+omp_prompt_sanitizations:
+  "rfc 2119 keywords: must, required, should, recommended, may, optional.": "Modal directives ($1/$0/$$): MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
+  "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.": ""
+  "<system-conventions>": "<custom-rules>"
+  "</system-conventions>": "</custom-rules>"
+  "custom-directive-token": "custom-directive-token-v2"
+  "規約ヘッダー": "共通ルール ($1)"
+`)))
+		if code != 0 {
+			t.Fatalf("code = %d, body = %s", code, raw)
+		}
+		var env map[string]any
+		mustUnmarshalJSON(t, raw, &env)
+		if env["ok"] != true {
+			t.Fatalf("reconfigure failed: %s", raw)
+		}
+
+		input := "<system-conventions>\n" +
+			"RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
+			"RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
+			"<SYSTEM-CONVENTIONS>custom-directive-token / 規約ヘッダー</SYSTEM-CONVENTIONS>\n" +
+			"</system-conventions>"
+		want := "<custom-rules>\n" +
+			"Modal directives ($1/$0/$$): MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
+			"\n" +
+			"<custom-rules>custom-directive-token-v2 / 共通ルール ($1)</custom-rules>\n" +
+			"</custom-rules>"
+		if got := runProtectedPrompt(t, "object-override", input); got != want {
+			t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("longest-match-first-and-tie-break", func(t *testing.T) {
+		isolateOMPMeasurement(t)
+		raw, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`
+omp_prompt_sanitizations:
+  "RFC 2119 keywords:": "Short prefix:"
+  "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.": "Specific full override."
+  "bc": "SECOND"
+  "ab": "FIRST"
+`)))
+		if code != 0 {
+			t.Fatalf("code = %d, body = %s", code, raw)
+		}
+		var env map[string]any
+		mustUnmarshalJSON(t, raw, &env)
+		if env["ok"] != true {
+			t.Fatalf("reconfigure failed: %s", raw)
+		}
+
+		input := "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\nRFC 2119 keywords: EXTRA.\nabc"
+		want := "Specific full override.\nShort prefix: EXTRA.\nFIRSTc"
+		if got := runProtectedPrompt(t, "longest-match", input); got != want {
+			t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+		}
+	})
+
+	t.Run("string-and-array-forms", func(t *testing.T) {
+		isolateOMPMeasurement(t)
+		raw, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`
+omp_prompt_sanitizations: |
+  strip-me:
+  alpha-phrase: beta, gamma
+`)))
+		if code != 0 {
+			t.Fatalf("code = %d, body = %s", code, raw)
+		}
+		var env map[string]any
+		mustUnmarshalJSON(t, raw, &env)
+		if env["ok"] != true {
+			t.Fatalf("string reconfigure failed: %s", raw)
+		}
+		got := runProtectedPrompt(t, "string-form", "[strip-me] alpha-phrase | RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.")
+		want := "[] beta, gamma | Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
+		if got != want {
+			t.Fatalf("string form got %q, want %q", got, want)
+		}
+
+		raw, code = handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`
+omp_prompt_sanitizations:
+  - "strip-arr:"
+  - "delta-phrase: epsilon"
+`)))
+		if code != 0 {
+			t.Fatalf("code = %d, body = %s", code, raw)
+		}
+		mustUnmarshalJSON(t, raw, &env)
+		if env["ok"] != true {
+			t.Fatalf("array reconfigure failed: %s", raw)
+		}
+		got = runProtectedPrompt(t, "array-form", "[strip-arr] delta-phrase")
+		want = "[] epsilon"
+		if got != want {
+			t.Fatalf("array form got %q, want %q", got, want)
+		}
+	})
+}
+
+func TestSanitizeSystemConventionsZeroAllocsOnMiss(t *testing.T) {
+	isolateOMPMeasurement(t)
+	cleanText := "Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
+		"- Normative modals: MUST, NEVER, SHOULD, MAY. The RFC 2119 word *is* the instruction.\n" +
+		"See system-conventions.md and <conventions>safe</conventions>."
+	root := map[string]any{
+		"system": cleanText,
+		"messages": []any{
+			map[string]any{"role": "system", "content": []any{map[string]any{"type": "text", "text": cleanText}}},
+			map[string]any{"role": "developer", "content": cleanText},
+		},
+	}
+	allocs := testing.AllocsPerRun(100, func() {
+		if sanitizeProtectedSystemConventions(root) {
+			t.Fatal("expected no changes on clean prompt")
+		}
+	})
+	if allocs != 0 {
+		t.Fatalf("allocs on non-matching prompt = %v, want 0", allocs)
+	}
+}
