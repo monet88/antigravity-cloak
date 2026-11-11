@@ -166,7 +166,8 @@ jobs:
           mkdir -p /tmp/zig-unpack
           tar -xJf /tmp/zig.tar.xz -C /tmp/zig-unpack
           sudo mv "$(find /tmp/zig-unpack -maxdepth 1 -type d -name 'zig-*' | head -1)" /usr/local/zig
-          echo "/usr/local/zig" >> "$GITHUB_PATH"
+          test -x /usr/local/zig/zig
+          /usr/local/zig/zig version
 
       - name: Build Windows ARM64 shared library
         timeout-minutes: 45
@@ -175,8 +176,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build-bin dist/windows-arm64
-          printf '#!/bin/sh\nzig cc -target aarch64-windows-gnu "$@"\n' > build-bin/zcc
-          printf '#!/bin/sh\nzig c++ -target aarch64-windows-gnu "$@"\n' > build-bin/z++
+          printf '#!/bin/sh\nexec /usr/local/zig/zig cc -target aarch64-windows-gnu "$@"\n' > build-bin/zcc
+          printf '#!/bin/sh\nexec /usr/local/zig/zig c++ -target aarch64-windows-gnu "$@"\n' > build-bin/z++
           chmod +x build-bin/zcc build-bin/z++
           export PATH="$PWD/build-bin:$PATH"
           CC=zcc CXX=z++ CGO_ENABLED=1 GOOS=windows GOARCH=arm64 \
