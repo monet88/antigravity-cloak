@@ -3138,3 +3138,12 @@ func TestToolSchemaStructureSurvivesBrandRewrite(t *testing.T) {
 		t.Fatalf("nested property description not remapped: %q", got)
 	}
 }
+
+func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
+	raw, changed, _ := rewriteRequestBodyForClient(body, sourceFormat, "", false)
+	return raw, changed
+}
+
+func rewriteRequestBodyWithClient(body []byte, sourceFormat string, forcedClient string) ([]byte, bool, string) {
+	return rewriteRequestBodyForClient(body, sourceFormat, forcedClient, false)
+}

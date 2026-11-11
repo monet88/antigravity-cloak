@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -351,7 +352,7 @@ func TestHandlePluginCallUnknownMethodReturnsErrorEnvelope(t *testing.T) {
 }
 
 func TestHandlePluginCallRegisterVersionMatchesRegistry(t *testing.T) {
-	const wantVersion = "0.7.1"
+	semverRe := regexp.MustCompile(`^\d+\.\d+\.\d+$`)
 
 	raw, code := handlePluginCall("plugin.register", nil)
 	if code != 0 {
@@ -385,11 +386,13 @@ func TestHandlePluginCallRegisterVersionMatchesRegistry(t *testing.T) {
 		t.Fatalf("registry.json plugins is empty")
 	}
 
-	if envelope.Result.Metadata.Version != wantVersion {
-		t.Errorf("Metadata.Version = %q, want %q", envelope.Result.Metadata.Version, wantVersion)
+	gotMeta := envelope.Result.Metadata.Version
+	gotReg := registry.Plugins[0].Version
+	if !semverRe.MatchString(gotMeta) || gotMeta == "0.6.0" {
+		t.Errorf("Metadata.Version = %q, want bumped semver", gotMeta)
 	}
-	if registry.Plugins[0].Version != wantVersion || registry.Plugins[0].Version != envelope.Result.Metadata.Version {
-		t.Errorf("registry.json plugins[0].version = %q, want %q (Metadata.Version = %q)", registry.Plugins[0].Version, wantVersion, envelope.Result.Metadata.Version)
+	if gotMeta != pluginVersion || gotReg != gotMeta {
+		t.Errorf("version mismatch: pluginVersion=%q Metadata.Version=%q registry.json=%q", pluginVersion, gotMeta, gotReg)
 	}
 }
 

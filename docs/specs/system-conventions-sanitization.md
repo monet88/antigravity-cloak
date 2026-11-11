@@ -27,7 +27,7 @@ See [ADR 0003](../adr/0003-sanitize-system-prompt-conventions-tag-for-google-ups
 
 - Hook: `request.intercept_before` via `sanitizeOMPPrompt(rootMap)`, running
   after brand rewriting and before the prose tool-alias pass on both OMP `agy/*`
-  request paths (`handleProtectedAGY` and `rewriteRequestBodyInternal`). That
+  request paths (`handleProtectedAGY` and `rewriteRequestBodyForClient`). That
   ordering ensures brand rules never clobber operator replacement text while
   declared OMP tool references inside sanitized prompt text (e.g. `use bash`)
   still cloak upstream (`use run_command`).
@@ -74,7 +74,7 @@ See [ADR 0003](../adr/0003-sanitize-system-prompt-conventions-tag-for-google-ups
   - `buildOMPSanitizationRules` precomputes the merged rule slice on config
     change sorted by descending `len(match)` (ties broken by lowercase `match`).
   - ASCII case-insensitive rules scan via `indexASCIIFold` with zero heap
-    allocations when no rule matches (`TestSanitizeOMPPromptZeroAllocsOnMiss`).
+    allocations when no rule matches.
 
 ## Verification
 

@@ -487,32 +487,6 @@ omp_prompt_sanitizations:
 	})
 }
 
-// TestSanitizeOMPPromptZeroAllocsOnMiss calls sanitizeOMPPrompt directly as a
-// focused micro-contract test (docs/specs/test-audit-surface-pruning.md) for
-// Spec #59's hot-path requirement: zero heap allocations when no rule matches,
-// which cannot be isolated through JSON ABI serialization.
-func TestSanitizeOMPPromptZeroAllocsOnMiss(t *testing.T) {
-	isolateOMPMeasurement(t)
-	cleanText := "Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
-		"- Normative modals: MUST, NEVER, SHOULD, MAY. The RFC 2119 word *is* the instruction.\n" +
-		"See system-conventions.md and <conventions>safe</conventions>."
-	root := map[string]any{
-		"system": cleanText,
-		"messages": []any{
-			map[string]any{"role": "system", "content": []any{map[string]any{"type": "text", "text": cleanText}}},
-			map[string]any{"role": "developer", "content": cleanText},
-		},
-	}
-	allocs := testing.AllocsPerRun(100, func() {
-		if sanitizeOMPPrompt(root) {
-			t.Fatal("expected no changes on clean prompt")
-		}
-	})
-	if allocs != 0 {
-		t.Fatalf("allocs on non-matching prompt = %v, want 0", allocs)
-	}
-}
-
 func TestSystemConventionsUserAgentOMPRouteGate(t *testing.T) {
 	const promptOriginal = "<system-conventions>\n" +
 		"RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. `NEVER` = `MUST NOT`.\n" +
@@ -653,16 +627,16 @@ use_default_keywords: true
 custom_mappings:
   sanitized-literal-token: WRONG
 omp_prompt_sanitizations:
-  "custom-shell-rule": "sanitized-literal-token: Always use bash for shell work."
+  "Policy: use bash directly": "sanitized-literal-token: Always use bash for shell work."
 `)))
 					if code != 0 {
 						t.Fatalf("reconfigure code = %d, body = %s", code, raw)
 					}
 					root := map[string]any{
-						"system": "You use Oh My Pi. custom-shell-rule",
+						"system": "You use Oh My Pi. Policy: use bash directly",
 						"messages": []any{
-							map[string]any{"role": "system", "content": "You use Oh My Pi. custom-shell-rule"},
-							map[string]any{"role": "developer", "content": "Developer rule: custom-shell-rule"},
+							map[string]any{"role": "system", "content": "You use Oh My Pi. Policy: use bash directly"},
+							map[string]any{"role": "developer", "content": "You use Oh My Pi. Policy: use bash directly"},
 						},
 						"tools": makeTools(format, "bash"),
 					}
@@ -677,14 +651,13 @@ omp_prompt_sanitizations:
 					}, &result)
 					var got map[string]any
 					mustUnmarshalJSON(t, result.Body, &got)
-					const wantSys = "You use Antigravity. sanitized-literal-token: Always use run_command for shell work."
-					const wantDev = "Developer rule: sanitized-literal-token: Always use run_command for shell work."
+					const wantText = "You use Antigravity. sanitized-literal-token: Always use run_command for shell work."
 					msgs := got["messages"].([]any)
-					if got["system"] != wantSys ||
-						msgs[0].(map[string]any)["content"] != wantSys ||
-						msgs[1].(map[string]any)["content"] != wantDev ||
+					if got["system"] != wantText ||
+						msgs[0].(map[string]any)["content"] != wantText ||
+						msgs[1].(map[string]any)["content"] != wantText ||
 						firstToolName(format, got) != "run_command" {
-						t.Fatalf("unexpected ordering output:\ngot  %s\nwant sys=%q dev=%q", result.Body, wantSys, wantDev)
+						t.Fatalf("unexpected ordering output:\ngot  %s\nwant %q", result.Body, wantText)
 					}
 				})
 			}

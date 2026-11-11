@@ -105,82 +105,22 @@ func buildOMPSanitizationRules(entries []ompSanitizationEntry) []ompSanitization
 }
 
 func parseOMPPromptSanitizations(value any) ([]ompSanitizationEntry, error) {
-	var entries []ompSanitizationEntry
-	switch typed := value.(type) {
-	case nil:
+	pairs, err := parseConfigKeyValues("omp_prompt_sanitizations", value, true, true)
+	if err != nil {
+		return nil, err
+	}
+	if pairs == nil {
 		return nil, nil
-	case map[string]any:
-		keys := make([]string, 0, len(typed))
-		for k := range typed {
-			keys = append(keys, k)
-		}
-		slices.Sort(keys)
-		entries = make([]ompSanitizationEntry, 0, len(typed))
-		for _, match := range keys {
-			if strings.TrimSpace(match) == "" {
-				return nil, fmt.Errorf("omp_prompt_sanitizations match key must not be empty")
-			}
-			text, ok := typed[match].(string)
-			if !ok {
-				return nil, fmt.Errorf("omp_prompt_sanitizations values must be strings")
-			}
-			entries = append(entries, ompSanitizationEntry{Match: match, Replacement: text})
-		}
-	case string:
-		var err error
-		entries, err = parseOMPSanitizationString(typed)
-		if err != nil {
-			return nil, err
-		}
-	case []any:
-		entries = make([]ompSanitizationEntry, 0, len(typed))
-		for _, item := range typed {
-			text, ok := item.(string)
-			if !ok {
-				return nil, fmt.Errorf("omp_prompt_sanitizations entries must be strings")
-			}
-			parsed, err := parseOMPSanitizationString(text)
-			if err != nil {
-				return nil, err
-			}
-			if len(parsed) == 0 {
-				return nil, fmt.Errorf("omp_prompt_sanitizations entries must use match: replacement")
-			}
-			entries = append(entries, parsed...)
-		}
-	default:
-		return nil, fmt.Errorf("omp_prompt_sanitizations must be an object, array, or string")
 	}
-	for _, entry := range entries {
-		if !utf8.ValidString(entry.Match) || !utf8.ValidString(entry.Replacement) {
-			return nil, fmt.Errorf("omp_prompt_sanitizations entries must be valid UTF-8")
-		}
-	}
-	return entries, nil
-}
-
-func parseOMPSanitizationString(value string) ([]ompSanitizationEntry, error) {
-	rawEntries := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ',' || r == '\n' || r == '\r'
-	})
-	entries := make([]ompSanitizationEntry, 0, len(rawEntries))
-	for _, entry := range rawEntries {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		match, replacement, ok := strings.Cut(entry, ":")
-		if !ok {
-			return nil, fmt.Errorf("omp_prompt_sanitizations entries must use match: replacement")
-		}
-		trimmedMatch := strings.TrimSpace(match)
-		if trimmedMatch == "" {
+	entries := make([]ompSanitizationEntry, 0, len(pairs))
+	for _, pair := range pairs {
+		if strings.TrimSpace(pair.Key) == "" {
 			return nil, fmt.Errorf("omp_prompt_sanitizations match key must not be empty")
 		}
-		entries = append(entries, ompSanitizationEntry{
-			Match:       trimmedMatch,
-			Replacement: strings.TrimSpace(replacement),
-		})
+		if !utf8.ValidString(pair.Key) || !utf8.ValidString(pair.Value) {
+			return nil, fmt.Errorf("omp_prompt_sanitizations entries must be valid UTF-8")
+		}
+		entries = append(entries, ompSanitizationEntry{Match: pair.Key, Replacement: pair.Value})
 	}
 	return entries, nil
 }
@@ -189,34 +129,24 @@ func parseOMPSanitizationString(value string) ([]ompSanitizationEntry, error) {
 // top-level `system` and `system`/`developer` message text blocks.
 func sanitizeOMPPrompt(rootMap map[string]any) bool {
 	rules := activeFilterConfig().ompSanitizationRules
+	fn := func(s string) (string, bool) { return sanitizeOMPPromptText(s, rules) }
 	changed := false
 	if system, ok := rootMap["system"]; ok {
-		if next, one := sanitizeOMPPromptContent(system, rules); one {
+		if next, one := rewritePromptTextContent(system, true, fn); one {
 			rootMap["system"] = next
 			changed = true
 		}
 	}
-	if messages, ok := rootMap["messages"].([]any); ok {
-		for _, raw := range messages {
-			msg, ok := raw.(map[string]any)
-			if !ok || (msg["role"] != "system" && msg["role"] != "developer") {
-				continue
-			}
-			if content, ok := msg["content"]; ok {
-				if next, one := sanitizeOMPPromptContent(content, rules); one {
-					msg["content"] = next
-					changed = true
-				}
-			}
-		}
+	if rewriteSystemDeveloperMessages(rootMap, true, fn) {
+		changed = true
 	}
 	return changed
 }
 
-func sanitizeOMPPromptContent(value any, rules []ompSanitizationRule) (any, bool) {
+func rewritePromptTextContent(value any, allowInputText bool, fn func(string) (string, bool)) (any, bool) {
 	switch content := value.(type) {
 	case string:
-		if next, changed := sanitizeOMPPromptText(content, rules); changed {
+		if next, changed := fn(content); changed {
 			return next, true
 		}
 		return value, false
@@ -224,11 +154,15 @@ func sanitizeOMPPromptContent(value any, rules []ompSanitizationRule) (any, bool
 		changed := false
 		for _, raw := range content {
 			block, ok := raw.(map[string]any)
-			if !ok || (block["type"] != "text" && block["type"] != "input_text") {
+			if !ok {
+				continue
+			}
+			btype, _ := block["type"].(string)
+			if btype != "text" && (!allowInputText || btype != "input_text") {
 				continue
 			}
 			if text, ok := block["text"].(string); ok {
-				if next, one := sanitizeOMPPromptText(text, rules); one {
+				if next, one := fn(text); one {
 					block["text"] = next
 					changed = true
 				}
@@ -237,6 +171,27 @@ func sanitizeOMPPromptContent(value any, rules []ompSanitizationRule) (any, bool
 		return value, changed
 	}
 	return value, false
+}
+
+func rewriteSystemDeveloperMessages(rootMap map[string]any, allowInputText bool, fn func(string) (string, bool)) bool {
+	messages, ok := rootMap["messages"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, raw := range messages {
+		msg, ok := raw.(map[string]any)
+		if !ok || (msg["role"] != "system" && msg["role"] != "developer") {
+			continue
+		}
+		if content, ok := msg["content"]; ok {
+			if next, one := rewritePromptTextContent(content, allowInputText, fn); one {
+				msg["content"] = next
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func sanitizeOMPPromptText(text string, rules []ompSanitizationRule) (string, bool) {

@@ -904,7 +904,7 @@ func rewriteProtectedBrand(rootMap map[string]any, sourceFormat, client string) 
 	if msgsRaw, ok := rootMap["messages"].([]any); ok {
 		for _, mRaw := range msgsRaw {
 			if msg, ok := mRaw.(map[string]any); ok {
-				if role, ok := msg["role"].(string); ok && role == "system" {
+				if role, ok := msg["role"].(string); ok && (role == "system" || role == "developer") {
 					if content, exists := msg["content"]; exists {
 						msg["content"] = rewriteProtectedBrandValue(content, cfg, client)
 					}
@@ -930,29 +930,6 @@ func rewriteProtectedBrand(rootMap map[string]any, sourceFormat, client string) 
 			// The request-scoped tool aliases reach these fields through the
 			// alias pass that runs after this one.
 			rewriteToolProse(tMap, sourceFormat, brandText)
-		}
-	}
-
-	if cachedCloak := cfg.cloakRegexCache["oh_my_pi"]; cachedCloak != nil {
-		if sysVal, ok := rootMap["system"]; ok {
-			next, sysToolChanged := replaceToolNamesInValue(sysVal, cachedCloak)
-			if sysToolChanged {
-				rootMap["system"] = next
-			}
-		}
-		if msgsRaw, ok := rootMap["messages"].([]any); ok {
-			for _, mRaw := range msgsRaw {
-				if msg, ok := mRaw.(map[string]any); ok {
-					if role, ok := msg["role"].(string); ok && role == "system" {
-						if content, exists := msg["content"]; exists {
-							toolNext, toolChanged := replaceToolNamesInValue(content, cachedCloak)
-							if toolChanged {
-								msg["content"] = toolNext
-							}
-						}
-					}
-				}
-			}
 		}
 	}
 }
@@ -1258,7 +1235,7 @@ func handleRequestInterceptBefore(request []byte) []byte {
 				changed = true
 			}
 
-			// Brand rewriting (same steps as rewriteRequestBodyWithClient).
+			// Brand rewriting (same steps as rewriteRequestBodyForClient).
 			cfg := activeFilterConfig()
 			mappings := effectiveMappings(cfg, effectiveClient)
 			rewritten, sysChanged := rewriteSystemFields(rootMap, mappings)
@@ -1314,10 +1291,10 @@ func handleRequestInterceptBefore(request []byte) []byte {
 	}
 
 	// Legacy path: clients without alias-plan support.
-	sanitizeOMPConventions := uaResolvedOMP && isAGY &&
+	runOMPPromptSanitization := uaResolvedOMP && isAGY &&
 		(format == "openai" || format == "anthropic") &&
 		!carriesOpenAIResponses(req.SourceFormat)
-	body, rewritten, client := rewriteRequestBodyInternal(req.Body, format, forcedClient, sanitizeOMPConventions)
+	body, rewritten, client := rewriteRequestBodyForClient(req.Body, format, forcedClient, runOMPPromptSanitization)
 	debugLog("handleRequestInterceptBefore: rewritten=%t client=%s Body=%s", rewritten, client, string(body))
 	if req.RequestID != "" {
 		if client != "" {
@@ -3981,7 +3958,7 @@ func sharedAliasesFor(client string) map[string]string {
 // clientUsesAliasPlan reports whether a client should use the request-scoped
 // alias plan machinery for full declaration cloaking. Clients on this list
 // route through admitRequestAliasPlanOrReject instead of the legacy
-// rewriteRequestBodyWithClient path, giving them fail-closed admission,
+// rewriteRequestBodyForClient path, giving them fail-closed admission,
 // per-request reversal, and deterministic fallback aliases for unknown
 // declarations.
 func clientUsesAliasPlan(client string) bool {
@@ -6015,56 +5992,88 @@ func parseStringMap(value any) (map[string]string, error) {
 	return res, nil
 }
 
-func parseCustomMappings(value any) ([]rewriteMapping, error) {
+type configKeyValue struct {
+	Key   string
+	Value string
+}
+
+func parseConfigKeyValues(fieldName string, value any, trimStringSides, requireListPair bool) ([]configKeyValue, error) {
+	parseString := func(raw string) ([]configKeyValue, error) {
+		parts := strings.FieldsFunc(raw, func(r rune) bool {
+			return r == ',' || r == '\n' || r == '\r'
+		})
+		out := make([]configKeyValue, 0, len(parts))
+		for _, entry := range parts {
+			entry = strings.TrimSpace(entry)
+			if entry == "" {
+				continue
+			}
+			k, v, ok := strings.Cut(entry, ":")
+			if !ok {
+				return nil, fmt.Errorf("%s entries must use match: replacement", fieldName)
+			}
+			if trimStringSides {
+				k = strings.TrimSpace(k)
+				v = strings.TrimSpace(v)
+			}
+			out = append(out, configKeyValue{Key: k, Value: v})
+		}
+		return out, nil
+	}
+
 	switch typed := value.(type) {
 	case nil:
 		return nil, nil
 	case string:
-		return parseMappingString(typed)
+		return parseString(typed)
 	case map[string]any:
-		mappings := make([]rewriteMapping, 0, len(typed))
-		for match, replacement := range typed {
-			text, ok := replacement.(string)
-			if !ok {
-				return nil, fmt.Errorf("custom_mappings values must be strings")
-			}
-			mappings = append(mappings, rewriteMapping{Match: match, Replacement: text})
+		keys := make([]string, 0, len(typed))
+		for k := range typed {
+			keys = append(keys, k)
 		}
-		return mappings, nil
+		slices.Sort(keys)
+		pairs := make([]configKeyValue, 0, len(typed))
+		for _, k := range keys {
+			text, ok := typed[k].(string)
+			if !ok {
+				return nil, fmt.Errorf("%s values must be strings", fieldName)
+			}
+			pairs = append(pairs, configKeyValue{Key: k, Value: text})
+		}
+		return pairs, nil
 	case []any:
-		mappings := make([]rewriteMapping, 0, len(typed))
+		pairs := make([]configKeyValue, 0, len(typed))
 		for _, item := range typed {
 			text, ok := item.(string)
 			if !ok {
-				return nil, fmt.Errorf("custom_mappings entries must be strings")
+				return nil, fmt.Errorf("%s entries must be strings", fieldName)
 			}
-			parsed, err := parseMappingString(text)
+			parsed, err := parseString(text)
 			if err != nil {
 				return nil, err
 			}
-			mappings = append(mappings, parsed...)
+			if requireListPair && len(parsed) == 0 {
+				return nil, fmt.Errorf("%s entries must use match: replacement", fieldName)
+			}
+			pairs = append(pairs, parsed...)
 		}
-		return mappings, nil
+		return pairs, nil
 	default:
-		return nil, fmt.Errorf("custom_mappings must be an object, array, or string")
+		return nil, fmt.Errorf("%s must be an object, array, or string", fieldName)
 	}
 }
 
-func parseMappingString(value string) ([]rewriteMapping, error) {
-	entries := strings.FieldsFunc(value, func(r rune) bool {
-		return r == ',' || r == '\n' || r == '\r'
-	})
-	mappings := make([]rewriteMapping, 0, len(entries))
-	for _, entry := range entries {
-		entry = strings.TrimSpace(entry)
-		if entry == "" {
-			continue
-		}
-		match, replacement, ok := strings.Cut(entry, ":")
-		if !ok {
-			return nil, fmt.Errorf("custom_mappings entries must use match: replacement")
-		}
-		mappings = append(mappings, rewriteMapping{Match: match, Replacement: replacement})
+func parseCustomMappings(value any) ([]rewriteMapping, error) {
+	pairs, err := parseConfigKeyValues("custom_mappings", value, false, false)
+	if err != nil {
+		return nil, err
+	}
+	if pairs == nil {
+		return nil, nil
+	}
+	mappings := make([]rewriteMapping, 0, len(pairs))
+	for _, p := range pairs {
+		mappings = append(mappings, rewriteMapping{Match: p.Key, Replacement: p.Value})
 	}
 	return mappings, nil
 }
@@ -6121,27 +6130,14 @@ func normalizeMappings(mappings []rewriteMapping) []rewriteMapping {
 	return out
 }
 
-// rewriteRequestBody is a helper for callers and tests that rewrite a request body
-// directly. Body mutation only occurs after a supported coding client is resolved
-// from the request body. When no supported client is resolved, zero request-body
-// mutation is performed.
-func rewriteRequestBody(body []byte, sourceFormat string) ([]byte, bool) {
-	raw, changed, _ := rewriteRequestBodyWithClient(body, sourceFormat, "")
-	return raw, changed
-}
-
-// rewriteRequestBodyWithClient rewrites brand text and cloaks tool names. When
-// forcedClient is non-empty (a validated explicit X-Cloak-Client override or
-// verified User-Agent evidence), that client's mapping table is used
-// deterministically instead of body-based detection. An empty forcedClient
-// falls back to body-based client detection. Both brand rewriting and tool
-// cloaking only run when a supported client has been resolved; if no supported
-// client is resolved, the request body is returned unmutated.
-func rewriteRequestBodyWithClient(body []byte, sourceFormat string, forcedClient string) ([]byte, bool, string) {
-	return rewriteRequestBodyInternal(body, sourceFormat, forcedClient, false)
-}
-
-func rewriteRequestBodyInternal(body []byte, sourceFormat string, forcedClient string, sanitizeOMPConventions bool) ([]byte, bool, string) {
+// rewriteRequestBodyForClient rewrites brand text, optionally sanitizes inbound
+// Oh My Pi system/developer prompt text on agy/* routes, and cloaks tool names.
+// When forcedClient is non-empty (a validated explicit X-Cloak-Client override
+// or verified User-Agent evidence), that client's mapping table is used
+// deterministically instead of body-based detection. Both brand rewriting and
+// tool cloaking only run when a supported client has been resolved; if no
+// supported client is resolved, the request body is returned unmutated.
+func rewriteRequestBodyForClient(body []byte, sourceFormat string, forcedClient string, runOMPPromptSanitization bool) ([]byte, bool, string) {
 	var root any
 	if err := safeUnmarshal(body, &root); err != nil {
 		return nil, false, ""
@@ -6182,7 +6178,7 @@ func rewriteRequestBodyInternal(body []byte, sourceFormat string, forcedClient s
 	descChanged := rewriteToolDescriptions(rootMap, mappings, cachedCloak, sourceFormat)
 	changed = changed || descChanged
 
-	if sanitizeOMPConventions {
+	if runOMPPromptSanitization {
 		if rewriteConversationContent(rootMap, mappings, nil) {
 			changed = true
 		}

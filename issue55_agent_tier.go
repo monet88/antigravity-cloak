@@ -68,61 +68,14 @@ func sanitizeClaudeNewsSentences(text string) (string, bool) {
 func sanitizeSystemNewsURL(root map[string]any, format string) bool {
 	switch format {
 	case "anthropic":
-		switch sys := root["system"].(type) {
-		case string:
-			if next, changed := sanitizeClaudeNewsSentences(sys); changed {
+		if sys, ok := root["system"]; ok {
+			if next, changed := rewritePromptTextContent(sys, false, sanitizeClaudeNewsSentences); changed {
 				root["system"] = next
 				return true
 			}
-		case []any:
-			changed := false
-			for _, raw := range sys {
-				block, ok := raw.(map[string]any)
-				if !ok || block["type"] != "text" {
-					continue
-				}
-				txt, ok := block["text"].(string)
-				if !ok {
-					continue
-				}
-				if next, one := sanitizeClaudeNewsSentences(txt); one {
-					block["text"] = next
-					changed = true
-				}
-			}
-			return changed
 		}
 	case "openai":
-		changed := false
-		for _, msg := range sliceOfMaps(root["messages"]) {
-			role, _ := msg["role"].(string)
-			if role != "system" && role != "developer" {
-				continue
-			}
-			switch content := msg["content"].(type) {
-			case string:
-				if next, one := sanitizeClaudeNewsSentences(content); one {
-					msg["content"] = next
-					changed = true
-				}
-			case []any:
-				for _, partRaw := range content {
-					part, ok := partRaw.(map[string]any)
-					if !ok || part["type"] != "text" {
-						continue
-					}
-					txt, ok := part["text"].(string)
-					if !ok {
-						continue
-					}
-					if next, one := sanitizeClaudeNewsSentences(txt); one {
-						part["text"] = next
-						changed = true
-					}
-				}
-			}
-		}
-		return changed
+		return rewriteSystemDeveloperMessages(root, false, sanitizeClaudeNewsSentences)
 	}
 	return false
 }
