@@ -52,7 +52,7 @@ func TestRewriteRequestReplacesDefaultSystemKeywords(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(tt.body), "openai", tt.client)
+			got, rewritten, _ := rewriteRequestBodyForClient([]byte(tt.body), "openai", tt.client, false)
 			if tt.wantUnchanged {
 				if rewritten {
 					t.Fatalf("body owned by no client was rewritten: %s", got)
@@ -83,7 +83,7 @@ func TestRewriteRequestCloaksClientContextButNotTypedUserText(t *testing.T) {
 			{"role":"user","content":"<system-reminder>the catalogue mentions Anthropic</system-reminder>"}
 		]
 	}`)
-	got, rewritten, _ := rewriteRequestBodyWithClient(body, "openai", "claude_code")
+	got, rewritten, _ := rewriteRequestBodyForClient(body, "openai", "claude_code", false)
 	if !rewritten {
 		t.Fatalf("client context must still be rewritten; body=%s", got)
 	}
@@ -132,7 +132,7 @@ func TestRewriteRequestAllowsCleanInvalidAndStructuralBodies(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, rewritten := rewriteRequestBody([]byte(tt.body), "openai")
+			_, rewritten, _ := rewriteRequestBodyForClient([]byte(tt.body), "openai", "", false)
 			if rewritten {
 				t.Fatalf("rewritten = true, want false; body=%s", tt.body)
 			}
@@ -152,7 +152,7 @@ func TestRewriteRequestBodyCloaksClaudeCodeTools(t *testing.T) {
 		"messages":[],
 		"tool_choice":{"type":"function","function":{"name":"Bash"}}
 	}`
-	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "", false)
 	if !rewritten {
 		t.Fatal("want rewritten")
 	}
@@ -197,7 +197,7 @@ func TestRewriteRequestBodyCloaksCodexTools(t *testing.T) {
 		],
 		"messages":[]
 	}`
-	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "", false)
 	if !rewritten {
 		t.Fatal("want rewritten")
 	}
@@ -231,7 +231,7 @@ func TestRewriteRequestBodyCloaksToolRefsInMessageHistory(t *testing.T) {
 			{"role":"tool","tool_call_id":"tc1","name":"Bash","content":"output"}
 		]
 	}`
-	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "", false)
 	if !rewritten {
 		t.Fatal("want rewritten")
 	}
@@ -276,7 +276,7 @@ func TestRewriteRequestBodyHandlesToolChoiceShapes(t *testing.T) {
 			if strings.Contains(tt.name, "anthropic") {
 				sourceFormat = "anthropic"
 			}
-			got, rewritten := rewriteRequestBody([]byte(tt.body), sourceFormat)
+			got, rewritten, _ := rewriteRequestBodyForClient([]byte(tt.body), sourceFormat, "", false)
 			if !rewritten {
 				t.Fatal("want rewritten")
 			}
@@ -307,7 +307,7 @@ func TestRewriteRequestBodySkipsAntigravityTools(t *testing.T) {
 		"tools":[{"type":"function","function":{"name":"ask_permission"}},{"type":"function","function":{"name":"run_command"}}],
 		"messages":[]
 	}`
-	_, rewritten := rewriteRequestBody([]byte(body), "openai")
+	_, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "", false)
 	if rewritten {
 		t.Fatal("expected no rewritten body as all tools are already antigravity tools and no system/desc brand replace is triggered")
 	}
@@ -318,7 +318,7 @@ func TestRewriteRequestBodySkipsUnknownTools(t *testing.T) {
 		"tools":[{"type":"function","function":{"name":"custom_tool"}},{"type":"function","function":{"name":"another_tool"}}],
 		"messages":[]
 	}`
-	_, rewritten := rewriteRequestBody([]byte(body), "openai")
+	_, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "", false)
 	if rewritten {
 		t.Fatal("want no rewrite for unknown tools")
 	}
@@ -329,7 +329,7 @@ func TestRewriteRequestBodyAppliesBrandReplaceToToolDescription(t *testing.T) {
 		"tools":[{"type":"function","function":{"name":"bash","description":"Claude Code shell tool"}}],
 		"messages":[]
 	}`
-	got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", "claude_code")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "claude_code", false)
 	if !rewritten {
 		t.Fatal("want rewritten")
 	}
@@ -351,7 +351,7 @@ func TestRewriteRequestBodyAppliesBrandReplaceToSystemMessages(t *testing.T) {
 			{"role":"user","content":"hello Claude Code"}
 		]
 	}`
-	got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", "claude_code")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "claude_code", false)
 	if !rewritten {
 		t.Fatal("want rewritten")
 	}
@@ -383,7 +383,7 @@ func TestRewriteRequestBodyCloaksAnthropicFormat(t *testing.T) {
 			{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"output"}]}
 		]
 	}`
-	got, rewritten := rewriteRequestBody([]byte(body), "anthropic")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "anthropic", "", false)
 	if !rewritten {
 		t.Fatal("want rewritten")
 	}
@@ -684,7 +684,7 @@ func TestToolDescriptionReplacesToolNames(t *testing.T) {
 		],
 		"messages":[]
 	}`
-	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "", false)
 	if !rewritten {
 		t.Fatal("expected rewritten = true")
 	}
@@ -721,7 +721,7 @@ func TestSystemMessageReplacesToolNames(t *testing.T) {
 			{"role":"system","content":"Use Bash to execute commands. Call Read to view files. The Edit tool modifies content."}
 		]
 	}`
-	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "", false)
 	if !rewritten {
 		t.Fatal("expected rewritten = true")
 	}
@@ -793,7 +793,7 @@ func TestCodexCodeModeCloakRewriteAndWithheldReverse(t *testing.T) {
 			],
 			"messages":[]
 		}`)
-	rewritten, changed, client := rewriteRequestBodyWithClient(body, "openai", "codex")
+	rewritten, changed, client := rewriteRequestBodyForClient(body, "openai", "codex", false)
 	if !changed || client != "codex" {
 		t.Fatalf("rewrite = changed:%v client:%q, want true/codex", changed, client)
 	}
@@ -876,7 +876,7 @@ func TestRewriteRequestPreservesLargeIntegers(t *testing.T) {
 		"messages":[{"role":"user","content":"id is 9007199254740993"}],
 		"max_tokens": 9007199254740993
 	}`
-	result, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", "claude_code")
+	result, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "claude_code", false)
 	if !rewritten {
 		t.Fatal("expected rewritten = true")
 	}
@@ -1270,7 +1270,7 @@ func TestBuiltInBrandTablesCoverEachClientsOwnIdentity(t *testing.T) {
 				// backslash would otherwise emit an invalid JSON escape and the body
 				// would fail to parse, silently passing a rule that never fired.
 				body := `{"system":` + strconv.Quote("You are running with "+keyword+" in this environment.") + `}`
-				got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", client)
+				got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", client, false)
 				if !rewritten {
 					t.Fatalf("keyword %q was not rewritten for client %q", keyword, client)
 				}
@@ -1309,7 +1309,7 @@ func TestBrandTableIsScopedToTheResolvedClient(t *testing.T) {
 	} {
 		t.Run(tc.keyword+"-under-"+tc.foreignClient, func(t *testing.T) {
 			body := `{"system":` + strconv.Quote("You are running with "+tc.keyword+" in this environment.") + `}`
-			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(body), "openai", tc.foreignClient)
+			got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", tc.foreignClient, false)
 			if rewritten {
 				t.Fatalf("keyword %q was rewritten under client %q:\n  %s", tc.keyword, tc.foreignClient, got)
 			}
@@ -1348,7 +1348,7 @@ func TestRewriteRequestBodyCloaksOhMyPiTools(t *testing.T) {
 		],
 		"tool_choice":{"type":"function","function":{"name":"bash"}}
 	}`
-	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "", false)
 	if !rewritten {
 		t.Fatal("want rewritten = true for Oh My Pi request")
 	}
@@ -1444,7 +1444,7 @@ func TestRewriteRequestBodyCloaksOhMyPiToolsAnthropicFormat(t *testing.T) {
 			}
 		]
 	}`
-	got, rewritten := rewriteRequestBody([]byte(body), "anthropic")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "anthropic", "", false)
 	if !rewritten {
 		t.Fatal("want rewritten = true")
 	}
@@ -1761,10 +1761,10 @@ func TestMCPPassthroughBothDirections(t *testing.T) {
 
 	// Request side (OpenAI shape): omp detection needs a distinctive harness
 	// tool ("hub"), mcp__github__create_issue must survive verbatim.
-	body, changed := rewriteRequestBody([]byte(`{"system":"This is omp coding.","tools":[`+
+	body, changed, _ := rewriteRequestBodyForClient([]byte(`{"system":"This is omp coding.","tools":[`+
 		`{"type":"function","function":{"name":"bash","description":"run shell"}},`+
 		`{"type":"function","function":{"name":"hub","description":"send message"}},`+
-		`{"type":"function","function":{"name":"mcp__github__create_issue","description":"create issue"}}],"messages":[]}`), "openai")
+		`{"type":"function","function":{"name":"mcp__github__create_issue","description":"create issue"}}],"messages":[]}`), "openai", "", false)
 	if !changed {
 		t.Fatal("expected OpenAI request body to be rewritten")
 	}
@@ -1780,10 +1780,10 @@ func TestMCPPassthroughBothDirections(t *testing.T) {
 	}
 
 	// Request side (Anthropic shape).
-	anthBody, anthChanged := rewriteRequestBody([]byte(`{"system":"Oh My Pi agent","tools":[`+
+	anthBody, anthChanged, _ := rewriteRequestBodyForClient([]byte(`{"system":"Oh My Pi agent","tools":[`+
 		`{"name":"write","description":"write file"},`+
 		`{"name":"mcp__jira__search","description":"search jira"},`+
-		`{"name":"hub","description":"send message"}],"messages":[]}`), "anthropic")
+		`{"name":"hub","description":"send message"}],"messages":[]}`), "anthropic", "", false)
 	if !anthChanged {
 		t.Fatal("expected Anthropic request body to be rewritten")
 	}
@@ -1927,7 +1927,7 @@ func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 		{"omp windows", "oh_my_pi", `{"system":"at C:\\Users\\u\\.omp\\agent"}`, `C:\\Users\\u\\.gemini\\agent`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, changed, _ := rewriteRequestBodyWithClient([]byte(tc.in), "openai", tc.client)
+			got, changed, _ := rewriteRequestBodyForClient([]byte(tc.in), "openai", tc.client, false)
 			if !changed {
 				t.Fatalf("path was not rewritten: %s", got)
 			}
@@ -1941,7 +1941,7 @@ func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 	// system text the upstream would receive, whether or not anything changed.
 	systemAfter := func(t *testing.T, client, in string) string {
 		t.Helper()
-		got, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"`+in+`"}`), "openai", client)
+		got, changed, _ := rewriteRequestBodyForClient([]byte(`{"system":"`+in+`"}`), "openai", client, false)
 		if !changed {
 			return in
 		}
@@ -1949,7 +1949,7 @@ func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 	}
 
 	// Bare brand mentions are still masked (lowercase in, lowercase out).
-	b, bc, _ := rewriteRequestBodyWithClient([]byte(`{"system":"You are omp."}`), "openai", "oh_my_pi")
+	b, bc, _ := rewriteRequestBodyForClient([]byte(`{"system":"You are omp."}`), "openai", "oh_my_pi", false)
 	if !bc || !strings.Contains(string(b), "antigravity.") {
 		t.Fatalf("bare omp brand must still be masked: changed=%v body=%s", bc, b)
 	}
@@ -1978,7 +1978,7 @@ func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 	// A composed mapping keeps its own deliberate meaning wherever it appears,
 	// so the dot-prefixed "oh-my-pi" is still masked even though the bare vendor
 	// words in a path are not.
-	bOther, bcOther, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/.oh-my-pi"}`), "openai", "oh_my_pi")
+	bOther, bcOther, _ := rewriteRequestBodyForClient([]byte(`{"system":"config at /home/user/.oh-my-pi"}`), "openai", "oh_my_pi", false)
 	if !bcOther || !strings.Contains(string(bOther), "/home/user/.Antigravity") {
 		t.Fatalf(".oh-my-pi must still be masked: changed=%v body=%s", bcOther, bOther)
 	}
@@ -1991,7 +1991,7 @@ func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 	// A brand glued onto a leading file name is prose, not a segment, and is
 	// still masked as before. The bare alias is a prose brand word, so the
 	// replacement follows the casing it matched.
-	bExtension, bcExtension, _ := rewriteRequestBodyWithClient([]byte(`{"system":"config at /home/user/profile.omp/agent"}`), "openai", "oh_my_pi")
+	bExtension, bcExtension, _ := rewriteRequestBodyForClient([]byte(`{"system":"config at /home/user/profile.omp/agent"}`), "openai", "oh_my_pi", false)
 	if !bcExtension || !strings.Contains(string(bExtension), "/home/user/profile.antigravity/agent") {
 		t.Fatalf("profile.omp must be masked: changed=%v body=%s", bcExtension, bExtension)
 	}
@@ -2005,7 +2005,7 @@ func TestReplaceBrandKeywordRemapsPathSegments(t *testing.T) {
 
 	// A URL host is prose about a product, not a coding-agent directory, and the
 	// composed domain mappings keep working: only bare words are held back.
-	bURL, bcURL, _ := rewriteRequestBodyWithClient([]byte(`{"system":"docs at https://claude.ai/docs"}`), "openai", "claude_code")
+	bURL, bcURL, _ := rewriteRequestBodyForClient([]byte(`{"system":"docs at https://claude.ai/docs"}`), "openai", "claude_code", false)
 	if !bcURL || !strings.Contains(string(bURL), "antigravity.google") {
 		t.Fatalf("claude.ai must still cloaks: changed=%v body=%s", bcURL, bURL)
 	}
@@ -2080,7 +2080,7 @@ func TestRewriteMasksBareClaudeAndRemapsClaudeHomePath(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":`+strconv.Quote(tc.in)+`}`), "anthropic", "claude_code")
+			body, changed, _ := rewriteRequestBodyForClient([]byte(`{"system":`+strconv.Quote(tc.in)+`}`), "anthropic", "claude_code", false)
 			// An unchanged pass returns no body at all, which is exactly the
 			// upstream bytes: the original.
 			got := tc.in
@@ -2097,7 +2097,7 @@ func TestRewriteMasksBareClaudeAndRemapsClaudeHomePath(t *testing.T) {
 	}
 
 	// A system prompt with no Claude token is left byte-identical.
-	if _, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"nothing to mask here"}`), "anthropic", "claude_code"); changed {
+	if _, changed, _ := rewriteRequestBodyForClient([]byte(`{"system":"nothing to mask here"}`), "anthropic", "claude_code", false); changed {
 		t.Fatalf("unrelated system text must not be rewritten")
 	}
 }
@@ -2117,7 +2117,7 @@ func TestWorkflowRuleIsScopedToClaudeCode(t *testing.T) {
 	const in = `Use the Workflow tool. Workflows run in the background.`
 	const want = `Use the teamwork_preview_layer tool. teamwork_preview_layer run in the background.`
 
-	body, changed, client := rewriteRequestBodyWithClient([]byte(`{"system":`+strconv.Quote(in)+`}`), "anthropic", "claude_code")
+	body, changed, client := rewriteRequestBodyForClient([]byte(`{"system":`+strconv.Quote(in)+`}`), "anthropic", "claude_code", false)
 	if client != "claude_code" {
 		t.Fatalf("resolved client = %q, want claude_code", client)
 	}
@@ -2127,7 +2127,7 @@ func TestWorkflowRuleIsScopedToClaudeCode(t *testing.T) {
 
 	// Another client declaring the same tool name must keep it: renaming here
 	// would rewrite a tool name the client actually called.
-	other, otherChanged, _ := rewriteRequestBodyWithClient([]byte(`{"system":`+strconv.Quote(in)+`}`), "anthropic", "codex")
+	other, otherChanged, _ := rewriteRequestBodyForClient([]byte(`{"system":`+strconv.Quote(in)+`}`), "anthropic", "codex", false)
 	if otherChanged {
 		t.Fatalf("codex system must be untouched, got %q", systemText(t, other))
 	}
@@ -2144,7 +2144,7 @@ func TestClaudeMdInstructionFileIsRemappedInToolDescriptions(t *testing.T) {
 	// is where this leak was originally observed on a request that returned 200.
 	// A plain .claude directory in the same sentence is deliberately NOT: see
 	// pathSegmentReplacements, and TestRewriteMasksBareClaudeAndRemapsClaudeHomePath.
-	body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"x","tools":[{"name":"Bash","description":"Edit ~/.claude/CLAUDE.md and rekey ~/.claude/keybindings.json","input_schema":{"type":"object"}}]}`), "anthropic", "claude_code")
+	body, changed, _ := rewriteRequestBodyForClient([]byte(`{"system":"x","tools":[{"name":"Bash","description":"Edit ~/.claude/CLAUDE.md and rekey ~/.claude/keybindings.json","input_schema":{"type":"object"}}]}`), "anthropic", "claude_code", false)
 	if !changed {
 		t.Fatalf("tool description must be rewritten (body=%s)", body)
 	}
@@ -2380,7 +2380,7 @@ func TestEffectiveMappingsCustomOverride(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
 	body := []byte(`{"system":"This is Codex testing"}`)
-	rewritten, changed, _ := rewriteRequestBodyWithClient(body, "openai", "codex")
+	rewritten, changed, _ := rewriteRequestBodyForClient(body, "openai", "codex", false)
 	if !changed {
 		t.Fatalf("expected changed = true")
 	}
@@ -2649,7 +2649,7 @@ func TestRewriteRequestBodyWithNamespacePrefix(t *testing.T) {
 		]
 	}`
 
-	got, rewritten := rewriteRequestBody([]byte(body), "openai")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(body), "openai", "", false)
 	if !rewritten {
 		t.Fatal("expected rewritten = true")
 	}
@@ -3107,7 +3107,7 @@ func TestToolSchemaStructureSurvivesBrandRewrite(t *testing.T) {
 	})
 	defer restoreDefaultFilterConfig(t)
 
-	body, changed, _ := rewriteRequestBodyWithClient([]byte(`{"system":"x","tools":[{"name":"Bash","description":"d","input_schema":{"type":"object","description":"see ~/.claude/CLAUDE.md","properties":{"Claude":{"type":"string","description":"the Claude name"}},"required":["Claude"],"additionalProperties":false}}]}`), "anthropic", "claude_code")
+	body, changed, _ := rewriteRequestBodyForClient([]byte(`{"system":"x","tools":[{"name":"Bash","description":"d","input_schema":{"type":"object","description":"see ~/.claude/CLAUDE.md","properties":{"Claude":{"type":"string","description":"the Claude name"}},"required":["Claude"],"additionalProperties":false}}]}`), "anthropic", "claude_code", false)
 	if !changed {
 		t.Fatalf("schema help text must still be rewritten (body=%s)", body)
 	}

@@ -6,6 +6,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-11
+
+### Added
+- **Oh My Pi RFC 2119 prompt sanitization presets and live `omp_prompt_sanitizations` config (Issue #59).** Extended inbound System Conventions Sanitization (`omp_prompt_sanitization.go`) with case-insensitive literal substring presets rewriting both `RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.` and `RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.` to `Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`, alongside exact `<system-conventions>` -> `<conventions>` tag replacement. Exposed `omp_prompt_sanitizations` (`ConfigFieldTypeObject`) in the plugin manifest so gateway operators can override built-in presets (including empty-string `""` stripping) or add custom OMP prompt sanitization pairs via live `plugin.reconfigure` with deterministic longest-match-first ordering and atomic rollback on `invalid_config`.
+
+### Fixed
+- **Extended OMP prompt sanitization to `User-Agent: omp/...` routes on `agy/*` (Issue #59).** Inbound `system` and `developer` prompt sanitization now runs both on `ProtectedAGY` (`X-Cloak-Client` OMP marker) and on `User-Agent`-resolved Oh My Pi requests (`omp/...`) targeting `agy/*` when permitted by `model_prefixes`, including tool-free and brand-free turns, while keeping `ExplicitOMPNonAGYBypass`, unmarked traffic, `claude_code`/`codex`, and non-system carriers untouched. Live-verified on 2026-11-11 against `agy/gemini-3.8-flash` with `omp/18.18.8` (`HTTP 200`, zero retries).
+- **Synchronized plugin registration and store registry version metadata to `0.7.1` (Issue #59).** Aligned `pluginVersion` in `main.go` and `plugins[0].version` in `registry.json` after both remained at `0.6.0` in the `v0.7.0` tag, guarded by `TestHandlePluginCallRegisterVersionMatchesRegistry`.
+
 ## [0.6.0] - 2026-10-03
 
 ### Changed
@@ -238,7 +247,8 @@ source `4e946ac` (SHA256
 - Initial plugin implementation.
 - Added repository metadata, MIT license, and release build workflow.
 
-[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/monet88/antigravity-cloak/compare/v0.7.0...v0.7.1
 [0.6.0]: https://github.com/monet88/antigravity-cloak/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/monet88/antigravity-cloak/compare/v0.5.1...v0.5.2
 [0.5.0]: https://github.com/monet88/antigravity-cloak/releases/tag/v0.5.0

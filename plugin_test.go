@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/base64"
 	"encoding/json"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -48,6 +50,9 @@ func TestHandlePluginCallRegisterDeclaresRequestInterceptor(t *testing.T) {
 	}
 	if !hasConfigField(fields, "tool_mappings", "object") {
 		t.Fatalf("ConfigFields = %#v, want object tool_mappings", fields)
+	}
+	if !hasConfigField(fields, "omp_prompt_sanitizations", "object") {
+		t.Fatalf("ConfigFields = %#v, want object omp_prompt_sanitizations", fields)
 	}
 }
 
@@ -96,10 +101,10 @@ custom_mappings:
 		t.Fatalf("code = %d, want 0; body=%s", code, raw)
 	}
 
-	if got, rewritten, _ := rewriteRequestBodyWithClient([]byte(`{"system":"You are Codex."}`), "openai", "claude_code"); rewritten {
+	if got, rewritten, _ := rewriteRequestBodyForClient([]byte(`{"system":"You are Codex."}`), "openai", "claude_code", false); rewritten {
 		t.Fatalf("Codex rewritten after disabling defaults; body=%s", got)
 	}
-	got, rewritten, _ := rewriteRequestBodyWithClient([]byte(`{"system":"route this Cursor session"}`), "openai", "claude_code")
+	got, rewritten, _ := rewriteRequestBodyForClient([]byte(`{"system":"route this Cursor session"}`), "openai", "claude_code", false)
 	if !rewritten {
 		t.Fatalf("Cursor rewritten = false, want true")
 	}
@@ -124,7 +129,7 @@ custom_mappings: |
 	tests := []string{"Cursor", "Windsurf", "JetBrains AI"}
 	for _, keyword := range tests {
 		t.Run(keyword, func(t *testing.T) {
-			got, rewritten, _ := rewriteRequestBodyWithClient([]byte(`{"system":"route this `+keyword+` session"}`), "openai", "claude_code")
+			got, rewritten, _ := rewriteRequestBodyForClient([]byte(`{"system":"route this `+keyword+` session"}`), "openai", "claude_code", false)
 			if !rewritten {
 				t.Fatalf("%s rewritten = false, want true", keyword)
 			}
@@ -169,11 +174,100 @@ custom_mappings:
 		t.Fatalf("error code = %q, want invalid_config", envelope.Error.Code)
 	}
 
-	if _, rewritten, _ := rewriteRequestBodyWithClient([]byte(`{"system":"route this Cursor session"}`), "openai", "claude_code"); !rewritten {
+	if _, rewritten, _ := rewriteRequestBodyForClient([]byte(`{"system":"route this Cursor session"}`), "openai", "claude_code", false); !rewritten {
 		t.Fatalf("Cursor rewritten = false after invalid config, want previous config retained")
 	}
-	if got, rewritten, _ := rewriteRequestBodyWithClient([]byte(`{"system":"You are Codex."}`), "openai", "claude_code"); rewritten {
+	if got, rewritten, _ := rewriteRequestBodyForClient([]byte(`{"system":"You are Codex."}`), "openai", "claude_code", false); rewritten {
 		t.Fatalf("Codex rewritten after invalid config, want previous disabled-default state retained; body=%s", got)
+	}
+}
+
+func TestHandlePluginCallReconfigureOMPPromptSanitizationsPreservesConfigOnInvalidInput(t *testing.T) {
+	isolateOMPMeasurement(t)
+
+	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
+use_default_keywords: false
+omp_prompt_sanitizations:
+  "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.": "Active custom header."
+  "active-sentinel": "preserved-sentinel"
+`)))
+	if code != 0 {
+		t.Fatalf("initial reconfigure code = %d, want 0; body=%s", code, raw)
+	}
+
+	invalidConfigs := []struct {
+		name string
+		yaml string
+	}{
+		{name: "int-map-value", yaml: "omp_prompt_sanitizations:\n  foo: 123\n"},
+		{name: "bool-map-value", yaml: "omp_prompt_sanitizations:\n  foo: true\n"},
+		{name: "null-map-value", yaml: "omp_prompt_sanitizations:\n  foo: null\n"},
+		{name: "nested-map-value", yaml: "omp_prompt_sanitizations:\n  foo:\n    bar: baz\n"},
+		{name: "array-map-value", yaml: "omp_prompt_sanitizations:\n  foo:\n    - bar\n"},
+		{name: "top-level-bool", yaml: "omp_prompt_sanitizations: true\n"},
+		{name: "top-level-int", yaml: "omp_prompt_sanitizations: 42\n"},
+		{name: "empty-object-key", yaml: "omp_prompt_sanitizations:\n  \"\": \"bar\"\n"},
+		{name: "whitespace-object-key", yaml: "omp_prompt_sanitizations:\n  \"   \": \"bar\"\n"},
+		{name: "empty-string-key", yaml: "omp_prompt_sanitizations: \": bar\"\n"},
+		{name: "whitespace-string-key", yaml: "omp_prompt_sanitizations: \"   : bar\"\n"},
+		{name: "missing-colon-string", yaml: "omp_prompt_sanitizations: \"no-colon-here\"\n"},
+		{name: "malformed-comma-missing-colon", yaml: "omp_prompt_sanitizations: \"foo: bar, bad\"\n"},
+		{name: "malformed-comma-empty-key", yaml: "omp_prompt_sanitizations: \"foo: bar, : baz\"\n"},
+		{name: "non-string-array-item", yaml: "omp_prompt_sanitizations:\n  - 99\n"},
+		{name: "empty-array-item", yaml: "omp_prompt_sanitizations:\n  - \"\"\n"},
+		{name: "whitespace-array-item", yaml: "omp_prompt_sanitizations:\n  - \"   \"\n"},
+		{name: "empty-key-array-item", yaml: "omp_prompt_sanitizations:\n  - \": bar\"\n"},
+		{name: "invalid-utf8-binary-key", yaml: "omp_prompt_sanitizations:\n  ? !!binary \"/w==\"\n  : \"bar\"\n"},
+		{name: "invalid-utf8-binary-array-item", yaml: "omp_prompt_sanitizations:\n  - !!binary \"/zpiYXI=\"\n"},
+	}
+
+	for _, tc := range invalidConfigs {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, method := range []string{"plugin.reconfigure", "plugin.register"} {
+				rawErr, errCode := handlePluginCall(method, lifecycleRequestJSON(t, []byte(tc.yaml)))
+				if errCode != 0 {
+					t.Fatalf("%s code = %d, want 0 handled error envelope; body=%s", method, errCode, rawErr)
+				}
+				var envelope struct {
+					OK    bool `json:"ok"`
+					Error struct {
+						Code string `json:"code"`
+					} `json:"error"`
+				}
+				mustUnmarshalJSON(t, rawErr, &envelope)
+				if envelope.OK {
+					t.Fatalf("%s unexpectedly accepted %s: %s", method, tc.name, rawErr)
+				}
+				if envelope.Error.Code != "invalid_config" {
+					t.Fatalf("%s error code = %q, want invalid_config", method, envelope.Error.Code)
+				}
+
+				reqBody := ompMeasurementJSON(t, map[string]any{
+					"system":   "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. active-sentinel",
+					"messages": []any{},
+					"tools":    []any{},
+				})
+				req := ompMeasurementRequest("preserve-"+tc.name+"-"+method, "anthropic", reqBody)
+				rawIntercept, icCode := handlePluginCall("request.intercept_before", ompMeasurementJSON(t, req))
+				if icCode != 0 {
+					t.Fatalf("intercept code = %d", icCode)
+				}
+				var icEnv struct {
+					OK     bool `json:"ok"`
+					Result struct {
+						Body string `json:"Body"`
+					} `json:"result"`
+				}
+				mustUnmarshalJSON(t, rawIntercept, &icEnv)
+				decoded, decErr := base64.StdEncoding.DecodeString(icEnv.Result.Body)
+				if decErr != nil {
+					t.Fatalf("decode body: %v", decErr)
+				}
+				if !strings.Contains(string(decoded), "Active custom header. preserved-sentinel") {
+					t.Fatalf("active config was clobbered after %s (%s): got %s", tc.name, method, decoded)
+				}
+			}
+		})
 	}
 }
 
@@ -254,6 +348,51 @@ func TestHandlePluginCallUnknownMethodReturnsErrorEnvelope(t *testing.T) {
 	}
 	if envelope.Error.Code != "unknown_method" {
 		t.Fatalf("error code = %q, want unknown_method", envelope.Error.Code)
+	}
+}
+
+func TestHandlePluginCallRegisterVersionMatchesRegistry(t *testing.T) {
+	semverRe := regexp.MustCompile(`^\d+\.\d+\.\d+$`)
+
+	raw, code := handlePluginCall("plugin.register", nil)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; body=%s", code, raw)
+	}
+
+	var envelope struct {
+		OK     bool `json:"ok"`
+		Result struct {
+			Metadata struct {
+				Version string `json:"Version"`
+			} `json:"metadata"`
+		} `json:"result"`
+	}
+	mustUnmarshalJSON(t, raw, &envelope)
+	if !envelope.OK {
+		t.Fatalf("ok = false, want true; raw=%s", raw)
+	}
+
+	registryRaw, err := os.ReadFile("registry.json")
+	if err != nil {
+		t.Fatalf("read registry.json: %v", err)
+	}
+	var registry struct {
+		Plugins []struct {
+			Version string `json:"version"`
+		} `json:"plugins"`
+	}
+	mustUnmarshalJSON(t, registryRaw, &registry)
+	if len(registry.Plugins) == 0 {
+		t.Fatalf("registry.json plugins is empty")
+	}
+
+	gotMeta := envelope.Result.Metadata.Version
+	gotReg := registry.Plugins[0].Version
+	if !semverRe.MatchString(gotMeta) || gotMeta == "0.6.0" {
+		t.Errorf("Metadata.Version = %q, want bumped semver", gotMeta)
+	}
+	if gotMeta != pluginVersion || gotReg != gotMeta {
+		t.Errorf("version mismatch: pluginVersion=%q Metadata.Version=%q registry.json=%q", pluginVersion, gotMeta, gotReg)
 	}
 }
 

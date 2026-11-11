@@ -1,76 +1,100 @@
-# System Conventions Sanitization Spec
+# System Conventions & OMP Prompt Sanitization Spec
 
 ## Problem and decision
 
-Local bisection of an Oh My Pi (`omp/18.1.18`) request to
-`agy/gemini-3.8-flash` isolated the exact `<system-conventions>` wrapper in the
-system prompt as the trigger for `429 RESOURCE_EXHAUSTED`. Renaming the wrapper
-to `<agent-conventions>` succeeded in the reported client-side test. The chosen
-plugin replacement is `<conventions>`; installed-binary live acceptance is
-a separate verification step.
+Empirical payload bisections of Oh My Pi (`omp/18.1.18` and `omp/18.18.8`)
+requests to `agy/gemini-3.8-flash` on `daily-cloudcode-pa.googleapis.com`
+isolated two prompt signatures that deterministically trigger upstream
+`429 RESOURCE_EXHAUSTED` even when account quotas are healthy:
 
-The enclosed RFC 2119 instructions remain unchanged. The fix belongs in the
-proxy so OMP installations do not require bundle patching after each update.
-The internal upstream classifier and its handling of other tags are not part
-of this contract. See [ADR 0003](../adr/0003-sanitize-system-prompt-conventions-tag-for-google-upstream.md).
+1. Legacy `<system-conventions>` / `</system-conventions>` XML wrappers around
+   Oh My Pi's normative directive block (rewritten to `<conventions>` /
+   `</conventions>`).
+2. Current and legacy opening normative modal clauses across Oh My Pi's system,
+   advisor, and live-instruction templates:
+   - `RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`
+   - `RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`
+   Both are rewritten case-insensitively to
+   `Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.` so
+   enclosed `MUST` / `NEVER` / `SHOULD` / `AVOID` rules keep their full meaning.
+
+To allow operators to adapt immediately without rebuilding the CGO binary or
+restarting the container if upstream signatures evolve, the plugin exposes a
+live-reconfigurable `omp_prompt_sanitizations` setting (`omp_prompt_sanitization.go`).
+See [ADR 0003](../adr/0003-sanitize-system-prompt-conventions-tag-for-google-upstream.md).
 
 ## Scope and ordering
 
-- Hook: `request.intercept_before`, in `handleProtectedAGY` after tool cloaking
-  and brand rewriting, before post-transform validation and serialization.
-- Route: explicit OMP marker plus an `agy/` prefix on `Model` or `RequestedModel`.
-  ProtectedAGY retains precedence over generic `model_prefixes`.
-- Fields: top-level `system`, plus `messages[].content` for roles `system` and
-  `developer`. Supported content is a string or an array of `text`/`input_text`
-  blocks; only each block's string `text` field is visited.
-- User, assistant, and tool messages, tool definitions/arguments, block metadata,
-  image data, and unsupported content shapes are preserved by this step.
-- Explicit OMP non-AGY bypass and generic client routes do not run this step.
-- Brand configuration cannot disable sanitization. The transformation does not
-  run on responses or streams and has no reverse mapping.
+- Hook: `request.intercept_before` via `sanitizeOMPPrompt(rootMap)`, running
+  after brand rewriting and before the prose tool-alias pass on both OMP `agy/*`
+  request paths (`handleProtectedAGY` and `rewriteRequestBodyForClient`). That
+  ordering ensures brand rules never clobber operator replacement text while
+  declared OMP tool references inside sanitized prompt text (e.g. `use bash`)
+  still cloak upstream (`use run_command`).
+- Routes:
+  1. `ProtectedAGY`: explicit OMP `X-Cloak-Client` marker plus an `agy/` prefix
+     on `Model` or `RequestedModel` (retaining precedence over `model_prefixes`).
+  2. `User-Agent` OMP on `agy/*`: verified `User-Agent: omp/...` without
+     `X-Cloak-Client` when `isAGYRoute` and `modelAllowsCloak` hold on normalized
+     `anthropic` or `openai` Chat Completions / Messages carriers. Any
+     `X-Cloak-Client` header value — valid or invalid — suppresses this route:
+     the UA fallback requires an absent explicit marker.
+- Excluded routes and carriers: `ExplicitOMPNonAGYBypass` (non-`agy/*`),
+  non-`agy/*` `User-Agent: omp/...` traffic, unmarked no-UA requests, other
+  clients (`claude_code`, `codex`), and deferred `/v1/responses` (`openai-response`)
+  carriers do not run this step.
+- Visited fields: top-level `system` plus `messages[].content` for roles
+  `system` and `developer`. Supported content is a `string` or an array of
+  `text` / `input_text` blocks (visiting only each block's string `text` field).
+  `user`, `assistant`, and `tool` messages, tool schemas/descriptions/arguments,
+  block metadata (`cache_control`), and `image` / `tool_use` blocks are untouched.
+- One-way and independent: `use_default_keywords` cannot disable OMP prompt
+  sanitization, and responses/streams never reverse `<conventions>` or
+  `Normative keywords:` text.
 
-## Exact replacement
+## Rules and `omp_prompt_sanitizations` configuration
 
-```go
-func sanitizeSystemConventions(text string) (string, bool) {
-    next := strings.ReplaceAll(text, "<system-conventions>", "<conventions>")
-    next = strings.ReplaceAll(next, "</system-conventions>", "</conventions>")
-    return next, next != text
-}
-```
-
-The replacement is case-sensitive, affects every exact occurrence in the selected
-text, and is idempotent. Bare `system-conventions`, filenames, similar tag names,
-and `<system-directive>` remain unchanged. Exact tags quoted inside selected
-system/developer text are also replaced. Attribute-bearing and differently cased
-tags are outside this fixed-wrapper contract. Processing cost depends on input
-length; replacements allocate output strings.
+- **Built-in presets** (`defaultOMPSanitizationPresets`):
+  - Exact case-sensitive `<system-conventions>` $\to$ `<conventions>` and
+    `</system-conventions>` $\to$ `</conventions>` (leaving `<SYSTEM-CONVENTIONS>`,
+    `system-conventions.md`, and `<system-directive>` unchanged by default).
+  - Case-insensitive literal substring matches for both RFC 2119 signatures
+    above $\to$ `Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`
+    (leaving prose like `The RFC 2119 word *is* the instruction` unchanged).
+- **Operator overrides (`omp_prompt_sanitizations`)**:
+  - Declared in `ConfigFields` as `ConfigFieldTypeObject`.
+  - Accepts `null`/omitted (built-in presets only), a JSON/YAML `map[string]string`
+    object (canonical form, required when keys or replacements contain `:` or `,`),
+    or `,` / `\n` / `\r`-delimited `match: replacement` string/array entries.
+  - Matching keys overlay built-in presets case-insensitively (including
+    `<system-conventions>` tags); an empty string replacement `""` strips the
+    matched phrase.
+  - Malformed entries (non-string values, missing `:`, empty/whitespace match
+    keys, invalid UTF-8) fail `plugin.register` / `plugin.reconfigure` with
+    `invalid_config` while preserving the previously active atomic `filterConfig`.
+- **Hot-path execution**:
+  - `buildOMPSanitizationRules` precomputes the merged rule slice on config
+    change sorted by descending `len(match)` (ties broken by lowercase `match`).
+  - ASCII case-insensitive rules scan via `indexASCIIFold` with zero heap
+    allocations when no rule matches.
 
 ## Verification
 
-`system_conventions_test.go` covers exact/repeated tags, Unicode, unchanged
-strings, idempotence, text blocks and excluded metadata, and the real plugin
-request handler for OpenAI and Anthropic formats. Handler cases exercise
-ProtectedAGY, RequestedModel routing, disabled default brand keywords, a
-mismatched generic model gate, non-AGY bypass, unmarked traffic, and other clients.
+`system_conventions_test.go` and `plugin_test.go` exercise built-in tag and
+RFC 2119 presets, idempotence, inbound-only response/stream non-mutation, live
+`omp_prompt_sanitizations` reconfigure/override/strip/precedence, `invalid_config`
+rejection with active-config preservation, `ProtectedAGY` and `User-Agent: omp/...`
+`agy/*` route gates, brand-before-sanitization-before-tool-prose ordering, and
+negative carrier/route boundaries through the plugin ABI entrypoint.
 
-Run `go test ./...`, `go test ./.github/scripts`, and `go vet ./...`.
-These offline checks do not establish live upstream acceptance.
+Run:
 
-## Build and local deployment
+```powershell
+go test -count=1 ./...
+go test -race -count=1 ./...
+go test -count=1 ./.github/scripts
+go vet ./...
+```
 
-Build the merged source as a Linux/amd64 CGO shared library. Use
-[the local verification runbook](../verification-checklist.md) to discover the
-actual Compose service, config, plugin mount, and log mount; do not hardcode
-a historical gateway path.
-
-Stop the gateway before replacing a loaded `.so`, retain a rollback copy outside
-the plugin discovery directory, and recreate the service without pulling a new
-gateway image. Verify plugin version, artifact checksum, and registration.
-
-Use the existing `cloak-live` OMP profile for a controlled streamed tool-call
-test. Prove that the original system wrapper reaches the plugin, the rewritten
-upstream prompt uses `<conventions>`, and a streamed tool call is restored to an
-OMP-native name and executed. Disable debug logging, recreate the service, and
-truncate the debug log after the test. Record a live failure separately from
-the deterministic transformation result.
+Offline tests establish transformation contracts; live deployment acceptance
+follows [the local verification runbook](../verification-checklist.md).
