@@ -29,3 +29,13 @@ The original wrapper reproduced 429 and renaming it to `<agent-conventions>` suc
 - ProtectedAGY system/developer prompt text reaches upstream with the replacement wrapper. Other roles, tool data, metadata, and bypass routes retain their original content.
 - Eliminates client-side patching requirements across `oh-my-pi` upgrades.
 - Unit and handler tests establish the transformation contract. Live deployment acceptance must establish upstream success for the installed artifact.
+
+## Amendment (Issue #59)
+1. **Built-in RFC 2119 Normative Header Presets**:
+   - Newer `oh-my-pi` releases (`omp/18.18.8+`) removed the `<system-conventions>` wrapper and reworded the opening normative line across bundled system, advisor, and live-instruction templates to `RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`. Empirical bisection against `daily-cloudcode-pa.googleapis.com` confirmed upstream rejects both `RFC 2119 keywords: ...` and legacy `RFC 2119: ...` signatures with false `429 RESOURCE_EXHAUSTED`.
+   - Alongside exact case-sensitive `<system-conventions>` / `</system-conventions>` $\to$ `<conventions>` / `</conventions>`, `sanitizeOMPPrompt` (`omp_prompt_sanitization.go`) rewrites both `RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.` and `RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.` case-insensitively to `Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`, preserving modal directive semantics while leaving unrelated `RFC 2119` prose untouched.
+2. **Live-Reconfigurable `omp_prompt_sanitizations`**:
+   - Operators can configure `omp_prompt_sanitizations` (`ConfigFieldTypeObject`, accepting `match -> replacement` objects or `,`/`\n`-delimited `match: replacement` string/array entries) via `plugin.register` / `plugin.reconfigure` without rebuilding the `.so` or restarting the gateway.
+   - Rules are precomputed on the atomic `filterConfig` snapshot in longest-match-first order: operator keys matching a built-in preset case-insensitively override its replacement (including `<system-conventions>` tags and `""` empty-string stripping), independent of `use_default_keywords` and strictly one-way on inbound requests.
+3. **`User-Agent: omp/...` `agy/*` Route Coverage**:
+   - Sanitization runs after brand rewriting and before prose tool-alias cloaking on both `ProtectedAGY` (`X-Cloak-Client` OMP marker on `agy/*`) and `User-Agent: omp/...` `agy/*` routes permitted by `model_prefixes`, while leaving `ExplicitOMPNonAGYBypass`, non-`agy/*` routes, unmarked no-UA traffic, other clients, and non-system carriers untouched.

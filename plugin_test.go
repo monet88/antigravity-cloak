@@ -210,6 +210,8 @@ omp_prompt_sanitizations:
 		{name: "empty-string-key", yaml: "omp_prompt_sanitizations: \": bar\"\n"},
 		{name: "whitespace-string-key", yaml: "omp_prompt_sanitizations: \"   : bar\"\n"},
 		{name: "missing-colon-string", yaml: "omp_prompt_sanitizations: \"no-colon-here\"\n"},
+		{name: "malformed-comma-missing-colon", yaml: "omp_prompt_sanitizations: \"foo: bar, bad\"\n"},
+		{name: "malformed-comma-empty-key", yaml: "omp_prompt_sanitizations: \"foo: bar, : baz\"\n"},
 		{name: "non-string-array-item", yaml: "omp_prompt_sanitizations:\n  - 99\n"},
 		{name: "empty-array-item", yaml: "omp_prompt_sanitizations:\n  - \"\"\n"},
 		{name: "whitespace-array-item", yaml: "omp_prompt_sanitizations:\n  - \"   \"\n"},

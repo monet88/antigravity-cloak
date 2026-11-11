@@ -43,8 +43,10 @@ coding-CLI traffic as Antigravity. Two jobs:
 - Module: github.com/monet88/antigravity-cloak
 - Go: 1.26.0. Depends on github.com/router-for-me/CLIProxyAPI/v7 v7.2.143
   (SDK sdk/pluginapi, sdk/pluginabi). Plugin ABI version is 1.
-- Source layout: `main.go` (plugin core) and `issue55_agent_tier.go` (Issue #55
-  Claude Code news-URL sanitation and reversible Agent model tiers). Go unit tests (`*_test.go`) reside at
+- Source layout: `main.go` (plugin core), `issue55_agent_tier.go` (Issue #55
+  Claude Code news-URL sanitation and reversible Agent model tiers), and
+  `omp_prompt_sanitization.go` (Oh My Pi `<system-conventions>`, RFC 2119 presets,
+  and live `omp_prompt_sanitizations` config). Go unit tests (`*_test.go`) reside at
   the repository root alongside `main.go` for `package main`, while `tests/` is
   dedicated to integration/e2e test scripts (`.py`, `.sh`). Upstream references
   are cloned under `.ref/` (gitignored workspace), not part of the module.
@@ -280,10 +282,10 @@ The step-by-step procedure for deploying custom plugin binaries to remote VPS in
 - Build, deploy, and file ops are one-shell-each on Windows PowerShell; avoid
   piping host paths into docker exec for file deletion. Truncate inside the
   container or while it is stopped.
-- **Google Cloud Code Prompt-Injection 429 (`<system-conventions>`)**:
+- **Google Cloud Code Prompt-Injection 429 (`<system-conventions>` & RFC 2119 headers)**:
   - Symptom: Requests from Oh My Pi fail upstream with `429 RESOURCE_EXHAUSTED` on `daily-cloudcode-pa.googleapis.com` even with healthy quotas and valid tokens.
-  - Confirmed trigger: Oh My Pi's default system prompt wraps its RFC 2119 block in `<system-conventions>`; local payload bisection isolated that tag pair. The upstream classifier's internal implementation is not established by this observation.
-  - Rule: On ProtectedAGY requests, sanitize the exact opening/closing tags to `<conventions>` in top-level `system` and system/developer message text. Preserve other roles, tool payloads, metadata, and bypass routes. See [the sanitization spec](docs/specs/system-conventions-sanitization.md) before extending this scope.
+  - Confirmed triggers: Oh My Pi's legacy `<system-conventions>` wrapper and its opening normative header signatures (`RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.` and `RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`); local payload bisections isolated those prompt strings.
+  - Rule: On `ProtectedAGY` and `User-Agent: omp/...` `agy/*` requests, `sanitizeOMPPrompt` (`omp_prompt_sanitization.go`) runs after brand rewriting and before prose tool-alias cloaking on top-level `system` and `system`/`developer` message text, rewriting `<system-conventions>` to `<conventions>`, both RFC 2119 clauses case-insensitively to `Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`, and any live `omp_prompt_sanitizations` operator overrides/strips. Preserve other roles, tool payloads, metadata, unmarked no-UA traffic, and bypass routes. See [the sanitization spec](docs/specs/system-conventions-sanitization.md) before extending this scope.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence

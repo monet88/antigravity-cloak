@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -10,8 +11,112 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+type fiveRoleCarrierFixture struct {
+	format         string
+	root           map[string]any
+	textBlock      map[string]any
+	inputTextBlock map[string]any
+	tool           map[string]any
+}
+
+func newFiveRoleCarrierFixture(format, prompt string, includeReadTool bool) fiveRoleCarrierFixture {
+	textBlock := map[string]any{
+		"type":          "text",
+		"text":          prompt,
+		"cache_control": map[string]any{"type": "ephemeral", "note": prompt},
+	}
+	inputTextBlock := map[string]any{
+		"type": "input_text",
+		"text": prompt,
+	}
+	imageBlock := map[string]any{
+		"type": "image",
+		"text": prompt,
+	}
+	toolUseBlock := map[string]any{
+		"type":  "tool_use",
+		"text":  prompt,
+		"input": map[string]any{"text": prompt},
+	}
+	root := map[string]any{
+		"system": prompt,
+		"messages": []any{
+			map[string]any{"role": "system", "content": []any{textBlock, inputTextBlock, imageBlock, toolUseBlock}},
+			map[string]any{"role": "developer", "content": prompt},
+			map[string]any{"role": "user", "content": prompt},
+			map[string]any{"role": "assistant", "content": prompt},
+			map[string]any{"role": "tool", "content": prompt},
+		},
+	}
+	var tool map[string]any
+	if includeReadTool {
+		tool = map[string]any{
+			"name":         "read",
+			"description":  prompt,
+			"input_schema": map[string]any{"type": "object", "description": prompt},
+		}
+		if format == "openai" {
+			tool = map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "read",
+					"description": prompt,
+					"parameters":  map[string]any{"type": "object", "description": prompt},
+				},
+			}
+		}
+		root["tools"] = []any{tool}
+	}
+	return fiveRoleCarrierFixture{
+		format:         format,
+		root:           root,
+		textBlock:      textBlock,
+		inputTextBlock: inputTextBlock,
+		tool:           tool,
+	}
+}
+
+func (f *fiveRoleCarrierFixture) applyExpectedSanitization(sanitized string) {
+	f.root["system"] = sanitized
+	f.textBlock["text"] = sanitized
+	f.inputTextBlock["text"] = sanitized
+	f.root["messages"].([]any)[1].(map[string]any)["content"] = sanitized
+	if f.tool != nil {
+		if f.format == "openai" {
+			f.tool["function"].(map[string]any)["name"] = "view_file"
+		} else {
+			f.tool["name"] = "view_file"
+		}
+	}
+}
+
 func TestSanitizeSystemConventions(t *testing.T) {
-	for _, tc := range []struct{ input, want string }{
+	isolateOMPMeasurement(t)
+	cfg := defaultFilterConfig()
+	cfg.UseDefaultKeywords = false
+	applyFilterConfig(cfg)
+
+	interceptUA := func(id, systemText string) (string, bool) {
+		t.Helper()
+		req := pluginapi.RequestInterceptRequest{
+			RequestID:      id,
+			SourceFormat:   "anthropic",
+			Model:          "agy/measurement",
+			RequestedModel: "agy/measurement",
+			Body:           ompMeasurementJSON(t, map[string]any{"system": systemText}),
+			Headers:        map[string][]string{"User-Agent": {"omp/18.18.8"}},
+		}
+		var res pluginapi.RequestInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, req, &res)
+		if len(res.Body) == 0 {
+			return systemText, false
+		}
+		var got map[string]any
+		mustUnmarshalJSON(t, res.Body, &got)
+		return got["system"].(string), true
+	}
+
+	for i, tc := range []struct{ input, want string }{
 		{"", ""},
 		{"system-conventions.md <system-directive>", "system-conventions.md <system-directive>"},
 		{"<system-conventions>規約\nMUST</system-conventions>", "<conventions>規約\nMUST</conventions>"},
@@ -19,28 +124,41 @@ func TestSanitizeSystemConventions(t *testing.T) {
 		{"<conventions>unchanged</conventions>", "<conventions>unchanged</conventions>"},
 		{"<SYSTEM-CONVENTIONS><system-conventions-extra>", "<SYSTEM-CONVENTIONS><system-conventions-extra>"},
 	} {
-		got, changed := sanitizeSystemConventions(tc.input)
+		got, changed := interceptUA(fmt.Sprintf("conv-%d", i), tc.input)
 		if got != tc.want || changed != (tc.input != tc.want) {
 			t.Errorf("input %q: got %q changed=%t; want %q", tc.input, got, changed, tc.want)
 		}
-		if twice, changedAgain := sanitizeSystemConventions(got); twice != got || changedAgain {
+		if twice, changedAgain := interceptUA(fmt.Sprintf("conv-%d-idem", i), got); twice != got || changedAgain {
 			t.Errorf("not idempotent: %q -> %q changed=%t", got, twice, changedAgain)
 		}
 	}
 }
 
 func TestSanitizeSystemConventionsContent(t *testing.T) {
+	isolateOMPMeasurement(t)
+	cfg := defaultFilterConfig()
+	cfg.UseDefaultKeywords = false
+	applyFilterConfig(cfg)
+
 	const original = "<system-conventions>x</system-conventions>"
 	const sanitized = "<conventions>x</conventions>"
 	for _, blockType := range []string{"text", "input_text", "image", "tool_use"} {
-		value := []any{map[string]any{"type": blockType, "text": original, "input": map[string]any{"text": original}}, nil, 42}
-		got := sanitizeSystemConventionsContent(value).([]any)
+		root := map[string]any{
+			"system":   []any{map[string]any{"type": blockType, "text": original, "input": map[string]any{"text": original}}, nil, float64(42)},
+			"messages": []any{},
+			"tools":    []any{},
+		}
+		var res pluginapi.RequestInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest("content-"+blockType, "anthropic", ompMeasurementJSON(t, root)), &res)
+		var gotDoc map[string]any
+		mustUnmarshalJSON(t, res.Body, &gotDoc)
+		got := gotDoc["system"].([]any)
 		want := original
 		if blockType == "text" || blockType == "input_text" {
 			want = sanitized
 		}
 		block := got[0].(map[string]any)
-		if block["text"] != want || block["input"].(map[string]any)["text"] != original || got[1] != nil || got[2] != 42 {
+		if block["text"] != want || block["input"].(map[string]any)["text"] != original || got[1] != nil || got[2] != float64(42) {
 			t.Fatalf("unexpected %s block transformation: %#v", blockType, got)
 		}
 	}
@@ -57,23 +175,8 @@ func TestSystemConventionsRequestScope(t *testing.T) {
 				cfg.UseDefaultKeywords = false
 				cfg.ModelPrefixes = []string{"unrelated/"}
 				applyFilterConfig(cfg)
-				block := map[string]any{"type": "text", "text": original, "cache_control": map[string]any{"type": "ephemeral", "note": original}}
-				tool := map[string]any{"name": "read", "description": original, "input_schema": map[string]any{"type": "object", "description": original}}
-				if format == "openai" {
-					tool = map[string]any{"type": "function", "function": map[string]any{"name": "read", "description": original, "parameters": map[string]any{"type": "object", "description": original}}}
-				}
-				root := map[string]any{
-					"system": original,
-					"messages": []any{
-						map[string]any{"role": "system", "content": []any{block}},
-						map[string]any{"role": "developer", "content": original},
-						map[string]any{"role": "user", "content": original},
-						map[string]any{"role": "assistant", "content": original},
-						map[string]any{"role": "tool", "content": original},
-					},
-					"tools": []any{tool},
-				}
-				body := ompMeasurementJSON(t, root)
+				fx := newFiveRoleCarrierFixture(format, original, true)
+				body := ompMeasurementJSON(t, fx.root)
 				req := ompMeasurementRequest(t.Name(), format, body)
 				switch route {
 				case "requested-model":
@@ -96,20 +199,13 @@ func TestSystemConventionsRequestScope(t *testing.T) {
 					}
 					return
 				}
-				root["system"] = sanitized
-				block["text"] = sanitized
-				root["messages"].([]any)[1].(map[string]any)["content"] = sanitized
-				if format == "openai" {
-					tool["function"].(map[string]any)["name"] = "view_file"
-				} else {
-					tool["name"] = "view_file"
-				}
+				fx.applyExpectedSanitization(sanitized)
 				var got map[string]any
 				if err := json.Unmarshal(result.Body, &got); err != nil {
 					t.Fatal(err)
 				}
-				if !reflect.DeepEqual(got, root) {
-					t.Fatalf("unexpected transformed request:\ngot %s\nwant %s", result.Body, ompMeasurementJSON(t, root))
+				if !reflect.DeepEqual(got, fx.root) {
+					t.Fatalf("unexpected transformed request:\ngot %s\nwant %s", result.Body, ompMeasurementJSON(t, fx.root))
 				}
 			})
 		}
@@ -151,76 +247,22 @@ model_prefixes:
 				t.Fatalf("reconfigure code = %d, body = %s", code, rawCfg)
 			}
 
-			textBlock := map[string]any{
-				"type":          "text",
-				"text":          promptOriginal,
-				"cache_control": map[string]any{"type": "ephemeral", "note": promptOriginal},
-			}
-			inputTextBlock := map[string]any{
-				"type": "input_text",
-				"text": promptOriginal,
-			}
-			imageBlock := map[string]any{
-				"type": "image",
-				"text": promptOriginal,
-			}
-			toolUseBlock := map[string]any{
-				"type":  "tool_use",
-				"text":  promptOriginal,
-				"input": map[string]any{"text": promptOriginal},
-			}
-			tool := map[string]any{
-				"name":         "read",
-				"description":  promptOriginal,
-				"input_schema": map[string]any{"type": "object", "description": promptOriginal},
-			}
-			if format == "openai" {
-				tool = map[string]any{
-					"type": "function",
-					"function": map[string]any{
-						"name":        "read",
-						"description": promptOriginal,
-						"parameters":  map[string]any{"type": "object", "description": promptOriginal},
-					},
-				}
-			}
-
-			root := map[string]any{
-				"system": promptOriginal,
-				"messages": []any{
-					map[string]any{"role": "system", "content": []any{textBlock, inputTextBlock, imageBlock, toolUseBlock}},
-					map[string]any{"role": "developer", "content": promptOriginal},
-					map[string]any{"role": "user", "content": promptOriginal},
-					map[string]any{"role": "assistant", "content": promptOriginal},
-					map[string]any{"role": "tool", "content": promptOriginal},
-				},
-				"tools": []any{tool},
-			}
-
+			fx := newFiveRoleCarrierFixture(format, promptOriginal, true)
 			reqID := "rfc2119-protected-" + format
-			req := ompMeasurementRequest(reqID, format, ompMeasurementJSON(t, root))
+			req := ompMeasurementRequest(reqID, format, ompMeasurementJSON(t, fx.root))
 			var result pluginapi.RequestInterceptResponse
 			ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, req, &result)
 			if result.Terminate {
 				t.Fatalf("unexpected termination: %s", result.ResponseBody)
 			}
 
-			root["system"] = promptSanitized
-			textBlock["text"] = promptSanitized
-			inputTextBlock["text"] = promptSanitized
-			root["messages"].([]any)[1].(map[string]any)["content"] = promptSanitized
-			if format == "openai" {
-				tool["function"].(map[string]any)["name"] = "view_file"
-			} else {
-				tool["name"] = "view_file"
-			}
-
+			fx.applyExpectedSanitization(promptSanitized)
 			var got map[string]any
 			if err := json.Unmarshal(result.Body, &got); err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(got, root) {
-				t.Fatalf("unexpected transformed request:\ngot %s\nwant %s", result.Body, ompMeasurementJSON(t, root))
+			if !reflect.DeepEqual(got, fx.root) {
+				t.Fatalf("unexpected transformed request:\ngot %s\nwant %s", result.Body, ompMeasurementJSON(t, fx.root))
 			}
 
 			// Idempotence at the ABI boundary: running an already-sanitized prompt again produces identical prompt text.
@@ -409,7 +451,7 @@ omp_prompt_sanitizations:
 		raw, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`
 omp_prompt_sanitizations: |
   strip-me:
-  alpha-phrase: beta, gamma
+  alpha-phrase: beta, second-phrase: gamma
 `)))
 		if code != 0 {
 			t.Fatalf("code = %d, body = %s", code, raw)
@@ -419,8 +461,8 @@ omp_prompt_sanitizations: |
 		if env["ok"] != true {
 			t.Fatalf("string reconfigure failed: %s", raw)
 		}
-		got := runProtectedPrompt(t, "string-form", "[strip-me] alpha-phrase | RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.")
-		want := "[] beta, gamma | Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
+		got := runProtectedPrompt(t, "string-form", "[strip-me] alpha-phrase second-phrase | RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.")
+		want := "[] beta gamma | Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
 		if got != want {
 			t.Fatalf("string form got %q, want %q", got, want)
 		}
@@ -445,7 +487,11 @@ omp_prompt_sanitizations:
 	})
 }
 
-func TestSanitizeSystemConventionsZeroAllocsOnMiss(t *testing.T) {
+// TestSanitizeOMPPromptZeroAllocsOnMiss calls sanitizeOMPPrompt directly as a
+// focused micro-contract test (docs/specs/test-audit-surface-pruning.md) for
+// Spec #59's hot-path requirement: zero heap allocations when no rule matches,
+// which cannot be isolated through JSON ABI serialization.
+func TestSanitizeOMPPromptZeroAllocsOnMiss(t *testing.T) {
 	isolateOMPMeasurement(t)
 	cleanText := "Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n" +
 		"- Normative modals: MUST, NEVER, SHOULD, MAY. The RFC 2119 word *is* the instruction.\n" +
@@ -458,7 +504,7 @@ func TestSanitizeSystemConventionsZeroAllocsOnMiss(t *testing.T) {
 		},
 	}
 	allocs := testing.AllocsPerRun(100, func() {
-		if sanitizeProtectedSystemConventions(root) {
+		if sanitizeOMPPrompt(root) {
 			t.Fatal("expected no changes on clean prompt")
 		}
 	})
@@ -509,37 +555,14 @@ func TestSystemConventionsUserAgentOMPRouteGate(t *testing.T) {
 				isolateOMPMeasurement(t)
 				configureTestRules(t, "")
 
-				textBlock := map[string]any{
-					"type":          "text",
-					"text":          promptOriginal,
-					"cache_control": map[string]any{"type": "ephemeral", "note": promptOriginal},
-				}
-				inputTextBlock := map[string]any{
-					"type": "input_text",
-					"text": promptOriginal,
-				}
-				imageBlock := map[string]any{
-					"type": "image",
-					"text": promptOriginal,
-				}
 				// Tool-free and brand-free turn: sanitization alone must trigger serialization.
-				root := map[string]any{
-					"system": promptOriginal,
-					"messages": []any{
-						map[string]any{"role": "system", "content": []any{textBlock, inputTextBlock, imageBlock}},
-						map[string]any{"role": "developer", "content": promptOriginal},
-						map[string]any{"role": "user", "content": promptOriginal},
-						map[string]any{"role": "assistant", "content": promptOriginal},
-						map[string]any{"role": "tool", "content": promptOriginal},
-					},
-				}
-
+				fx := newFiveRoleCarrierFixture(format, promptOriginal, false)
 				req := pluginapi.RequestInterceptRequest{
 					RequestID:      "ua-omp-" + format + "-" + route.name,
 					SourceFormat:   format,
 					Model:          route.model,
 					RequestedModel: route.requestedModel,
-					Body:           ompMeasurementJSON(t, root),
+					Body:           ompMeasurementJSON(t, fx.root),
 					Headers:        map[string][]string{"User-Agent": {"omp/18.18.8"}},
 				}
 				var result pluginapi.RequestInterceptResponse
@@ -551,17 +574,13 @@ func TestSystemConventionsUserAgentOMPRouteGate(t *testing.T) {
 					t.Fatalf("expected sanitized body in response, got empty Body")
 				}
 
-				root["system"] = promptSanitized
-				textBlock["text"] = promptSanitized
-				inputTextBlock["text"] = promptSanitized
-				root["messages"].([]any)[1].(map[string]any)["content"] = promptSanitized
-
+				fx.applyExpectedSanitization(promptSanitized)
 				var got map[string]any
 				if err := json.Unmarshal(result.Body, &got); err != nil {
 					t.Fatal(err)
 				}
-				if !reflect.DeepEqual(got, root) {
-					t.Fatalf("unexpected transformed request:\ngot  %s\nwant %s", result.Body, ompMeasurementJSON(t, root))
+				if !reflect.DeepEqual(got, fx.root) {
+					t.Fatalf("unexpected transformed request:\ngot  %s\nwant %s", result.Body, ompMeasurementJSON(t, fx.root))
 				}
 			})
 		}
@@ -615,6 +634,60 @@ omp_prompt_sanitizations:
 		wantDev := "Antigravity rule: Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
 		if got["system"] != wantSys || got["messages"].([]any)[0].(map[string]any)["content"] != wantDev || firstToolName("openai", got) != "run_command" {
 			t.Fatalf("unexpected combined output: %s", result.Body)
+		}
+	})
+
+	t.Run("sanitization-runs-after-brand-and-before-tool-prose-cloak", func(t *testing.T) {
+		for _, format := range []string{"anthropic", "openai"} {
+			for _, route := range []struct {
+				name    string
+				headers map[string][]string
+			}{
+				{name: "protected-agy", headers: map[string][]string{"X-Cloak-Client": {"oh_my_pi"}}},
+				{name: "ua-omp-agy", headers: map[string][]string{"User-Agent": {"omp/18.18.8"}}},
+			} {
+				t.Run(format+"/"+route.name, func(t *testing.T) {
+					isolateOMPMeasurement(t)
+					raw, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`
+use_default_keywords: true
+custom_mappings:
+  sanitized-literal-token: WRONG
+omp_prompt_sanitizations:
+  "custom-shell-rule": "sanitized-literal-token: Always use bash for shell work."
+`)))
+					if code != 0 {
+						t.Fatalf("reconfigure code = %d, body = %s", code, raw)
+					}
+					root := map[string]any{
+						"system": "You use Oh My Pi. custom-shell-rule",
+						"messages": []any{
+							map[string]any{"role": "system", "content": "You use Oh My Pi. custom-shell-rule"},
+							map[string]any{"role": "developer", "content": "Developer rule: custom-shell-rule"},
+						},
+						"tools": makeTools(format, "bash"),
+					}
+					var result pluginapi.RequestInterceptResponse
+					ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, pluginapi.RequestInterceptRequest{
+						RequestID:      "order-" + format + "-" + route.name,
+						SourceFormat:   format,
+						Model:          "agy/gemini-3.8-flash",
+						RequestedModel: "agy/gemini-3.8-flash",
+						Body:           ompMeasurementJSON(t, root),
+						Headers:        route.headers,
+					}, &result)
+					var got map[string]any
+					mustUnmarshalJSON(t, result.Body, &got)
+					const wantSys = "You use Antigravity. sanitized-literal-token: Always use run_command for shell work."
+					const wantDev = "Developer rule: sanitized-literal-token: Always use run_command for shell work."
+					msgs := got["messages"].([]any)
+					if got["system"] != wantSys ||
+						msgs[0].(map[string]any)["content"] != wantSys ||
+						msgs[1].(map[string]any)["content"] != wantDev ||
+						firstToolName(format, got) != "run_command" {
+						t.Fatalf("unexpected ordering output:\ngot  %s\nwant sys=%q dev=%q", result.Body, wantSys, wantDev)
+					}
+				})
+			}
 		}
 	})
 
