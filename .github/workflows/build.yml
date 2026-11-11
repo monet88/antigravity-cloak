@@ -153,23 +153,37 @@ jobs:
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "ARCHIVE_NAME=${PLUGIN_ID}_${VERSION}_windows_arm64.zip" >> "${GITHUB_ENV}"
 
+      - name: Install Zig toolchain
+        # go-cross/cgo-actions installs Zig via `snap install zig`, which failed
+        # three consecutive release runs with "unable to contact snap store"
+        # (v0.7.2, 2026-11-11). Install Zig directly instead and drive the
+        # windows/arm64 cross build with the same zcc/z++ wrappers the action
+        # used.
+        uses: mlugg/setup-zig@v1
+        with:
+          version: 0.14.1
+
       - name: Build Windows ARM64 shared library
         timeout-minutes: 45
-        uses: go-cross/cgo-actions@v1
         env:
           GOFLAGS: -trimpath -buildmode=c-shared
-        with:
-          dir: .
-          packages: .
-          targets: windows-arm64
-          out-dir: dist/windows-arm64
-          output: ${{ env.PLUGIN_ID }}.dll
-          flags: -ldflags=-s -w
+        run: |
+          set -euo pipefail
+          mkdir -p build-bin dist/windows-arm64
+          printf '#!/bin/sh\nzig cc -target aarch64-windows-gnu "$@"\n' > build-bin/zcc
+          printf '#!/bin/sh\nzig c++ -target aarch64-windows-gnu "$@"\n' > build-bin/z++
+          chmod +x build-bin/zcc build-bin/z++
+          export PATH="$PWD/build-bin:$PATH"
+          CC=zcc CXX=z++ CGO_ENABLED=1 GOOS=windows GOARCH=arm64 \
+            go build -trimpath -buildmode=c-shared \
+            -ldflags "-s -w" \
+            -o "dist/windows-arm64/${PLUGIN_ID}.dll" .
+          rm -f "dist/windows-arm64/${PLUGIN_ID}.h"
 
       - name: Package plugin
         run: |
           set -euo pipefail
-          rm -f go-cross-bin.h "dist/windows-arm64/${PLUGIN_ID}.h"
+          rm -f "dist/windows-arm64/${PLUGIN_ID}.h"
           go run ./.github/scripts/package-release.go \
             -library "dist/windows-arm64/${PLUGIN_ID}.dll" \
             -archive "${ARCHIVE_NAME}" \
