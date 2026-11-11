@@ -131,3 +131,21 @@ Two defects an offline happy-path test cannot see. (a) The tier scanner missed a
 ### Prevention / Fast path
 
 A flush helper that resolves state before the caller chooses what to deliver is a latent byte-drop; push the predicate into the resolver. For byte scanners, capture raw literals and decode once, and always test a lookalike that must stay untouched — a test that only checks the intended translation passes against a corrupting matcher.
+
+## Bug 006: Release CI windows/arm64 Cross Build Failed on Snap-Zig (v0.7.2)
+
+### Symptom
+
+The `Build windows/arm64` job failed four consecutive release runs (v0.7.2 tag, 2026-11-11). Run 1-3: `error: unable to contact snap store` from `sudo snap install zig --classic --beta` (inside `go-cross/cgo-actions@v1`). Run 3 retry after switching to `mlugg/setup-zig@v1`: mirror returned 404/5xx. Run 4: zig tarball installed but `zcc: zig: not found` during `go build`; the next attempt failed silently (exit 1, zero output) at a `test -x` probe.
+
+### Root Cause
+
+A dependency chain, each layer breaking: (1) `go-cross/cgo-actions` hardcodes `sudo snap install zig` with no pre-check or bypass option, and the hosted runner could not reach the snap store. (2) `mlugg/setup-zig` relies on a community mirror that was also down. (3) The hand-rolled `find ... -type d -name 'zig-*' | sudo mv ... /usr/local/zig` layout left the binary at an unknown location - PATH lookup missed it, and the follow-up `test -x /usr/local/zig/zig` failed without printing anything because `set -e` with silent commands hides which one died.
+
+### Verified fix
+
+`.github/workflows/build.yml` (commit `a994aba`): fetch `https://ziglang.org/download/0.14.1/zig-x86_64-linux-0.14.1.tar.xz` (note: 0.14.1 switched to arch-first naming `zig-x86_64-linux-*`; the old `zig-linux-x86_64-*` spelling 404s), extract with `sudo tar -xJf ... -C /usr/local/zig --strip-components=1` so the binary lands at a deterministic path, `set -euxo pipefail` so any failure names its command, and call `/usr/local/zig/zig` by absolute path inside the `zcc`/`z++` CGO wrappers. Run 43046009111 went green and GitHub Release v0.7.2 published with all six platform zips + `checksums.txt`.
+
+### Prevention / Fast path
+
+When a hosted-runner toolchain install flakes, rerun once, then remove the flaky installer dependency instead of retrying - snap/`setup-zig` mirrors fail in bursts. Never lay down a toolchain via `find`+`sudo mv`; extract with `--strip-components=1` to a fixed path, assert `test -x`, print the version, and invoke by absolute path from wrapper scripts. Check the tarball naming convention (zig changed directory spelling at 0.14.1) with a HEAD request before committing the URL.
