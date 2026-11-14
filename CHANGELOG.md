@@ -6,6 +6,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Cur
 
 ## [Unreleased]
 
+### Fixed
+- **Reworked the OMP conversation prose walk for OpenAI-protocol carriers (Issue #59).** The request-side prose pass previously applied brand rewriting through recursive walkers that descended into every object of an OpenAI-protocol message, corrupting `cache_control` markers, `tool_use` blocks and `tool_result` metadata. The walk is now split by wire contract: `rewriteAssistantProse` rewrites assistant `content` strings, `rewriteUserTurnContent` applies brand + request-scoped tool-alias rewriting only inside `<system-reminder>` spans of user text and inside strict `type:"text"` tool-result blocks, and the OpenAI `role:"tool"` message gets its own brand pass that preserves `msg["name"]`. Text crossing the rewrite boundary is matched through rune-aware, non-cascading longest-match scanning (`sanitizeOMPPromptText` / `rewriteMachineSpan`), so a mid-rune UTF-8 boundary and a >1 MiB payload cannot produce false matches or quadratic scans. Covered by `issue59_review_red_test.go` and `issue59_sanitization_regressions_test.go`.
+
 ## [0.7.2] - 2026-11-11
 
 ### Changed

@@ -75,8 +75,10 @@ See [ADR 0003](../adr/0003-sanitize-system-prompt-conventions-tag-for-google-ups
 - **Hot-path execution**:
   - `buildOMPSanitizationRules` precomputes the merged rule slice on config
     change sorted by descending `len(match)` (ties broken by lowercase `match`).
-  - ASCII case-insensitive rules scan via `indexASCIIFold` with zero heap
-    allocations when no rule matches.
+  - `sanitizeOMPPromptText` runs one left-to-right pass, longest match first
+    at each position; replacement output is never rescanned. ASCII
+    case-insensitive rules scan via `hasPrefixASCIIFold` prefix checks with
+    zero heap allocations when no rule matches.
 
 ## Verification
 
