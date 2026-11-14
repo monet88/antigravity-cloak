@@ -67,7 +67,7 @@ func buildOMPSanitizationRules(entries []ompSanitizationEntry) []ompSanitization
 		ascii := isASCIIString(entry.Match) && isASCIIString(lower) && len(lower) == len(entry.Match)
 		var re *regexp.Regexp
 		if !ascii {
-			compiled, err := regexp.Compile("(?i)" + regexp.QuoteMeta(entry.Match))
+			compiled, err := regexp.Compile("(?i)^" + regexp.QuoteMeta(entry.Match))
 			if err != nil {
 				continue
 			}
@@ -185,34 +185,94 @@ func rewriteSystemDeveloperMessages(rootMap map[string]any, allowInputText bool,
 	return changed
 }
 
+// sanitizeOMPPromptText applies the rules in one left-to-right pass, longest
+// match first at each position. Replacement text is emitted verbatim and is
+// never rescanned, so a shorter rule can neither cascade into its own output
+// nor rewrite the output of a longer override.
 func sanitizeOMPPromptText(text string, rules []ompSanitizationRule) (string, bool) {
 	if text == "" || len(rules) == 0 {
 		return text, false
 	}
-	changed := false
+	var b strings.Builder
+	built := false
+	for i := 0; i < len(text); {
+		rule, n := ompMatchingRuleAt(text[i:], rules)
+		if rule != nil {
+			if !built {
+				b.Grow(len(text))
+				b.WriteString(text[:i])
+				built = true
+			}
+			b.WriteString(rule.replacement)
+			i += n
+			continue
+		}
+		// Step one full rune, never mid-rune: a slice starting inside a
+		// multi-byte character decodes its continuation bytes as U+FFFD, so a
+		// byte-wise step would let a U+FFFD-prefixed rule false-match valid
+		// UTF-8 and split characters into invalid output.
+		_, width := utf8.DecodeRuneInString(text[i:])
+		if width <= 0 {
+			width = 1
+		}
+		if built {
+			b.WriteString(text[i : i+width])
+		}
+		i += width
+	}
+	if !built {
+		return text, false
+	}
+	return b.String(), true
+}
+
+// ompMatchingRuleAt returns the longest rule matching at s[0]. Ties keep the
+// buildOMPSanitizationRules order, so the choice is deterministic.
+func ompMatchingRuleAt(s string, rules []ompSanitizationRule) (*ompSanitizationRule, int) {
+	var best *ompSanitizationRule
+	bestLen := 0
 	for i := range rules {
-		r := &rules[i]
-		if r.caseSensitive {
-			if !strings.Contains(text, r.match) {
-				continue
-			}
-			text = strings.ReplaceAll(text, r.match, r.replacement)
-			changed = true
-			continue
-		}
-		if r.asciiOnly {
-			if next, ok := replaceAllASCIIFold(text, r.lowerMatch, r.replacement); ok {
-				text = next
-				changed = true
-			}
-			continue
-		}
-		if r.re != nil && r.re.MatchString(text) {
-			text = r.re.ReplaceAllLiteralString(text, r.replacement)
-			changed = true
+		if n := ompRuleMatchLength(s, &rules[i]); n > bestLen {
+			best, bestLen = &rules[i], n
 		}
 	}
-	return text, changed
+	return best, bestLen
+}
+
+func ompRuleMatchLength(s string, rule *ompSanitizationRule) int {
+	switch {
+	case rule.caseSensitive:
+		if strings.HasPrefix(s, rule.match) {
+			return len(rule.match)
+		}
+	case rule.asciiOnly:
+		if hasPrefixASCIIFold(s, rule.lowerMatch) {
+			return len(rule.lowerMatch)
+		}
+	default:
+		if rule.re != nil {
+			if loc := rule.re.FindStringIndex(s); loc != nil && loc[0] == 0 {
+				return loc[1]
+			}
+		}
+	}
+	return 0
+}
+
+func hasPrefixASCIIFold(s, lowerNeedle string) bool {
+	if len(s) < len(lowerNeedle) {
+		return false
+	}
+	for i := range len(lowerNeedle) {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		if c != lowerNeedle[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func isASCIIString(s string) bool {
@@ -222,61 +282,4 @@ func isASCIIString(s string) bool {
 		}
 	}
 	return true
-}
-
-func indexASCIIFold(s, lowerNeedle string) int {
-	n := len(lowerNeedle)
-	if n == 0 || len(s) < n {
-		return -1
-	}
-	first := lowerNeedle[0]
-	firstUpper := first
-	if first >= 'a' && first <= 'z' {
-		firstUpper = first - ('a' - 'A')
-	}
-	limit := len(s) - n
-	for i := 0; i <= limit; i++ {
-		c := s[i]
-		if c != first && c != firstUpper {
-			continue
-		}
-		matched := true
-		for j := 1; j < n; j++ {
-			sc := s[i+j]
-			if sc >= 'A' && sc <= 'Z' {
-				sc += 'a' - 'A'
-			}
-			if sc != lowerNeedle[j] {
-				matched = false
-				break
-			}
-		}
-		if matched {
-			return i
-		}
-	}
-	return -1
-}
-
-func replaceAllASCIIFold(s, lowerNeedle, replacement string) (string, bool) {
-	idx := indexASCIIFold(s, lowerNeedle)
-	if idx < 0 {
-		return s, false
-	}
-	n := len(lowerNeedle)
-	var b strings.Builder
-	b.Grow(len(s) - n + len(replacement))
-	start := 0
-	for {
-		b.WriteString(s[start:idx])
-		b.WriteString(replacement)
-		start = idx + n
-		rel := indexASCIIFold(s[start:], lowerNeedle)
-		if rel < 0 {
-			break
-		}
-		idx = start + rel
-	}
-	b.WriteString(s[start:])
-	return b.String(), true
 }

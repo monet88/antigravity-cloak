@@ -874,49 +874,23 @@ func rewriteProtectedBrandText(text string, cfg *filterConfig, client string) (s
 	return current, changed
 }
 
-func rewriteProtectedBrandValue(value any, cfg *filterConfig, client string) any {
-	switch typed := value.(type) {
-	case string:
-		next, _ := rewriteProtectedBrandText(typed, cfg, client)
-		return next
-	case map[string]any:
-		for k, v := range typed {
-			typed[k] = rewriteProtectedBrandValue(v, cfg, client)
-		}
-		return typed
-	case []any:
-		for i, v := range typed {
-			typed[i] = rewriteProtectedBrandValue(v, cfg, client)
-		}
-		return typed
-	default:
-		return value
-	}
-}
-
 func rewriteProtectedBrand(rootMap map[string]any, sourceFormat, client string) {
 	cfg := activeFilterConfig()
-
-	if sysVal, ok := rootMap["system"]; ok {
-		rootMap["system"] = rewriteProtectedBrandValue(sysVal, cfg, client)
+	brandText := func(s string) (string, bool) {
+		return rewriteProtectedBrandText(s, cfg, client)
 	}
 
-	if msgsRaw, ok := rootMap["messages"].([]any); ok {
-		for _, mRaw := range msgsRaw {
-			if msg, ok := mRaw.(map[string]any); ok {
-				if role, ok := msg["role"].(string); ok && (role == "system" || role == "developer") {
-					if content, exists := msg["content"]; exists {
-						msg["content"] = rewriteProtectedBrandValue(content, cfg, client)
-					}
-				}
-			}
+	// Only prose text is in scope: a block's structural fields carry data the
+	// caller validates against, so rewriting cache_control metadata or a
+	// tool_use argument would corrupt the request instead of cloaking it.
+	if sysVal, ok := rootMap["system"]; ok {
+		if next, changed := rewritePromptTextContent(sysVal, true, brandText); changed {
+			rootMap["system"] = next
 		}
 	}
+	rewriteSystemDeveloperMessages(rootMap, true, brandText)
 
 	if toolsRaw, ok := rootMap["tools"].([]any); ok {
-		brandText := func(s string) (string, bool) {
-			return rewriteProtectedBrandText(s, cfg, client)
-		}
 		for _, tRaw := range toolsRaw {
 			tMap, ok := tRaw.(map[string]any)
 			if !ok {
@@ -1051,9 +1025,11 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		ambigRe:    buildCloakAmbiguousRe(extendedCloak),
 	}
 	rewriteToolDescriptions(rootMap, nil, proseCloak, format)
-	rewriteConversationContent(rootMap, nil, proseCloak)
+	rewriteOMPConversationProse(rootMap, nil, proseCloak)
 	if sysVal, ok := rootMap["system"]; ok {
-		if next, c := replaceToolNamesInValue(sysVal, proseCloak); c {
+		if next, c := rewriteProseTextContent(sysVal, func(s string) (string, bool) {
+			return replaceToolNamesInText(s, proseCloak)
+		}); c {
 			rootMap["system"] = next
 		}
 	}
@@ -6176,30 +6152,78 @@ func rewriteRequestBodyForClient(body []byte, sourceFormat string, forcedClient 
 	}
 
 	mappings := effectiveMappings(cfg, client)
-	rewritten, sysChanged := rewriteSystemFields(rootMap, mappings)
-	rootMap = rewritten.(map[string]any)
-	changed = changed || sysChanged
-
 	descChanged := rewriteToolDescriptions(rootMap, mappings, cachedCloak, sourceFormat)
 	changed = changed || descChanged
 
 	if runOMPPromptSanitization {
-		if rewriteConversationContent(rootMap, mappings, nil) {
+		if sysVal, ok := rootMap["system"]; ok {
+			if next, one := rewriteSystemBlockProse(sysVal, mappings); one {
+				rootMap["system"] = next
+				changed = true
+			}
+		}
+		if rewriteSystemDeveloperMessages(rootMap, true, func(s string) (string, bool) {
+			next, c := rewriteSystemBlockProse(s, mappings)
+			out, _ := next.(string)
+			return out, c
+		}) {
 			changed = true
+		}
+		// The OpenAI tool-role result is machine-generated prose too: brand it
+		// in the same pre-sanitization pass the system/developer messages get,
+		// so a brand word reaching the model through a result body is cloaked
+		// and the sanitization output written afterward is never rebranded.
+		if msgsRaw, ok := rootMap["messages"].([]any); ok {
+			for _, mRaw := range msgsRaw {
+				msg, ok := mRaw.(map[string]any)
+				if !ok || msg["role"] != "tool" {
+					continue
+				}
+				if content, exists := msg["content"]; exists {
+					if next, one := rewriteProseTextContent(content, func(s string) (string, bool) {
+						next, c := rewriteSystemValue(s, mappings)
+						out, _ := next.(string)
+						return out, c
+					}); one {
+						msg["content"] = next
+						changed = true
+					}
+				}
+			}
 		}
 		if sanitizeOMPPrompt(rootMap) {
 			changed = true
 		}
-		if cachedCloak != nil && rewriteConversationContent(rootMap, nil, cachedCloak) {
+		if cachedCloak != nil && rewriteOMPConversationProse(rootMap, mappings, cachedCloak) {
 			changed = true
 		}
-	} else if rewriteConversationContent(rootMap, mappings, cachedCloak) {
-		changed = true
+	} else {
+		// The top-level system field is branded here in both lanes: the
+		// conversation walker only reaches system/developer-role messages,
+		// never root["system"]. The block-prose helper keeps structural
+		// fields (cache_control, tool_use payloads) byte-for-byte.
+		if sysVal, ok := rootMap["system"]; ok {
+			if next, one := rewriteSystemBlockProse(sysVal, mappings); one {
+				rootMap["system"] = next
+				changed = true
+			}
+		}
+		if rewriteConversationContent(rootMap, mappings, cachedCloak) {
+			changed = true
+		}
 	}
 
 	if cachedCloak != nil {
 		if sysVal, ok := rootMap["system"]; ok {
-			next, sysToolChanged := replaceToolNamesInValue(sysVal, cachedCloak)
+			var next any
+			var sysToolChanged bool
+			if runOMPPromptSanitization {
+				next, sysToolChanged = rewriteProseTextContent(sysVal, func(s string) (string, bool) {
+					return replaceToolNamesInText(s, cachedCloak)
+				})
+			} else {
+				next, sysToolChanged = replaceToolNamesInValue(sysVal, cachedCloak)
+			}
 			if sysToolChanged {
 				rootMap["system"] = next
 				changed = true
@@ -6529,6 +6553,166 @@ func rewriteDescriptiveText(text string, mappings []rewriteMapping, cached *cach
 	return next, changed
 }
 
+// rewriteProseTextContent applies fn only to prose-bearing fields of a content
+// value: a plain string, or each block's text / input_text / thinking field.
+// Structural fields (cache_control) and tool payloads (tool_use id, name,
+// input, tool_result identity) are data the caller validates against, so they
+// stay byte-for-byte.
+func rewriteProseTextContent(value any, fn func(string) (string, bool)) (any, bool) {
+	switch content := value.(type) {
+	case string:
+		if next, changed := fn(content); changed {
+			return next, true
+		}
+	case []any:
+		changed := false
+		for _, raw := range content {
+			block, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			field := ""
+			switch block["type"] {
+			case "text", "input_text":
+				field = "text"
+			case "thinking":
+				field = "thinking"
+			}
+			if field == "" {
+				continue
+			}
+			if text, ok := block[field].(string); ok {
+				if next, one := fn(text); one {
+					block[field] = next
+					changed = true
+				}
+			}
+		}
+		return value, changed
+	}
+	return value, false
+}
+
+// rewriteSystemBlockProse brands a system content value the way
+// rewriteSystemFields does, but keeps a block's structural fields
+// (cache_control) byte-for-byte: only the prose text and recursively nested
+// prose carry the client's identity.
+func rewriteSystemBlockProse(value any, mappings []rewriteMapping) (any, bool) {
+	switch content := value.(type) {
+	case string:
+		next, changed := rewriteSystemValue(content, mappings)
+		return next, changed
+	case []any:
+		changed := false
+		for _, raw := range content {
+			block, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			btype, _ := block["type"].(string)
+			if btype != "text" && btype != "input_text" {
+				continue
+			}
+			if text, ok := block["text"].(string); ok {
+				if next, one := rewriteSystemValue(text, mappings); one {
+					block["text"] = next
+					changed = true
+				}
+			}
+		}
+		return value, changed
+	default:
+		return value, false
+	}
+}
+
+// rewriteOMPConversationProse is the Oh My Pi tool-alias prose pass over the
+// conversation, shared by the Protected OMP and User-Agent OMP agy/* routes. It
+// keeps the user-turn contract (only the client's own <system-reminder> spans
+// and tool_result payloads) and cloaks prose fields of the other roles, while
+// structural fields and tool arguments stay untouched.
+func rewriteOMPConversationProse(root map[string]any, mappings []rewriteMapping, cached *cachedCloakPatterns) bool {
+	msgsRaw, ok := root["messages"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, mRaw := range msgsRaw {
+		msg, ok := mRaw.(map[string]any)
+		if !ok {
+			continue
+		}
+		content, exists := msg["content"]
+		if !exists {
+			continue
+		}
+		switch role, _ := msg["role"].(string); role {
+		case "user":
+			if next, c := rewriteUserTurnContent(content, mappings, cached); c {
+				msg["content"] = next
+				changed = true
+			}
+			continue
+		case "assistant":
+			if next, c := rewriteAssistantProse(content, mappings, cached); c {
+				msg["content"] = next
+				changed = true
+			}
+			continue
+		}
+		// The sanitize lane already brand-rewrote the non-user, non-assistant
+		// roles (system/developer messages and the OpenAI tool role) before
+		// sanitizeOMPPrompt ran, so this post-sanitize catch-all applies the
+		// request-scoped tool aliases only: re-running the brand table here would
+		// rewrite the client's own brand words that the fresh sanitization
+		// replacement text carries as literal content.
+		if next, c := rewriteProseTextContent(content, func(s string) (string, bool) {
+			return replaceToolNamesInText(s, cached)
+		}); c {
+			msg["content"] = next
+			changed = true
+		}
+	}
+	return changed
+}
+
+// rewriteAssistantProse applies the brand mappings and request-scoped tool
+// aliases to an assistant turn's prose. Unlike system/developer content, an
+// assistant turn interleaves the model's text with the replayed tool_use calls
+// whose arguments are data the client validates against, so the payload stays
+// byte-for-byte and only the text/thinking fields carry the cloaks.
+func rewriteAssistantProse(content any, mappings []rewriteMapping, cached *cachedCloakPatterns) (any, bool) {
+	changed := false
+	switch typed := content.(type) {
+	case string:
+		return rewriteMachineSpan(typed, mappings, cached)
+	case []any:
+		for _, blockRaw := range typed {
+			block, ok := blockRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			field := ""
+			switch block["type"] {
+			case "text":
+				field = "text"
+			case "thinking":
+				field = "thinking"
+			}
+			if field == "" {
+				continue
+			}
+			if text, ok := block[field].(string); ok {
+				if next, one := rewriteMachineSpan(text, mappings, cached); one {
+					block[field] = next
+					changed = true
+				}
+			}
+		}
+	}
+	return content, changed
+}
+
 // rewriteConversationContent applies the brand mapping and the tool-name cloak
 // to every turn of the conversation, not just the system ones. Claude Code
 // inlines its own private global instructions and its whole skill catalogue as
@@ -6596,6 +6780,44 @@ func rewriteMachineSpan(block string, mappings []rewriteMapping, cached *cachedC
 	return out, c
 }
 
+// rewriteToolResultContentProse applies the request-scoped tool aliases to a
+// tool_result's content, whether it is a string or an array of text blocks, and
+// touches no metadata field.
+func rewriteToolResultContentProse(value any, mappings []rewriteMapping, cached *cachedCloakPatterns) (any, bool) {
+	prose := func(s string) (string, bool) {
+		return rewriteMachineSpan(s, mappings, cached)
+	}
+	switch content := value.(type) {
+	case string:
+		return prose(content)
+	case []any:
+		changed := false
+		for _, raw := range content {
+			block, ok := raw.(map[string]any)
+			if !ok {
+				continue
+			}
+			// The Anthropic wire types a tool_result content array as
+			// TextBlockParam | ImageBlockParam; only type:"text" blocks carry a
+			// prose field. Rewriting a stray "text" key on any other block type
+			// (image metadata, base64 data) corrupts non-prose data the way the
+			// recursive pass did, so the block type decides.
+			btype, _ := block["type"].(string)
+			if btype != "text" {
+				continue
+			}
+			if text, ok := block["text"].(string); ok {
+				if next, one := prose(text); one {
+					block["text"] = next
+					changed = true
+				}
+			}
+		}
+		return value, changed
+	}
+	return value, false
+}
+
 // rewriteUserTurnContent applies the brand mapping to a user turn, but only to
 // the parts the client generated. A user turn is not one blob: the typed
 // message, the <system-reminder> block carrying the client's private
@@ -6628,15 +6850,9 @@ func rewriteUserTurnContent(content any, mappings []rewriteMapping, cached *cach
 				// A tool result is machine-generated output echoing the alias
 				// names the model was given, so it is cloaked on both surfaces -
 				// but only on its content, never on the block's identity fields.
-				if next, c := rewriteSystemValue(block["content"], mappings); c {
+				if next, c := rewriteToolResultContentProse(block["content"], mappings, cached); c {
 					block["content"] = next
 					changed = true
-				}
-				if cached != nil {
-					if next, c := replaceToolNamesInValue(block["content"], cached); c {
-						block["content"] = next
-						changed = true
-					}
 				}
 			case "text":
 				txt, ok := block["text"].(string)
