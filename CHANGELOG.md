@@ -4,6 +4,11 @@ All notable changes to `antigravity-cloak` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Current releases use semantic version tags; the one-off `v.26.09.06` CalVer release is retained below as historical release metadata.
 
+## [0.7.4] - 2026-11-15
+
+### Fixed
+- **Sanitized Oh My Pi 18.20.0+ injected Claude Code OAuth system instruction on `agy/*` routes (Issue #59 follow-up).** Custom `anthropic-messages` models in `omp/18.20.0+` without an explicit `auth` field default to `isOAuth: true`, prepending `"You are Claude Code, Anthropic's official CLI for Claude."` with `cache_control: {"type": "ephemeral"}` onto requests that still identify as `oh_my_pi` (`X-Cloak-Client` or `User-Agent: omp/...`). Added a case-insensitive `ompClaudeCodeInstruction` preset to `defaultOMPSanitizationPresets` (`omp_prompt_sanitization.go`) rewriting that string to `antigravityIdentity` (preserving non-empty `cache_control` blocks while keeping competitor tokens out of `ompBrandMappings`), covered by `TestOMPInjectedClaudeCodeInstructionPreset` (`system_conventions_test.go`).
+
 ## [0.7.3] - 2026-11-14
 
 ### Fixed
@@ -255,7 +260,8 @@ source `4e946ac` (SHA256
 - Initial plugin implementation.
 - Added repository metadata, MIT license, and release build workflow.
 
-[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.7.3...HEAD
+[Unreleased]: https://github.com/monet88/antigravity-cloak/compare/v0.7.4...HEAD
+[0.7.4]: https://github.com/monet88/antigravity-cloak/compare/v0.7.3...v0.7.4
 [0.7.3]: https://github.com/monet88/antigravity-cloak/compare/v0.7.2...v0.7.3
 [0.7.2]: https://github.com/monet88/antigravity-cloak/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/monet88/antigravity-cloak/compare/v0.7.0...v0.7.1
