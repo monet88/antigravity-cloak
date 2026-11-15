@@ -18,7 +18,7 @@ patterns in the existing code, not from aspirational rules.
 | :--- | :--- |
 | `main.go` | Plugin core: lifecycle, interceptors, brand rewriter, stream manager, configuration. ~7.5 k lines. |
 | `issue55_agent_tier.go` | Issue #55 Claude Code fingerprint machinery (news-URL sanitation, reversible Agent model tiers). |
-| `omp_prompt_sanitization.go` | Oh My Pi `agy/*` prompt sanitization (system-conventions tags, RFC 2119 presets, live config). |
+| `omp_prompt_sanitization.go` | Oh My Pi `agy/*` prompt sanitization (system-conventions tags, RFC 2119 presets, injected OAuth instruction preset, live config). |
 | `*_test.go` (root) | Unit/lifecycle tests. `package main` — full internal access. |
 | `tests/` | Integration/e2e scripts (`.py`, `.sh`). Never invoked by `go test`. |
 | `.github/scripts/` | CI helper Go scripts with their own tests (`package-release_test.go`). |

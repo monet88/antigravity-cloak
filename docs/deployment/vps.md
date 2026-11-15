@@ -1,6 +1,6 @@
 # Installing a Custom (Non-Official) Plugin onto a Remote VPS
 
-This guide documents the procedure for deploying custom or unofficial plugins (such as `antigravity-cloak`) to a production CLIProxyAPI instance running on a remote VM (e.g. GCP VM reached through the reverse-proxied management API at `https://vps.monet.uno/api-cli`).
+This guide documents the procedure for deploying custom or unofficial plugins (such as `antigravity-cloak`) to a production CLIProxyAPI instance running on a remote VM (e.g. a remote VM reached through the reverse-proxied management API at `https://cliproxy.monet.uno` or `https://vps.monet.uno/api-cli`, routed at `/v0/management`).
 
 All operations must be performed via the management API (`/v0/management`) using the Bearer management key in the `Authorization: Bearer <key>` header. Direct SSH access or host file edits are not required.
 
@@ -53,7 +53,7 @@ Set `$base` and `$key` to your VPS API endpoint and management key:
    # POST /v0/management/plugin-store/antigravity-cloak/install
    Invoke-RestMethod -Uri "$base/v0/management/plugin-store/antigravity-cloak/install" -Method Post -Headers @{ Authorization = "Bearer $key"; "Content-Type" = "application/json" } -Body '{"version":"0.4.0"}'
    # Host downloads matching GOOS/GOARCH .so from GitHub release into plugins/linux/amd64/antigravity-cloak-v<ver>.so.
-   # Expect restart_required: false.
+   # Expect restart_required: false ONLY for first-time installs when no prior antigravity-cloak .so is loaded in memory (see Upgrading below).
    ```
 
 6. **Enable plugin**:
@@ -65,9 +65,19 @@ Set `$base` and `$key` to your VPS API endpoint and management key:
    ```powershell
    Invoke-RestMethod -Uri "$base/v0/management/plugins/antigravity-cloak/config" -Method Patch -Headers @{ Authorization = "Bearer $key"; "Content-Type" = "application/json" } -Body '{"model_prefixes":["agy"]}'
    ```
+   `PATCH /v0/management/plugins/antigravity-cloak/config` merges object maps rather than deleting omitted keys; to clear temporary `omp_prompt_sanitizations` entries, explicitly pass `{"omp_prompt_sanitizations":{}}`.
 
 8. **Verify active plugin status**:
    ```powershell
    Invoke-RestMethod -Uri "$base/v0/management/plugins" -Headers @{ Authorization = "Bearer $key" }
-   # Find antigravity-cloak with registered: true, effective_enabled: true, and path pointing at the v<ver> .so.
+   # Find antigravity-cloak with registered: true, effective_enabled: true, path pointing at v<ver> .so, and metadata.version == "<ver>".
    ```
+
+## Upgrading an Existing Installed Version
+
+When upgrading an already-loaded `antigravity-cloak` `.so` on a live host (for example `0.7.3` -> `0.7.4`), `POST /v0/management/plugin-store/antigravity-cloak/install` still reports `restart_required: false` and updates `path` in `plugins`, **but Go CGO in process memory keeps running the old loaded `.so` (`metadata.version` remains on the previous version)** and leaves **both** `antigravity-cloak-v<old>.so` and `antigravity-cloak-v<new>.so` on disk inside `plugins/linux/amd64/`.
+
+To complete an in-place upgrade cleanly without duplicate-ID plugin discovery conflicts:
+1. Run `POST /v0/management/plugin-store/antigravity-cloak/install` with the target version (`{"version":"0.7.4"}`).
+2. Stop the gateway container (`docker compose stop cli-proxy-api`), move `antigravity-cloak-v<old>.so` outside the `plugins/` discovery directory (for example `mv plugins/linux/amd64/antigravity-cloak-v0.7.3.so ./antigravity-cloak-v0.7.3.so.bak`), and start it back up (`docker compose up -d cli-proxy-api`).
+3. Confirm via `GET /v0/management/plugins` that `antigravity-cloak` reports `path: "plugins/linux/amd64/antigravity-cloak-v<new>.so"`, `metadata.version: "<new>"`, `registered: true`, and `effective_enabled: true`.

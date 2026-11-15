@@ -293,7 +293,10 @@ Verify `$OmpRoot/models.yml` has provider `cpa`, local base URL
 `http://127.0.0.1:8317/v1`, `api: openai-completions`, the local acceptance key,
 `headers: {X-Cloak-Client: oh_my_pi}`, and
 `discovery: {type: openai-models-list}`. Inspect selected fields without
-printing the whole credential-bearing file.
+printing the whole credential-bearing file. For custom `api: anthropic-messages`
+models on `omp/18.20.0+`, also set `auth: apiKey` (`ProviderAuthSchema`:
+`"apiKey" | "none" | "oauth"`) unless deliberately testing `isOAuth: true`
+OAuth prompt injection.
 
 If the model is missing (including when only Ollama appears), first check
 `GET /v1/models` on this gateway, then run:
