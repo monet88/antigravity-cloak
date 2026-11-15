@@ -46,7 +46,7 @@ coding-CLI traffic as Antigravity. Two jobs:
 - Source layout: `main.go` (plugin core), `issue55_agent_tier.go` (Issue #55
   Claude Code news-URL sanitation and reversible Agent model tiers), and
   `omp_prompt_sanitization.go` (Oh My Pi `<system-conventions>`, RFC 2119 presets,
-  and live `omp_prompt_sanitizations` config). Go unit tests (`*_test.go`) reside at
+  injected OAuth instruction preset, and live `omp_prompt_sanitizations` config). Go unit tests (`*_test.go`) reside at
   the repository root alongside `main.go` for `package main`, while `tests/` is
   dedicated to integration/e2e test scripts (`.py`, `.sh`). Upstream references
   are cloned under `.ref/` (gitignored workspace), not part of the module.
@@ -297,10 +297,10 @@ mappings may need none. A new client or a new subsystem file needs all three.
 - Build, deploy, and file ops are one-shell-each on Windows PowerShell; avoid
   piping host paths into docker exec for file deletion. Truncate inside the
   container or while it is stopped.
-- **Google Cloud Code Prompt-Injection 429 (`<system-conventions>` & RFC 2119 headers)**:
+- **Google Cloud Code Prompt-Injection 429 (`<system-conventions>`, RFC 2119 headers, & OMP OAuth instruction)**:
   - Symptom: Requests from Oh My Pi fail upstream with `429 RESOURCE_EXHAUSTED` on `daily-cloudcode-pa.googleapis.com` even with healthy quotas and valid tokens.
-  - Confirmed triggers: Oh My Pi's legacy `<system-conventions>` wrapper and its opening normative header signatures (`RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.` and `RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`); local payload bisections isolated those prompt strings.
-  - Rule: On `ProtectedAGY` and `User-Agent: omp/...` `agy/*` requests, `sanitizeOMPPrompt` (`omp_prompt_sanitization.go`) runs after brand rewriting and before prose tool-alias cloaking on top-level `system` and `system`/`developer` message text, rewriting `<system-conventions>` to `<conventions>`, both RFC 2119 clauses case-insensitively to `Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`, and any live `omp_prompt_sanitizations` operator overrides/strips. Preserve other roles, tool payloads, metadata, unmarked no-UA traffic, and bypass routes. See [the sanitization spec](docs/specs/system-conventions-sanitization.md) before extending this scope.
+  - Confirmed triggers: Oh My Pi's legacy `<system-conventions>` wrapper, its opening normative header signatures (`RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.` and `RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`), and `omp/18.20.0+`'s injected Claude Code OAuth system instruction (see `ompClaudeCodeInstruction` in `omp_prompt_sanitization.go`); local payload bisections isolated those prompt strings.
+  - Rule: On `ProtectedAGY` and `User-Agent: omp/...` `agy/*` requests, `sanitizeOMPPrompt` (`omp_prompt_sanitization.go`) runs after brand rewriting and before prose tool-alias cloaking on top-level `system` and `system`/`developer` message text, rewriting `<system-conventions>` to `<conventions>`, both RFC 2119 clauses case-insensitively to `Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`, the injected Claude Code instruction case-insensitively to `antigravityIdentity` (never `""`, preserving `cache_control` block validity), and any live `omp_prompt_sanitizations` operator overrides/strips. Preserve other roles, tool payloads, metadata, unmarked no-UA traffic, and bypass routes. See [the sanitization spec](docs/specs/system-conventions-sanitization.md) before extending this scope.
 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence

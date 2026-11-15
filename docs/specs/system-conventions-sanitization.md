@@ -2,9 +2,9 @@
 
 ## Problem and decision
 
-Empirical payload bisections of Oh My Pi (`omp/18.1.18` and `omp/18.18.8`)
+Empirical payload bisections of Oh My Pi (`omp/18.1.18`, `omp/18.18.8`, and `omp/18.20.0`)
 requests to `agy/gemini-3.8-flash` on `daily-cloudcode-pa.googleapis.com`
-isolated two prompt signatures that deterministically trigger upstream
+isolated three prompt signatures that deterministically trigger upstream
 `429 RESOURCE_EXHAUSTED` even when account quotas are healthy:
 
 1. Legacy `<system-conventions>` / `</system-conventions>` XML wrappers around
@@ -17,6 +17,14 @@ isolated two prompt signatures that deterministically trigger upstream
    Both are rewritten case-insensitively to
    `Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.` so
    enclosed `MUST` / `NEVER` / `SHOULD` / `AVOID` rules keep their full meaning.
+3. Injected Claude Code OAuth system instruction in `omp/18.20.0+`: custom
+   `anthropic-messages` models without an explicit `auth` field default to
+   `isOAuth: true`, prepending `"You are Claude Code, Anthropic's official CLI for Claude."`
+   with `cache_control: {"type": "ephemeral"}` onto requests that still advertise
+   Oh My Pi identity (`X-Cloak-Client: oh_my_pi` / `User-Agent: omp/...`).
+   Rewriting this block case-insensitively to `antigravityIdentity` removes the
+   upstream `429` trigger while keeping a non-empty `cache_control` block (empty
+   `""` stripping would trigger upstream `400` errors on Claude models).
 
 To allow operators to adapt immediately without rebuilding the CGO binary or
 restarting the container if upstream signatures evolve, the plugin exposes a
@@ -61,6 +69,10 @@ See [ADR 0003](../adr/0003-sanitize-system-prompt-conventions-tag-for-google-ups
   - Case-insensitive literal substring matches for both RFC 2119 signatures
     above $\to$ `Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.`
     (leaving prose like `The RFC 2119 word *is* the instruction` unchanged).
+  - Case-insensitive literal substring match for `You are Claude Code, Anthropic's official CLI for Claude.`
+    $\to$ `antigravityIdentity` (`You are Antigravity, ...`), keeping
+    `ompBrandMappings` free of competitor tokens while protecting `omp/18.20.0+`
+    requests whose custom `anthropic-messages` models default to `isOAuth: true`.
 - **Operator overrides (`omp_prompt_sanitizations`)**:
   - Declared in `ConfigFields` as `ConfigFieldTypeObject`.
   - Accepts `null`/omitted (built-in presets only), a JSON/YAML `map[string]string`

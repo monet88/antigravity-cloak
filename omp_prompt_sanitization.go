@@ -3,8 +3,9 @@ package main
 // Issue #59 (extending ADR 0003): inbound-only Oh My Pi system/developer prompt
 // sanitization for Google Cloud Code / Antigravity (`agy/*`) routes.
 //
-// Rewrites exact `<system-conventions>` / `</system-conventions>` tags and
-// case-insensitive Oh My Pi RFC 2119 normative header signatures, merged with
+// Rewrites exact `<system-conventions>` / `</system-conventions>` tags,
+// case-insensitive Oh My Pi RFC 2119 normative header signatures, and Oh My Pi's
+// injected Claude Code OAuth system instruction, merged with
 // live-reconfigurable `omp_prompt_sanitizations` entries precomputed on the
 // atomic `filterConfig` snapshot.
 
@@ -32,6 +33,11 @@ type ompSanitizationRule struct {
 
 const ompRFC2119KeywordsReplacement = "Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
 
+// In omp/18.20.0+, custom anthropic-messages models without an explicit `auth`
+// field default to `isOAuth: true`, prepending Claude Code's OAuth instruction
+// with `cache_control` onto requests that still advertise Oh My Pi identity.
+const ompClaudeCodeInstruction = "You are Claude Code, Anthropic's official CLI for Claude."
+
 // ompSanitizationPreset builds a built-in preset, deriving lowerMatch and the
 // ASCII fast-scan flag from the match text instead of restating them by hand.
 // lowerMatch doubles as the case-insensitive override key in
@@ -52,6 +58,7 @@ var defaultOMPSanitizationPresets = []ompSanitizationRule{
 	ompSanitizationPreset("</system-conventions>", "</conventions>", true),
 	ompSanitizationPreset("RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.", ompRFC2119KeywordsReplacement, false),
 	ompSanitizationPreset("RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.", ompRFC2119KeywordsReplacement, false),
+	ompSanitizationPreset(ompClaudeCodeInstruction, antigravityIdentity, false),
 }
 
 func buildOMPSanitizationRules(entries []ompSanitizationEntry) []ompSanitizationRule {

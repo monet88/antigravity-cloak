@@ -903,3 +903,212 @@ func TestSystemConventionsRFC2119AllLineEndings(t *testing.T) {
 		}
 	}
 }
+
+func TestOMPInjectedClaudeCodeInstructionPreset(t *testing.T) {
+	const billingHeader = "x-anthropic-billing-header: cc_version=2.1.321; cc_entrypoint=cli;"
+
+	t.Run("protected-agy-omp1820-shape", func(t *testing.T) {
+		isolateOMPMeasurement(t)
+		rawCfg, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")))
+		if code != 0 {
+			t.Fatalf("reconfigure code = %d, body = %s", code, rawCfg)
+		}
+
+		root := map[string]any{
+			"system": []any{
+				map[string]any{"type": "text", "text": billingHeader},
+				map[string]any{
+					"type":          "text",
+					"text":          ompClaudeCodeInstruction,
+					"cache_control": map[string]any{"type": "ephemeral"},
+				},
+				map[string]any{
+					"type": "text",
+					"text": "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\nUse _read when needed.",
+				},
+			},
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hi"},
+			},
+			"tools": []any{
+				map[string]any{"name": "_read", "input_schema": map[string]any{"type": "object"}},
+				map[string]any{"name": "_learn", "input_schema": map[string]any{"type": "object"}},
+			},
+		}
+
+		const reqID = "omp1820-protected"
+		var res pluginapi.RequestInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(reqID, "anthropic", ompMeasurementJSON(t, root)), &res)
+		if res.Terminate {
+			t.Fatalf("unexpected termination: %s", res.ResponseBody)
+		}
+
+		var got map[string]any
+		mustUnmarshalJSON(t, res.Body, &got)
+		sysBlocks := got["system"].([]any)
+		sys0 := sysBlocks[0].(map[string]any)
+		sys1 := sysBlocks[1].(map[string]any)
+		sys2 := sysBlocks[2].(map[string]any)
+
+		if sys0["text"] != billingHeader {
+			t.Fatalf("billing header mutated: got %q, want %q", sys0["text"], billingHeader)
+		}
+		if sys1["text"] != antigravityIdentity {
+			t.Fatalf("sys[1].text = %q, want %q", sys1["text"], antigravityIdentity)
+		}
+		cc, ok := sys1["cache_control"].(map[string]any)
+		if !ok || !reflect.DeepEqual(cc, map[string]any{"type": "ephemeral"}) {
+			t.Fatalf("sys[1].cache_control mutated: %#v", sys1["cache_control"])
+		}
+		if text2, _ := sys2["text"].(string); !strings.HasPrefix(text2, "Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\n") {
+			t.Fatalf("sys[2].text not sanitized: %q", text2)
+		}
+
+		tools := got["tools"].([]any)
+		if got0 := tools[0].(map[string]any)["name"]; got0 != "view_file" {
+			t.Fatalf("tools[0].name = %v, want %q", got0, "view_file")
+		}
+		if got1, want1 := tools[1].(map[string]any)["name"], fallbackAliasForSource("_learn"); got1 != want1 {
+			t.Fatalf("tools[1].name = %v, want %q", got1, want1)
+		}
+
+		// Idempotence on re-entry of sanitized system blocks.
+		idemRoot := map[string]any{
+			"system":   got["system"],
+			"messages": root["messages"],
+			"tools":    []any{},
+		}
+		var idemRes pluginapi.RequestInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(reqID+"-idem", "anthropic", ompMeasurementJSON(t, idemRoot)), &idemRes)
+		if idemRes.Terminate {
+			t.Fatalf("idempotence check terminated: %s", idemRes.ResponseBody)
+		}
+		var gotIdem map[string]any
+		mustUnmarshalJSON(t, idemRes.Body, &gotIdem)
+		if !reflect.DeepEqual(gotIdem["system"], got["system"]) {
+			t.Fatalf("sanitization not idempotent:\ngot  %#v\nwant %#v", gotIdem["system"], got["system"])
+		}
+
+		// Response prose restores "Antigravity" under OMP authority, never "Claude Code".
+		var respOut pluginapi.ResponseInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
+			RequestID:       reqID,
+			SourceFormat:    "anthropic",
+			Model:           "agy/measurement",
+			OriginalRequest: res.Body,
+			RequestBody:     res.Body,
+			Body:            []byte(`{"content":[{"type":"text","text":"I am Antigravity."}]}`),
+		}, &respOut)
+		if !strings.Contains(string(respOut.Body), `"I am omp."`) || strings.Contains(string(respOut.Body), "Claude") {
+			t.Fatalf("unexpected response brand restoration: %s", respOut.Body)
+		}
+	})
+
+	t.Run("ua-omp-agy-mixed-case", func(t *testing.T) {
+		isolateOMPMeasurement(t)
+		rawCfg, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")))
+		if code != 0 {
+			t.Fatalf("reconfigure code = %d, body = %s", code, rawCfg)
+		}
+
+		mixed := "you are claude code, anthropic's official cli for claude."
+		root := map[string]any{
+			"system": mixed,
+			"messages": []any{
+				map[string]any{"role": "developer", "content": mixed},
+			},
+			"tools": []any{},
+		}
+		req := pluginapi.RequestInterceptRequest{
+			RequestID:      "omp1820-ua",
+			SourceFormat:   "anthropic",
+			Model:          "agy/gemini-3.8-flash",
+			RequestedModel: "gemini-3.8-flash",
+			Body:           ompMeasurementJSON(t, root),
+			Headers:        map[string][]string{"User-Agent": {"omp/18.20.0"}},
+		}
+		var res pluginapi.RequestInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, req, &res)
+		if res.Terminate || len(res.Body) == 0 {
+			t.Fatalf("unexpected UA response: terminate=%t len=%d body=%s", res.Terminate, len(res.Body), res.ResponseBody)
+		}
+		var got map[string]any
+		mustUnmarshalJSON(t, res.Body, &got)
+		if got["system"] != antigravityIdentity {
+			t.Fatalf("system = %q, want %q", got["system"], antigravityIdentity)
+		}
+		if dev := got["messages"].([]any)[0].(map[string]any)["content"]; dev != antigravityIdentity {
+			t.Fatalf("developer content = %q, want %q", dev, antigravityIdentity)
+		}
+	})
+
+	t.Run("explicit-omp-non-agy-bypass", func(t *testing.T) {
+		isolateOMPMeasurement(t)
+		body := ompMeasurementJSON(t, map[string]any{
+			"system": []any{
+				map[string]any{
+					"type":          "text",
+					"text":          ompClaudeCodeInstruction,
+					"cache_control": map[string]any{"type": "ephemeral"},
+				},
+			},
+			"messages": []any{
+				map[string]any{"role": "user", "content": "hi"},
+			},
+			"tools": []any{
+				map[string]any{"name": "_read", "input_schema": map[string]any{"type": "object"}},
+			},
+		})
+		req := pluginapi.RequestInterceptRequest{
+			RequestID:      "omp1820-bypass",
+			SourceFormat:   "anthropic",
+			Model:          "claude-sonnet-4-6",
+			RequestedModel: "claude-sonnet-4-6",
+			Body:           body,
+			Headers:        map[string][]string{"X-Cloak-Client": {"oh_my_pi"}},
+		}
+		var res pluginapi.RequestInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, req, &res)
+		if res.Terminate {
+			t.Fatalf("unexpected termination on bypass route: %s", res.ResponseBody)
+		}
+		if len(res.Body) != 0 && !bytes.Equal(res.Body, body) {
+			t.Fatalf("non-AGY bypass route mutated request: %s", res.Body)
+		}
+	})
+
+	t.Run("operator-override", func(t *testing.T) {
+		isolateOMPMeasurement(t)
+		const customReplacement = "Custom OMP operator instruction."
+		rawCfg, code := handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte(`
+use_default_keywords: false
+omp_prompt_sanitizations:
+  "You are Claude Code, Anthropic's official CLI for Claude.": "Custom OMP operator instruction."
+`)))
+		if code != 0 {
+			t.Fatalf("reconfigure code = %d, body = %s", code, rawCfg)
+		}
+		root := map[string]any{
+			"system": []any{
+				map[string]any{
+					"type":          "text",
+					"text":          ompClaudeCodeInstruction,
+					"cache_control": map[string]any{"type": "ephemeral"},
+				},
+			},
+			"messages": []any{},
+			"tools":    []any{},
+		}
+		var res pluginapi.RequestInterceptResponse
+		ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest("omp1820-override", "anthropic", ompMeasurementJSON(t, root)), &res)
+		if res.Terminate {
+			t.Fatalf("unexpected termination: %s", res.ResponseBody)
+		}
+		var got map[string]any
+		mustUnmarshalJSON(t, res.Body, &got)
+		gotText := got["system"].([]any)[0].(map[string]any)["text"]
+		if gotText != customReplacement {
+			t.Fatalf("operator override = %q, want %q", gotText, customReplacement)
+		}
+	})
+}

@@ -149,3 +149,27 @@ A dependency chain, each layer breaking: (1) `go-cross/cgo-actions` hardcodes `s
 ### Prevention / Fast path
 
 When a hosted-runner toolchain install flakes, rerun once, then remove the flaky installer dependency instead of retrying - snap/`setup-zig` mirrors fail in bursts. Never lay down a toolchain via `find`+`sudo mv`; extract with `--strip-components=1` to a fixed path, assert `test -x`, print the version, and invoke by absolute path from wrapper scripts. Check the tarball naming convention (zig changed directory spelling at 0.14.1) with a HEAD request before committing the URL.
+
+---
+
+## Bug 007: Oh My Pi 18.20.0 Upstream 429 RESOURCE_EXHAUSTED from Injected Claude Code OAuth System Instruction
+
+### Symptom
+
+- After updating to `omp/18.20.0`, requests over `api: anthropic-messages` on `agy/*` routes (`agy/gemini-3.8-flash`, `agy/claude-sonnet-4-6`) failed upstream with `429 RESOURCE_EXHAUSTED` (`"Resource has been exhausted (e.g. check quota)."`), while `<system-conventions>` and `RFC 2119 ...` probes already returned `200 OK` on `v0.7.3`.
+
+### Root Cause
+
+1. `omp/18.20.0` changed `custom-models.ts` (`Lte(api, auth)`): custom `anthropic-messages` models without an explicit `auth` field in `models.yml` now default to `isOAuth: true`, even when authenticating with a plain proxy API key.
+2. Under `isOAuth: true`, OMP prepends two blocks to `system` (`sys[0]`: `x-anthropic-billing-header: ...` stripped by CLIProxyAPI upstream, and `sys[1]`: `"You are Claude Code, Anthropic's official CLI for Claude."` with `cache_control: {"type": "ephemeral"}`) and prefixes tools with `_`, while still sending `X-Cloak-Client: oh_my_pi`.
+3. Because the request resolves to `oh_my_pi` (`handleProtectedAGY` / `rewriteProtectedBrand`), `claudeCodeBrandMappings` did not run; `"You are Claude Code, Anthropic's official CLI for Claude."` reached `daily-cloudcode-pa.googleapis.com` verbatim and triggered upstream `429 RESOURCE_EXHAUSTED`.
+
+### Verified Fix
+
+1. Added `ompClaudeCodeInstruction` (`"You are Claude Code, Anthropic's official CLI for Claude."` $\to$ `antigravityIdentity`, case-insensitive) to `defaultOMPSanitizationPresets` in `omp_prompt_sanitization.go`, preserving the `cache_control` block as non-empty text (stripping to `""` breaks Claude upstreams with HTTP `400`). Added regression coverage in `TestOMPInjectedClaudeCodeInstructionPreset` (`system_conventions_test.go`).
+2. Applied immediate live `omp_prompt_sanitizations` override on the local gateway (`http://127.0.0.1:8317`) via `PATCH /v0/management/plugins/antigravity-cloak/config`, restoring `200 OK` even when `isOAuth: true` injects `sys[1]`.
+3. Added `auth: apiKey` (exact `ProviderAuthSchema` enum in OMP: `"apiKey" | "none" | "oauth"`) to `providers.cpa` in `C:\Users\monet\.omp\agent\models.yml`, disabling unintended Claude OAuth impersonation and verifying live round-trip execution on both chat and tool calls.
+
+### Prevention / Fast path
+
+When a new OMP release unexpectedly triggers upstream `429` despite intact `<system-conventions>` / `RFC 2119` rules, capture a single outgoing OMP wire request against a local HTTP sink first and compare `system[]` block-by-block before altering Go brand tables; push immediate mitigations via live `omp_prompt_sanitizations` while landing the preset cleanly in `omp_prompt_sanitization.go`. When setting provider `auth` in `models.yml`, always check `ProviderAuthSchema` (`"apiKey" | "none" | "oauth"` — camelCase `apiKey`, never `api-key`).

@@ -39,3 +39,8 @@ The original wrapper reproduced 429 and renaming it to `<agent-conventions>` suc
    - Rules are precomputed on the atomic `filterConfig` snapshot in longest-match-first order: operator keys matching a built-in preset case-insensitively override its replacement (including `<system-conventions>` tags and `""` empty-string stripping), independent of `use_default_keywords` and strictly one-way on inbound requests.
 3. **`User-Agent: omp/...` `agy/*` Route Coverage**:
    - Sanitization runs after brand rewriting and before prose tool-alias cloaking on both `ProtectedAGY` (`X-Cloak-Client` OMP marker on `agy/*`) and `User-Agent: omp/...` `agy/*` routes permitted by `model_prefixes`, while leaving `ExplicitOMPNonAGYBypass`, non-`agy/*` routes, unmarked no-UA traffic, other clients, and non-system carriers untouched.
+
+## Follow-up Extensions
+1. **Injected Claude Code OAuth Instruction Preset (`omp/18.20.0+`)**:
+   - Beginning with `omp/18.20.0`, custom `anthropic-messages` models without an explicit `auth` field default to `isOAuth: true` (`packages/coding-agent/src/config/custom-models.ts`), prepending `"You are Claude Code, Anthropic's official CLI for Claude."` (`cache_control: {"type": "ephemeral"}`) onto requests that still identify as `oh_my_pi`.
+   - `defaultOMPSanitizationPresets` (`omp_prompt_sanitization.go`) includes a case-insensitive preset rewriting that string to `antigravityIdentity` rather than stripping it to `""` (preserving non-empty `cache_control` blocks while keeping competitor identity strings out of `ompBrandMappings`).
