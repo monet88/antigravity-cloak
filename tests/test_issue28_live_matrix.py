@@ -26,7 +26,7 @@ BYPASS_MODEL = os.environ.get("CPA_BYPASS_MODEL", "gemini-3.8-flash")
 CANONICAL_MAPPINGS = [
     {
         "src": "read",
-        "tgt": "view_file",
+        "tgt": "read_file",
         "desc": "Read file contents",
         "params": {
             "type": "object",
@@ -38,7 +38,7 @@ CANONICAL_MAPPINGS = [
     },
     {
         "src": "write",
-        "tgt": "write_to_file",
+        "tgt": "write_file",
         "desc": "Write content to a file",
         "params": {
             "type": "object",
@@ -53,7 +53,7 @@ CANONICAL_MAPPINGS = [
     },
     {
         "src": "edit",
-        "tgt": "replace_file_content",
+        "tgt": "edit_file",
         "desc": "Replace file content",
         "params": {
             "type": "object",

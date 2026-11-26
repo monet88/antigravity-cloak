@@ -210,18 +210,18 @@ custom_mappings:
 
 	msgs := got["messages"].([]any)
 	dev := msgs[0].(map[string]any)["content"].([]any)
-	if dev[0].(map[string]any)["text"] != "Use operator-brand and the view_file tool." {
+	if dev[0].(map[string]any)["text"] != "Use operator-brand and the read_file tool." {
 		t.Fatalf("Protected developer prose missed the custom mapping/alias: %q", dev[0].(map[string]any)["text"])
 	}
 	devCall := dev[1].(map[string]any)
-	if devCall["name"] != "view_file" {
+	if devCall["name"] != "read_file" {
 		t.Fatalf("Protected declared tool_use name was not cloaked: %q", devCall["name"])
 	}
 	if !reflect.DeepEqual(devCall["input"], map[string]any{"command": "operator-call"}) {
 		t.Fatalf("Protected tool_use.input was rewritten: %#v", devCall["input"])
 	}
 
-	if asst := msgs[1].(map[string]any)["content"]; asst != "use view_file for the next step, operator-call ran" {
+	if asst := msgs[1].(map[string]any)["content"]; asst != "use read_file for the next step, operator-call ran" {
 		t.Fatalf("Protected assistant prose alias contract wrong: %q", asst)
 	}
 
@@ -229,7 +229,7 @@ custom_mappings:
 	if typed := user[0].(map[string]any)["text"]; typed != "typed operator-call" {
 		t.Fatalf("Protected typed user text was rewritten: %q", typed)
 	}
-	if resultBlock := user[1].(map[string]any)["content"]; resultBlock != "use view_file to verify, operator-call ran" {
+	if resultBlock := user[1].(map[string]any)["content"]; resultBlock != "use read_file to verify, operator-call ran" {
 		t.Fatalf("Protected tool_result payload alias contract wrong: %q", resultBlock)
 	}
 }

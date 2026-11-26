@@ -17,7 +17,7 @@ import (
 // cloak, and the non-streaming response, stream header-init, and lazy stream
 // payload fallback must all refuse to reclassify the request from the surviving
 // omp/... User-Agent. Proved entirely through the black-box handlePluginCall
-// seam: the observable contract is "view_file is never restored to read".
+// seam: the observable contract is "read_file is never restored to read".
 func TestIntegration_Precedence_InvalidExplicitSuppressesUA_Lifecycle(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	model := "agy/gemini-3.7-flash"
@@ -47,10 +47,10 @@ func TestIntegration_Precedence_InvalidExplicitSuppressesUA_Lifecycle(t *testing
 	}
 
 	// 2. Non-streaming response with the same RequestID and a surviving omp UA:
-	// the request-time negative resolution must win; view_file stays view_file.
+	// the request-time negative resolution must win; read_file stays read_file.
 	respHeaders := http.Header{}
 	respHeaders.Set("User-Agent", "omp/1.2.3")
-	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
 		makeIntegrationResponseInterceptPayloadWithHeaders(t, reqID, "openai", model, respBody, respHeaders))
 	if out := decodeEnvelopeBody(t, rawResp); len(out) != 0 {
@@ -74,7 +74,7 @@ func TestIntegration_Precedence_InvalidExplicitSuppressesUA_Lifecycle(t *testing
 	if out := decodeEnvelopeBody(t, rawInit); len(out) != 0 {
 		t.Fatalf("header-init should return empty body, got: %s", out)
 	}
-	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawChunk, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk,
 		makeIntegrationStreamChunkPayloadWithHeaders(t, reqID, "openai", model, 0, chunkBody, respHeaders))
 	if out := decodeEnvelopeBody(t, rawChunk); len(out) != 0 {
@@ -175,7 +175,7 @@ func TestIntegration_Precedence_MissingCorrelationStillRecoversViaUA(t *testing.
 	model := "agy/gemini-3.7-flash"
 	respHeaders := http.Header{}
 	respHeaders.Set("User-Agent", "omp/1.2.3")
-	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
 		makeIntegrationResponseInterceptPayloadWithHeaders(t, "prec-no-correlation-004", "openai", model, respBody, respHeaders))
 	out := decodeEnvelopeBody(t, rawResp)

@@ -46,17 +46,21 @@ func TestCC_ProvenToolsCloakViaAliasPlan(t *testing.T) {
 
 	// Tier-1: proven AGY role targets (from static table).
 	tier1Targets := []string{
-		"run_command", "view_file", "write_to_file", "replace_file_content",
+		"run_command", "read_file", "write_file", "edit_file",
 		"grep_search", "find_by_name", "invoke_subagent", "ask_question",
-		"search_web", "read_url_content",
+		"search_web",
 	}
 	for _, target := range tier1Targets {
 		if !strings.Contains(string(bodyDecoded), `"`+target+`"`) {
 			t.Errorf("missing Tier-1 target tool %q in cloaked request", target)
 		}
 	}
+	if strings.Contains(string(bodyDecoded), `"read_url_content"`) {
+		t.Errorf("removed AGY tool read_url_content must not be emitted in cloaked request")
+	}
 	// Tier-2: wp_ aliases from shared aliases (parent #32 vocabulary).
 	tier2Targets := []string{
+		"wp_fetch_url",
 		"wp_list_workers", "wp_send_message", "wp_cancel_task",
 		"wp_list_resources", "wp_read_resource",
 	}
@@ -65,10 +69,21 @@ func TestCC_ProvenToolsCloakViaAliasPlan(t *testing.T) {
 			t.Errorf("missing Tier-2 target tool %q in cloaked request", target)
 		}
 	}
-	for _, src := range []string{"Bash", "Read", "Write", "Edit"} {
+	for _, src := range []string{"Bash", "Read", "Write", "Edit", "WebFetch"} {
 		if strings.Contains(string(bodyDecoded), `"`+src+`"`) {
 			t.Errorf("found source tool %q in cloaked request (not cloaked)", src)
 		}
+	}
+
+	// Verify WebFetch round-trips cleanly via wp_fetch_url -> WebFetch.
+	respBody := []byte(`{"id":"msg_wf","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tu_wf","name":"wp_fetch_url","input":{"url":"https://example.com"}}]}`)
+	respRaw, respCode := handlePluginCall("response.intercept_after", makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-test", respBody))
+	if respCode != 0 {
+		t.Fatalf("response intercept code=%d, body=%s", respCode, respRaw)
+	}
+	respDecoded := decodeEnvelopeBody(t, respRaw)
+	if !strings.Contains(string(respDecoded), `"name":"WebFetch"`) || strings.Contains(string(respDecoded), `"wp_fetch_url"`) {
+		t.Fatalf("expected wp_fetch_url to uncloak to WebFetch, got: %s", respDecoded)
 	}
 }
 
@@ -434,7 +449,7 @@ func TestCC_NamespaceVariantCollisionFailsClosed(t *testing.T) {
 	}{
 		{"unknown namespace variants", []string{"functions:foo", "default_api:foo"}},
 		{"mapped namespace variants", []string{"functions:Read", "default_api:Read"}},
-		{"mapped and native target", []string{"functions:Read", "default_api:view_file"}},
+		{"mapped and native target", []string{"functions:Read", "default_api:read_file"}},
 	}
 
 	for _, tc := range cases {
@@ -577,7 +592,7 @@ func TestCC_ArbitraryDataFieldsUntouched(t *testing.T) {
 	bodyDecoded := string(decodeEnvelopeBody(t, rawEnvelope))
 
 	// Protocol tool declarations must be cloaked
-	if !strings.Contains(bodyDecoded, `"run_command"`) || !strings.Contains(bodyDecoded, `"view_file"`) {
+	if !strings.Contains(bodyDecoded, `"run_command"`) || !strings.Contains(bodyDecoded, `"read_file"`) {
 		t.Fatalf("tool declarations were not cloaked: %s", bodyDecoded)
 	}
 	// Metadata and user content fields must remain completely untouched
@@ -596,7 +611,7 @@ func TestDetectCloakedClient_AtFullCoverage_UnequalTableSizes(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
 	// Two qualifying clients with equal ratio (4/4 = 1.0) and equal hits (4), but unequal table sizes:
-	// codex has 4 targets (100% full coverage), claude_code has 10 targets (40% partial coverage).
+	// codex has 4 targets (100% full coverage), claude_code has 9 targets (44% partial coverage).
 	// The fully covered client must win over the partial-coverage superset client.
 	observed := []string{"run_command", "search_web", "ask_question", "invoke_subagent"}
 	got := detectCloakedClient(observed)
@@ -622,11 +637,11 @@ func TestCC_AlreadyCloakedBody_WithoutAuthority_PassesThrough(t *testing.T) {
 		]
 	}`)
 
-	// Upstream response returns tool_use for both run_command and view_file.
+	// Upstream response returns tool_use for both run_command and read_file.
 	respBody := []byte(`{
 		"content": [
 			{"type": "tool_use", "id": "tu_1", "name": "run_command", "input": {"command": "ls"}},
-			{"type": "tool_use", "id": "tu_2", "name": "view_file", "input": {"path": "main.go"}}
+			{"type": "tool_use", "id": "tu_2", "name": "read_file", "input": {"path": "main.go"}}
 		]
 	}`)
 
@@ -657,7 +672,7 @@ func TestCC_ResponseLeavesNativeTargetAlone(t *testing.T) {
 
 	reqID := "req_cc_native_target_neg"
 	// Claude Code request declares ONLY Bash (which maps to run_command).
-	// Read (which maps to view_file) is deliberately omitted.
+	// Read (which maps to read_file) is deliberately omitted.
 	reqBody := []byte(`{
 		"messages": [{"role":"user","content":"run command"}],
 		"tools": [
@@ -678,17 +693,17 @@ func TestCC_ResponseLeavesNativeTargetAlone(t *testing.T) {
 		t.Fatalf("Bash leaked in request body: %s", bodyDecoded)
 	}
 
-	// Upstream response contains both run_command (declared) and view_file
+	// Upstream response contains both run_command (declared) and read_file
 	// (native AGY target for undeclared Read).
 	respBody := []byte(`{
 		"content": [
 			{"type": "tool_use", "id": "tu_1", "name": "run_command", "input": {"command": "ls"}},
-			{"type": "tool_use", "id": "tu_2", "name": "view_file", "input": {"path": "main.go"}}
+			{"type": "tool_use", "id": "tu_2", "name": "read_file", "input": {"path": "main.go"}}
 		]
 	}`)
 
 	// 1. Correlated response path:
-	// Plan must reverse run_command -> Bash, but MUST leave view_file untouched.
+	// Plan must reverse run_command -> Bash, but MUST leave read_file untouched.
 	respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-test", respBody)
 	rawRespEnvelope, codeResp := handlePluginCall("response.intercept_after", respPayload)
 	if codeResp != 0 {
@@ -698,16 +713,16 @@ func TestCC_ResponseLeavesNativeTargetAlone(t *testing.T) {
 	if !strings.Contains(respDecoded, `"Bash"`) {
 		t.Fatalf("run_command was not uncloaked to Bash: %s", respDecoded)
 	}
-	if !strings.Contains(respDecoded, `"view_file"`) {
-		t.Fatalf("native target view_file was improperly modified in response: %s", respDecoded)
+	if !strings.Contains(respDecoded, `"read_file"`) {
+		t.Fatalf("native target read_file was improperly modified in response: %s", respDecoded)
 	}
 	if strings.Contains(respDecoded, `"Read"`) {
 		t.Fatalf("undeclared tool Read was improperly introduced into response: %s", respDecoded)
 	}
 
 	// 2. Correlated stream path:
-	// A stream chunk carrying view_file must NOT be rewritten to Read.
-	streamChunk := []byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_2","name":"view_file","input":{}}}` + "\n\n")
+	// A stream chunk carrying read_file must NOT be rewritten to Read.
+	streamChunk := []byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_2","name":"read_file","input":{}}}` + "\n\n")
 	chunkPayload := makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/claude-test", 0, streamChunk, nil)
 	rawChunkEnvelope, codeChunk := handlePluginCall("response.intercept_stream_chunk", chunkPayload)
 	if codeChunk != 0 {
@@ -716,15 +731,15 @@ func TestCC_ResponseLeavesNativeTargetAlone(t *testing.T) {
 	chunkDecoded := decodeEnvelopeBody(t, rawChunkEnvelope)
 	chunkStr := string(chunkDecoded)
 	if chunkDecoded != nil && strings.Contains(chunkStr, `"Read"`) {
-		t.Fatalf("stream chunk improperly reversed view_file to Read: %s", chunkStr)
+		t.Fatalf("stream chunk improperly reversed read_file to Read: %s", chunkStr)
 	}
-	if chunkDecoded != nil && !strings.Contains(chunkStr, `"view_file"`) {
-		t.Fatalf("stream chunk improperly altered view_file: %s", chunkStr)
+	if chunkDecoded != nil && !strings.Contains(chunkStr, `"read_file"`) {
+		t.Fatalf("stream chunk improperly altered read_file: %s", chunkStr)
 	}
 
 	// 3. Uncorrelated response path:
 	// An uncorrelated response with no matching request / without declared Read authority
-	// must leave view_file untouched and never invent Read.
+	// must leave read_file untouched and never invent Read.
 	uncorrelatedRespPayload := makeIntegrationResponseInterceptPayload(t, "req_cc_uncorrelated_neg", "anthropic", "agy/claude-test", respBody)
 	rawUncorrelatedEnvelope, codeUncorrelated := handlePluginCall("response.intercept_after", uncorrelatedRespPayload)
 	if codeUncorrelated != 0 {
@@ -734,10 +749,10 @@ func TestCC_ResponseLeavesNativeTargetAlone(t *testing.T) {
 	if uncorrelatedBody != nil {
 		uncorrelatedStr := string(uncorrelatedBody)
 		if strings.Contains(uncorrelatedStr, `"Read"`) {
-			t.Fatalf("uncorrelated response improperly reversed view_file to Read: %s", uncorrelatedStr)
+			t.Fatalf("uncorrelated response improperly reversed read_file to Read: %s", uncorrelatedStr)
 		}
-		if !strings.Contains(uncorrelatedStr, `"view_file"`) {
-			t.Fatalf("native target view_file was dropped or altered in uncorrelated response: %s", uncorrelatedStr)
+		if !strings.Contains(uncorrelatedStr, `"read_file"`) {
+			t.Fatalf("native target read_file was dropped or altered in uncorrelated response: %s", uncorrelatedStr)
 		}
 	}
 }

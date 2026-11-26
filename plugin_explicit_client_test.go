@@ -132,36 +132,36 @@ func TestIntegration_ExplicitClient_ThinOhMyPi_Roundtrip(t *testing.T) {
 	if headerContainsFold(respHeaders, explicitClientHeader) {
 		t.Fatalf("X-Cloak-Client still present in resp.Headers: %v", respHeaders)
 	}
-	if !strings.Contains(string(body), `"name":"view_file"`) {
-		t.Fatalf("request not cloaked to view_file: %s", body)
+	if !strings.Contains(string(body), `"name":"read_file"`) {
+		t.Fatalf("request not cloaked to read_file: %s", body)
 	}
 	if strings.Contains(string(body), `"name":"read"`) {
 		t.Fatalf("request leaked read: %s", body)
 	}
 
 	// Non-streaming response path must uncloak using req-time session truth.
-	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawResp2, code := handlePluginCall(pluginabi.MethodResponseInterceptAfter, makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, respBody))
 	if code != 0 {
 		t.Fatalf("response.intercept_after code=%d", code)
 	}
 	respOut := decodeEnvelopeBody(t, rawResp2)
 	if !strings.Contains(string(respOut), `"name":"read"`) {
-		t.Fatalf("response did not uncloak view_file to read: %s", respOut)
+		t.Fatalf("response did not uncloak read_file to read: %s", respOut)
 	}
-	if strings.Contains(string(respOut), "view_file") {
-		t.Fatalf("response leaked view_file: %s", respOut)
+	if strings.Contains(string(respOut), "read_file") {
+		t.Fatalf("response leaked read_file: %s", respOut)
 	}
 
 	// Streaming response path must uncloak the same way.
-	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawChunk, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, chunkBody, nil))
 	chunkOut := decodeEnvelopeBody(t, rawChunk)
 	if !strings.Contains(string(chunkOut), `"name":"read"`) {
-		t.Fatalf("stream did not uncloak view_file to read: %s", chunkOut)
+		t.Fatalf("stream did not uncloak read_file to read: %s", chunkOut)
 	}
-	if strings.Contains(string(chunkOut), "view_file") {
-		t.Fatalf("stream leaked view_file: %s", chunkOut)
+	if strings.Contains(string(chunkOut), "read_file") {
+		t.Fatalf("stream leaked read_file: %s", chunkOut)
 	}
 }
 
@@ -187,8 +187,8 @@ func TestIntegration_ExplicitClient_AliasNormalization(t *testing.T) {
 			rawResp, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
 				makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, b, headers))
 			body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
-			if !strings.Contains(string(body), `"name":"view_file"`) {
-				t.Fatalf("alias %q did not cloak read to view_file: %s", alias, body)
+			if !strings.Contains(string(body), `"name":"read_file"`) {
+				t.Fatalf("alias %q did not cloak read to read_file: %s", alias, body)
 			}
 		})
 	}
@@ -428,15 +428,15 @@ func TestIntegration_ExplicitClient_AnthropicFormat(t *testing.T) {
 	rawResp, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
 		makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", model, b, headers))
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
-	if !strings.Contains(string(body), `"name":"view_file"`) {
-		t.Fatalf("anthropic request not cloaked to view_file: %s", body)
+	if !strings.Contains(string(body), `"name":"read_file"`) {
+		t.Fatalf("anthropic request not cloaked to read_file: %s", body)
 	}
 
-	respBody := []byte(`{"content":[{"type":"tool_use","id":"tu1","name":"view_file","input":{}}]}`)
+	respBody := []byte(`{"content":[{"type":"tool_use","id":"tu1","name":"read_file","input":{}}]}`)
 	rawResp2, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter, makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", model, respBody))
 	out := decodeEnvelopeBody(t, rawResp2)
 	if !strings.Contains(string(out), `"name":"read"`) {
-		t.Fatalf("anthropic response did not uncloak view_file to read: %s", out)
+		t.Fatalf("anthropic response did not uncloak read_file to read: %s", out)
 	}
 }
 
@@ -503,7 +503,7 @@ func TestIntegration_ExplicitClient_CaseInsensitiveHeaderKey(t *testing.T) {
 	rawResp, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
 		makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, b, headers))
 	body, respHeaders, clearHeaders := decodeEnvelopeRequestIntercept(t, rawResp)
-	if !strings.Contains(string(body), `"name":"view_file"`) {
+	if !strings.Contains(string(body), `"name":"read_file"`) {
 		t.Fatalf("non-canonical header key must still cloak: %s", body)
 	}
 	if len(clearHeaders) != 1 || !strings.EqualFold(clearHeaders[0], explicitClientHeader) {
@@ -538,7 +538,7 @@ func TestIntegration_ExplicitClient_DuplicateCasingKeysCleared(t *testing.T) {
 	rawResp, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore,
 		makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, b, headers))
 	body, respHeaders, clearHeaders := decodeEnvelopeRequestIntercept(t, rawResp)
-	if !strings.Contains(string(body), `"name":"view_file"`) {
+	if !strings.Contains(string(body), `"name":"read_file"`) {
 		t.Fatalf("duplicate-case header must still cloak: %s", body)
 	}
 	if len(clearHeaders) != 2 {

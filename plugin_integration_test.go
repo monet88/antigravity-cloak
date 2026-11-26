@@ -182,13 +182,13 @@ func TestIntegration_OhMyPi_DefaultTools_SSEStreamLifecycle(t *testing.T) {
 
 	expectedCloaked := []string{
 		"run_command",
-		"view_file",
-		"replace_file_content",
+		"read_file",
+		"edit_file",
 		"grep_search",
 		"find_by_name",
 		"invoke_subagent",
 		"ask_question",
-		"write_to_file",
+		"write_file",
 	}
 	for _, exp := range expectedCloaked {
 		if !toolNames[exp] {
@@ -209,7 +209,7 @@ func TestIntegration_OhMyPi_DefaultTools_SSEStreamLifecycle(t *testing.T) {
 	sseChunks := []string{
 		"data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"run_command\",\"arguments\":\"\"}}]}}]}\n\n",
 		"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"command\\\":\\\"ls -la\\\"}\"}}]}}]}\n\n",
-		"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"view_file\",\"arguments\":\"{\\\"AbsolutePath\\\":\\\"/tmp/foo.txt\\\"}\"}}]}}]}\n\n",
+		"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":1,\"id\":\"call_2\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"AbsolutePath\\\":\\\"/tmp/foo.txt\\\"}\"}}]}}]}\n\n",
 		"data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":2,\"id\":\"call_3\",\"type\":\"function\",\"function\":{\"name\":\"invoke_subagent\",\"arguments\":\"{\\\"prompt\\\":\\\"research\\\"}\"}}]}}]}\n\n",
 		"data: [DONE]\n\n",
 	}
@@ -237,12 +237,12 @@ func TestIntegration_OhMyPi_DefaultTools_SSEStreamLifecycle(t *testing.T) {
 		t.Errorf("expected 'run_command' uncloaked to 'bash' in SSE stream, got output:\n%s", fullClientOutput)
 	}
 	if !strings.Contains(fullClientOutput, `"name":"read"`) {
-		t.Errorf("expected 'view_file' uncloaked to 'read' in SSE stream, got output:\n%s", fullClientOutput)
+		t.Errorf("expected 'read_file' uncloaked to 'read' in SSE stream, got output:\n%s", fullClientOutput)
 	}
 	if !strings.Contains(fullClientOutput, `"name":"task"`) {
 		t.Errorf("expected 'invoke_subagent' uncloaked to 'task' in SSE stream, got output:\n%s", fullClientOutput)
 	}
-	if strings.Contains(fullClientOutput, `"name":"run_command"`) || strings.Contains(fullClientOutput, `"name":"view_file"`) {
+	if strings.Contains(fullClientOutput, `"name":"run_command"`) || strings.Contains(fullClientOutput, `"name":"read_file"`) {
 		t.Errorf("leaked Antigravity tool names in client SSE output:\n%s", fullClientOutput)
 	}
 }
@@ -276,7 +276,7 @@ func TestIntegration_OhMyPi_StandaloneJSONChunks(t *testing.T) {
 
 	// Upstream returns individual JSON chunks (no "data:" prefix, no "\n\n")
 	jsonChunk1 := `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"run_command","arguments":"ls"}}]}}]}`
-	jsonChunk2 := `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"replace_file_content","arguments":"{}"}}]}}]}`
+	jsonChunk2 := `{"choices":[{"delta":{"tool_calls":[{"function":{"name":"edit_file","arguments":"{}"}}]}}]}`
 
 	chunk1Payload := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, []byte(jsonChunk1), nil)
 	rawResp1, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, chunk1Payload)
@@ -336,7 +336,7 @@ func TestIntegration_OhMyPi_VibeMode_Streaming(t *testing.T) {
 	if !containsStr(cloakedNames, "vibe_spawn") || !containsStr(cloakedNames, "vibe_send") || !containsStr(cloakedNames, "vibe_list") {
 		t.Fatalf("vibe mode tools should pass through unchanged, got: %v", cloakedNames)
 	}
-	if !containsStr(cloakedNames, "view_file") || !containsStr(cloakedNames, "run_command") {
+	if !containsStr(cloakedNames, "read_file") || !containsStr(cloakedNames, "run_command") {
 		t.Fatalf("safe mapping tools failed to cloak: %v", cloakedNames)
 	}
 	if containsStr(cloakedNames, "define_subagent") || containsStr(cloakedNames, "schedule") {
@@ -398,7 +398,7 @@ func TestIntegration_OhMyPi_AutoresearchMode_Streaming(t *testing.T) {
 	if !containsStr(cloakedNames, "init_experiment") || !containsStr(cloakedNames, "run_experiment") || !containsStr(cloakedNames, "log_experiment") || !containsStr(cloakedNames, "update_notes") {
 		t.Fatalf("autoresearch mode tools should pass through unchanged, got: %v", cloakedNames)
 	}
-	if !containsStr(cloakedNames, "view_file") || !containsStr(cloakedNames, "run_command") {
+	if !containsStr(cloakedNames, "read_file") || !containsStr(cloakedNames, "run_command") {
 		t.Fatalf("safe mapping tools failed to cloak: %v", cloakedNames)
 	}
 	if containsStr(cloakedNames, "create_goal") || containsStr(cloakedNames, "call_mcp_tool") {

@@ -104,25 +104,25 @@ func TestIntegration_UserAgent_ThinOhMyPi_Roundtrip(t *testing.T) {
 		t.Fatalf("request.intercept_before code=%d", code)
 	}
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
-	if !strings.Contains(string(body), `"name":"view_file"`) {
-		t.Fatalf("UA omp thin request not cloaked to view_file: %s", body)
+	if !strings.Contains(string(body), `"name":"read_file"`) {
+		t.Fatalf("UA omp thin request not cloaked to read_file: %s", body)
 	}
 	if strings.Contains(string(body), `"name":"read"`) {
 		t.Fatalf("leaked read: %s", body)
 	}
 	// Response path must use session truth (pre-registered).
-	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawResp2, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter, makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, respBody))
 	out := decodeEnvelopeBody(t, rawResp2)
 	if !strings.Contains(string(out), `"name":"read"`) {
-		t.Fatalf("response did not uncloak view_file to read via session: %s", out)
+		t.Fatalf("response did not uncloak read_file to read via session: %s", out)
 	}
 	// Streaming path must also use session truth.
-	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawChunk, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, chunkBody, nil))
 	chunkOut := decodeEnvelopeBody(t, rawChunk)
 	if !strings.Contains(string(chunkOut), `"name":"read"`) {
-		t.Fatalf("stream did not uncloak view_file to read via session: %s", chunkOut)
+		t.Fatalf("stream did not uncloak read_file to read via session: %s", chunkOut)
 	}
 }
 
@@ -172,7 +172,7 @@ func TestIntegration_UserAgent_CaseInsensitiveAndRequiresMapping(t *testing.T) {
 		h.Set("User-Agent", ua)
 		rawResp, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayloadWithHeaders(t, "ua-case-"+ua, "openai", model, b, h))
 		body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
-		if !strings.Contains(string(body), `"name":"view_file"`) {
+		if !strings.Contains(string(body), `"name":"read_file"`) {
 			t.Fatalf("UA %q should cloak thin OMP case-insensitively, got: %s", ua, body)
 		}
 	}
@@ -355,7 +355,7 @@ func TestIntegration_UserAgent_ValidExplicitBeatsUA(t *testing.T) {
 	bb, _ := json.Marshal(thin)
 	rawResp3, _ := handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayloadWithHeaders(t, "ua-explicit-beats-007b", "openai", model, bb, headers2))
 	body3, _, _ := decodeEnvelopeRequestIntercept(t, rawResp3)
-	if !strings.Contains(string(body3), `"name":"view_file"`) {
+	if !strings.Contains(string(body3), `"name":"read_file"`) {
 		t.Fatalf("explicit oh_my_pi should cloak thin read even with contradictory UA, got: %s", body3)
 	}
 }
@@ -454,11 +454,11 @@ func TestIntegration_UserAgent_ResponseUsesSessionTruth(t *testing.T) {
 	// This session is oh_my_pi (thin read via UA)
 	reqHeaders2 := http.Header{}
 	reqHeaders2.Set("User-Agent", "claude-cli/1.0")
-	respBody2 := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	respBody2 := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawResp2, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter, makeIntegrationResponseInterceptPayloadWithHeaders(t, reqID2, "openai", model, respBody2, reqHeaders2))
 	out2 := decodeEnvelopeBody(t, rawResp2)
 	if !strings.Contains(string(out2), `"name":"read"`) {
-		t.Fatalf("response with oh_my_pi session must uncloak view_file to read, got: %s", out2)
+		t.Fatalf("response with oh_my_pi session must uncloak read_file to read, got: %s", out2)
 	}
 }
 
@@ -469,27 +469,27 @@ func TestIntegration_UserAgent_FallbackWhenNoSessionMayUseUA(t *testing.T) {
 	// Response without prior session but with UA omp should uncloak via UA
 	reqHeaders := http.Header{}
 	reqHeaders.Set("User-Agent", "omp/1.2.3")
-	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	// Use a fresh RequestID that was never registered
 	rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter, makeIntegrationResponseInterceptPayloadWithHeaders(t, "ua-fallback-no-session-010a", "openai", model, respBody, reqHeaders))
 	out := decodeEnvelopeBody(t, rawResp)
 	if !strings.Contains(string(out), `"name":"read"`) {
-		t.Fatalf("response fallback via UA omp should uncloak view_file to read, got: %s", out)
+		t.Fatalf("response fallback via UA omp should uncloak read_file to read, got: %s", out)
 	}
-	if strings.Contains(string(out), "view_file") {
-		t.Fatalf("leaked view_file: %s", out)
+	if strings.Contains(string(out), "read_file") {
+		t.Fatalf("leaked read_file: %s", out)
 	}
 	// Response with unknown UA and thin read should not uncloak (body gate conservative, no UA)
 	unknownHeaders := http.Header{}
 	unknownHeaders.Set("User-Agent", "Mozilla/5.0")
 	rawResp2, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter, makeIntegrationResponseInterceptPayloadWithHeaders(t, "ua-fallback-no-session-010b", "openai", model, respBody, unknownHeaders))
 	out2 := decodeEnvelopeBody(t, rawResp2)
-	// Thin OMP body detection needs 4 or distinctive; view_file alone via body detection would be via cloaked detection? But detection from request body is not present here (no request body), so it should not invent client.
-	// The resp Body contains view_file but without request context, buildUncloakTable will look at empty request body? Our test supplied no RequestBody, so detection will fail and return nothing, correctly not uncloaking.
-	if !strings.Contains(string(out2), "view_file") {
-		// If it incorrectly uncloaked, it would contain read. But with unknown UA, should remain view_file
-		// So we expect no change (still view_file)
-		t.Logf("unknown UA fallback correctly left view_file untouched: %s", out2)
+	// Thin OMP body detection needs 4 or distinctive; read_file alone via body detection would be via cloaked detection? But detection from request body is not present here (no request body), so it should not invent client.
+	// The resp Body contains read_file but without request context, buildUncloakTable will look at empty request body? Our test supplied no RequestBody, so detection will fail and return nothing, correctly not uncloaking.
+	if !strings.Contains(string(out2), "read_file") {
+		// If it incorrectly uncloaked, it would contain read. But with unknown UA, should remain read_file
+		// So we expect no change (still read_file)
+		t.Logf("unknown UA fallback correctly left read_file untouched: %s", out2)
 	}
 	// Stream fallback: no session, payload chunk with UA omp, standalone JSON
 	streamHeaders := http.Header{}
@@ -528,11 +528,11 @@ func TestIntegration_UserAgent_StreamHeaderInitFallbackUsesUA(t *testing.T) {
 		t.Fatalf("header-init should return empty body, got: %s", out)
 	}
 	// Now payload chunk should use that session (via UA) to uncloak
-	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawChunk, _ := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk, makeIntegrationStreamChunkPayloadWithHeaders(t, reqID, "openai", model, 0, chunkBody, headers))
 	out := decodeEnvelopeBody(t, rawChunk)
 	if !strings.Contains(string(out), `"name":"read"`) {
-		t.Fatalf("stream payload after UA header-init must uncloak view_file to read, got: %s", out)
+		t.Fatalf("stream payload after UA header-init must uncloak read_file to read, got: %s", out)
 	}
 }
 
@@ -685,8 +685,8 @@ func TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks(t *testing.T) {
 		t.Fatalf("recognized OMP request must be rewritten, got empty body")
 	}
 	bodyStr := string(body)
-	if !strings.Contains(bodyStr, `"name":"view_file"`) {
-		t.Fatalf("read tool not cloaked to view_file: %s", bodyStr)
+	if !strings.Contains(bodyStr, `"name":"read_file"`) {
+		t.Fatalf("read tool not cloaked to read_file: %s", bodyStr)
 	}
 	if !strings.Contains(bodyStr, `"name":"run_command"`) {
 		t.Fatalf("bash tool not cloaked to run_command: %s", bodyStr)
@@ -701,8 +701,8 @@ func TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks(t *testing.T) {
 		t.Fatalf("missing 'Antigravity' replacement in request body: %s", bodyStr)
 	}
 
-	// Non-streaming response path uncloaks view_file to read
-	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	// Non-streaming response path uncloaks read_file to read
+	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawResp2, code2 := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
 		makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, respBody))
 	if code2 != 0 {
@@ -710,11 +710,11 @@ func TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks(t *testing.T) {
 	}
 	out := decodeEnvelopeBody(t, rawResp2)
 	if !strings.Contains(string(out), `"name":"read"`) {
-		t.Fatalf("response did not uncloak view_file to read: %s", out)
+		t.Fatalf("response did not uncloak read_file to read: %s", out)
 	}
 
-	// Streaming response path uncloaks view_file to read
-	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+	// Streaming response path uncloaks read_file to read
+	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawChunk, codeChunk := handlePluginCall(pluginabi.MethodResponseInterceptStreamChunk,
 		makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, chunkBody, nil))
 	if codeChunk != 0 {
@@ -722,7 +722,7 @@ func TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks(t *testing.T) {
 	}
 	chunkOut := decodeEnvelopeBody(t, rawChunk)
 	if !strings.Contains(string(chunkOut), `"name":"read"`) {
-		t.Fatalf("stream chunk did not uncloak view_file to read: %s", chunkOut)
+		t.Fatalf("stream chunk did not uncloak read_file to read: %s", chunkOut)
 	}
 
 	// Case 2: Body-based OMP detection (no UA) with >= 4 common tools
@@ -751,8 +751,8 @@ func TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks(t *testing.T) {
 		t.Fatalf("body-detected OMP request must be rewritten, got empty body")
 	}
 	bodyResStr := string(bodyRes)
-	if !strings.Contains(bodyResStr, `"name":"replace_file_content"`) {
-		t.Fatalf("edit tool not cloaked to replace_file_content: %s", bodyResStr)
+	if !strings.Contains(bodyResStr, `"name":"edit_file"`) {
+		t.Fatalf("edit tool not cloaked to edit_file: %s", bodyResStr)
 	}
 	if strings.Contains(bodyResStr, "Oh My Pi") || strings.Contains(bodyResStr, "OMP") {
 		t.Fatalf("leaked brand in body-detected OMP request: %s", bodyResStr)

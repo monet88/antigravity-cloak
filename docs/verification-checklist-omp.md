@@ -208,9 +208,9 @@ chain above is mandatory for every row, in addition to its expected result.
 
 | ID / initial status | Native -> upstream -> client | Suggested operation | Expected real result |
 | --- | --- | --- | --- |
-| OMP-01 / NOT RUN | `read -> view_file -> read` | Use read on `sample.txt`. | Exact `alpha` and `beta` lines returned. |
-| OMP-02 / NOT RUN | `write -> write_to_file -> write` | Use write to create `written.txt` containing `OMP_WRITE_OK`. | File exists with that content; independently read it after the call. |
-| OMP-03 / NOT RUN | `edit -> replace_file_content -> edit` | Read `edit-me.txt` to obtain fresh line anchors, then use edit to replace `before` with `after`. Expose `read,edit`. | Actual edit execution succeeds with OMP hashline arguments; file contains `after`. |
+| OMP-01 / NOT RUN | `read -> read_file -> read` | Use read on `sample.txt`. | Exact `alpha` and `beta` lines returned. |
+| OMP-02 / NOT RUN | `write -> write_file -> write` | Use write to create `written.txt` containing `OMP_WRITE_OK`. | File exists with that content; independently read it after the call. |
+| OMP-03 / NOT RUN | `edit -> edit_file -> edit` | Read `edit-me.txt` to obtain fresh line anchors, then use edit to replace `before` with `after`. Expose `read,edit`. | Actual edit execution succeeds with OMP hashline arguments; file contains `after`. |
 | OMP-04 / NOT RUN | `bash -> run_command -> bash` | Use bash exactly once to run `printf OMP_BASH_OK`. | Shell exits 0 and returns `OMP_BASH_OK`. |
 | OMP-05 / NOT RUN | `grep -> grep_search -> grep` | Use grep to find `beta` in the fixture directory. | Match identifies `sample.txt` and its `beta` line. |
 | OMP-06 / NOT RUN | `glob -> find_by_name -> glob` | Use glob to find `sample.txt` in the fixture directory. | Result includes the real fixture file. |
@@ -240,10 +240,10 @@ not prove every virtual device or optional tool works.
 
 | ID / initial status | Case | Required observation |
 | --- | --- | --- |
-| EXT-01 / NOT RUN | `read` directory | Real directory listing via `view_file -> read`. |
-| EXT-02 / NOT RUN | `read` URL | Read a public text URL; returned content via `view_file -> read`. Record network failures separately. |
-| EXT-03 / NOT RUN | `read` virtual device | Inspect a registered `xd://` device through `view_file -> read`; URI and device result survive unchanged. |
-| EXT-04 / NOT RUN | `write` virtual device | Dispatch a benign operation using the device's actual schema via `write_to_file -> write`; verify real execution. |
+| EXT-01 / NOT RUN | `read` directory | Real directory listing via `read_file -> read`. |
+| EXT-02 / NOT RUN | `read` URL | Read a public text URL; returned content via `read_file -> read`. Record network failures separately. |
+| EXT-03 / NOT RUN | `read` virtual device | Inspect a registered `xd://` device through `read_file -> read`; URI and device result survive unchanged. |
+| EXT-04 / NOT RUN | `write` virtual device | Dispatch a benign operation using the device's actual schema via `write_file -> write`; verify real execution. |
 | EXT-05 / NOT RUN | OMP MCP device | Exercise an available read-only `xd://mcp__<server>_<tool>` through native read/write; no conversion to `call_mcp_tool`, no URI/argument corruption. |
 | EXT-06 / NOT RUN | Top-level `mcp__*` / optional tools | If exposed, declaration is cloaked upstream via shared `wp_*` or fallback `wp_ext_<hash>` alias and restored exactly on response/stream chunks. Record N/A if this client exposes MCP only through devices. |
 

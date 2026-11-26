@@ -84,9 +84,9 @@ func (f *fiveRoleCarrierFixture) applyExpectedSanitization(sanitized string) {
 	f.root["messages"].([]any)[1].(map[string]any)["content"] = sanitized
 	if f.tool != nil {
 		if f.format == "openai" {
-			f.tool["function"].(map[string]any)["name"] = "view_file"
+			f.tool["function"].(map[string]any)["name"] = "read_file"
 		} else {
-			f.tool["name"] = "view_file"
+			f.tool["name"] = "read_file"
 		}
 	}
 }
@@ -690,7 +690,7 @@ omp_prompt_sanitizations:
 			headers:       map[string][]string{"User-Agent": {"omp/18.18.8"}},
 			msgRole:       "developer",
 			tools:         []string{"read"},
-			wantFirstTool: "view_file",
+			wantFirstTool: "read_file",
 		},
 		{
 			name:     "agy-blocked-by-model-prefixes",
@@ -715,7 +715,7 @@ omp_prompt_sanitizations:
 			headers:         map[string][]string{"X-Cloak-Client": {"invalid"}, "User-Agent": {"omp/18.18.8"}},
 			msgRole:         "developer",
 			tools:           []string{"read", "write", "edit", "bash", "hub"},
-			wantFirstTool:   "view_file",
+			wantFirstTool:   "read_file",
 			wantClearHeader: true,
 		},
 		{
@@ -724,7 +724,7 @@ omp_prompt_sanitizations:
 			model:         "agy/gemini-3.8-flash",
 			msgRole:       "developer",
 			tools:         []string{"read", "write", "edit", "bash", "hub"},
-			wantFirstTool: "view_file",
+			wantFirstTool: "read_file",
 		},
 		{
 			name:            "claude-code-on-agy",
@@ -760,7 +760,7 @@ omp_prompt_sanitizations:
 			headers:       map[string][]string{"User-Agent": {"omp/18.18.8"}},
 			msgRole:       "developer",
 			tools:         []string{"read"},
-			wantFirstTool: "view_file",
+			wantFirstTool: "read_file",
 		},
 		{
 			name:    "unsupported-gemini-format",
@@ -965,8 +965,8 @@ func TestOMPInjectedClaudeCodeInstructionPreset(t *testing.T) {
 		}
 
 		tools := got["tools"].([]any)
-		if got0 := tools[0].(map[string]any)["name"]; got0 != "view_file" {
-			t.Fatalf("tools[0].name = %v, want %q", got0, "view_file")
+		if got0 := tools[0].(map[string]any)["name"]; got0 != "read_file" {
+			t.Fatalf("tools[0].name = %v, want %q", got0, "read_file")
 		}
 		if got1, want1 := tools[1].(map[string]any)["name"], fallbackAliasForSource("_learn"); got1 != want1 {
 			t.Fatalf("tools[1].name = %v, want %q", got1, want1)

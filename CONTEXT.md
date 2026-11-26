@@ -20,19 +20,19 @@ Replaces the resolved client's own identity keywords with `Antigravity` in the r
 - **Context paths are whole-segment, both directions**: a client home directory is rewritten as a whole segment at any position (`.claude/`, `.claude\`, `.codex/`, `.codex\`), never as a bare word, and never as the tail of a larger element (`foo.claude/`, `foo.codex/`, `foo.gemini/`). Because the directory begins with a dot, which is not a word byte, the generic word-boundary test cannot see the element it is glued to: every rule carries an explicit whole-segment boundary for that. Whole-segment is the *left* boundary, and the bare form needs its right one too: the Oh My Pi inverse of the dot-segment remap (`.gemini` -> `.omp`, the end-of-string case) carries `SegmentEnd`, so the byte after it must be end of string or a path separator. Without it the generic right boundary - which accepts any non-word byte - turned `.gemini-backup` and `.gemini.foo` into `.omp-backup` and `.omp.foo`, paths the forward pass deliberately preserves and never produces. The rule is the exact mirror of the forward guard (`isDotPrefixedPathSegment`), including inside a chunk: a complete word-final match is held while its right boundary is unproven, so a stream fragment cannot resolve it early. The file name is rewritten with it for `claude_code` (`CLAUDE.md` -> `GEMINI.md`) but not for `codex`, whose `AGENTS.md` is already neutral. The JSON-escaped spelling of the Windows file rule is part of the group (`.\\.gemini\\GEMINI.md`): a path inside a tool call's arguments arrives as JSON text with every backslash doubled, and without that rule the plain directory rule claims the directory and leaves the file name behind, so the client is handed the mixed `.claude\\GEMINI.md`. The bare `CLAUDE.md` -> `AGENTS.md` brand rule belongs to `claude_code` alone: that table also carries a bare `Claude` rule, which would otherwise consume the vendor prefix inside the file name and yield `Antigravity.md`, which the reverse can only restore as `Claude.md`, corrupting the case. `codex` and `oh_my_pi` have no bare-Claude rule, so for them the file name is left verbatim. This bare rule is the approved one-way convention (see the built-in-reversibility bullet above): there is no bare `AGENTS.md` -> `CLAUDE.md` reverse, only the path-qualified reversal. Both halves of a group come from one `pathRules` call with the pairs swapped, and `TestContextGroupsAreExactInverses` holds them together. **The match is deliberately not anchored to a `~/` or `./` spelling**: live acceptance measured 114 absolute `C:\Users\<name>\.claude\...` paths per request reaching the model uncloaked, because Claude Code on Windows uses absolute paths in its system context and never the tilde form. The cost is that a `.claude` belonging to a different project is rewritten too - a path the plugin cannot distinguish. The trade is deliberate: that costs one path the model may wander into, the narrow form cost 114 on every request. A brand glued onto a leading file name (`profile.omp`, `foo.codex/config.toml`) is not a path element by this reading - the byte before its dot is a word byte - so it is masked as prose by the bare brand rule, and the reverse hands the client its own spelling back.
 
 ### 2. Tool Cloaking & Uncloaking
-- **Cloaking (Request Path)**: Translates client-native tool names (e.g., `Bash`, `read`, `shell_command`) into Antigravity-native tool names (e.g., `run_command`, `view_file`) before the request reaches the upstream LLM.
+- **Cloaking (Request Path)**: Translates client-native tool names (e.g., `Bash`, `read`, `shell_command`) into Antigravity-native tool names (e.g., `run_command`, `read_file`) before the request reaches the upstream LLM.
 - **Descriptive text takes the request-scoped aliases too**: a tool's top-level `description` and the `description` / `title` fields inside its JSON Schema (`parameters`, `input_schema`) are rewritten with both the brand mappings and the request-scoped tool aliases, through two routes that meet the same contract. The alias-plan clients (`claude_code`, `codex`) go through one seam, `rewriteDescriptiveText`, which applies the brand mappings and then the request-scoped tool aliases. The Protected Oh My Pi route applies its sentinel-aware protected-brand text in an earlier pass (`rewriteProtectedBrand`, over the same `parameters` / `input_schema` fields) and takes its aliases from the later alias-prose pass, which shares the effective declaration map; both routes therefore agree, but they are not the same function. Either way a declared tool named in its own help text reaches the model under the alias its declaration carries. Structural and literal-bearing fields (`required`, `enum`, `const`, `default`, `examples`, property names) keep the client's spelling: rewriting them would leave a schema no arguments can satisfy.
 - **Uncloaking (Response & Stream Path)**: Reverses the translation in upstream responses (JSON bodies and SSE stream chunks) back to the client's native tool names so the client remains unaware of the disguise.
-- **MCP Tools & Virtual Devices**: In Protected OMP and alias plans (Claude Code, Codex), dynamic top-level `mcp__*` declarations receive deterministic reversible fallback aliases (`wp_ext_<hash>`). Oh My Pi also mounts virtual devices (`xd://mcp__<server>_<tool>`) reached through core `read`/`write` (`view_file`/`write_to_file`).
+- **MCP Tools & Virtual Devices**: In Protected OMP and alias plans (Claude Code, Codex), dynamic top-level `mcp__*` declarations receive deterministic reversible fallback aliases (`wp_ext_<hash>`). Oh My Pi also mounts virtual devices (`xd://mcp__<server>_<tool>`) reached through core `read`/`write` (`read_file`/`write_file`).
 
 #### Cloak Mapping Tables
 
 ##### 1. Oh My Pi (`oh_my_pi` / `omp`) — Safe Mapping Set
 | Native Tool | Antigravity Cloaked Name | Classification | Description |
 | :--- | :--- | :--- | :--- |
-| `read` | `view_file` | Transport Exception | Read files, directories, URLs, and `xd://` virtual devices |
-| `write` | `write_to_file` | Transport Exception | Create/overwrite files and dispatch `xd://` devices |
-| `edit` | `replace_file_content` | Semantic Alias | Line-anchored code patch (preserves OMP hashline wire format) |
+| `read` | `read_file` | Transport Exception | Read files, directories, URLs, and `xd://` virtual devices |
+| `write` | `write_file` | Transport Exception | Create/overwrite files and dispatch `xd://` devices |
+| `edit` | `edit_file` | Semantic Alias | Line-anchored code patch (preserves OMP hashline wire format) |
 | `bash` | `run_command` | Direct Semantic Alias | Execute persistent shell commands |
 | `grep` | `grep_search` | Direct Semantic Alias | Regex file search |
 | `glob` | `find_by_name` | Direct Semantic Alias | Match and glob files/directories by pattern |
@@ -57,22 +57,21 @@ Tools beyond the canonical Safe Mapping Set are cloaked on Protected routes via 
 
 | CC Tool | Antigravity Target | Status | Classification / Note |
 | :--- | :--- | :--- | :--- |
-| `Read` | `view_file` | `DECL` | Direct semantic alias |
-| `Write` | `write_to_file` | `DECL` | Direct semantic alias |
-| `Edit` | `replace_file_content` | `DECL` | Direct semantic alias |
+| `Read` | `read_file` | `DECL` | Direct semantic alias |
+| `Write` | `write_file` | `DECL` | Direct semantic alias |
+| `Edit` | `edit_file` | `DECL` | Direct semantic alias |
 | `Bash` | `run_command` | `DECL` | Direct semantic alias |
 | `Grep` | `grep_search` | `DECL` | Direct semantic alias |
 | `Glob` | `find_by_name` | `DECL` | Direct semantic alias (pattern-matching file finder) |
 | `Agent` | `invoke_subagent` | `DECL` | Direct semantic alias |
 | `AskUserQuestion` | `ask_question` | `TEST` | Direct semantic alias; not present in the 20-tool live declaration set |
 | `WebSearch` | `search_web` | `TEST` | Direct semantic alias; not present in the 20-tool live declaration set |
-| `WebFetch` | `read_url_content` | `DECL` | Direct semantic alias |
 
 **Tier-2 Shared Aliases & Tier-3 Fallback Aliases** (parent #32 / issue #36):
 Tools without a 1:1 AGY equivalent receive stable shared aliases (`wp_*`) via `claudeCodeSharedAliases`:
 - Subagent control: `ListAgents` $\to$ `wp_list_workers`, `TaskStop` $\to$ `wp_cancel_task`, `SendMessage` $\to$ `wp_send_message`
 - MCP resources: `ListMcpResourcesTool` $\to$ `wp_list_resources`, `ReadMcpResourceTool` $\to$ `wp_read_resource`, `ReadMcpResourceDirTool` $\to$ `wp_list_resource_dir`, `WaitForMcpServers` $\to$ `wp_wait_integrations`
-- Extended/Planning/Workflow: `ToolSearch` $\to$ `wp_find_tools`, `Skill` $\to$ `wp_invoke_skill`, `Workflow` $\to$ `wp_run_workflow`, `NotebookEdit` $\to$ `wp_edit_notebook`, `ReportFindings` $\to$ `wp_submit_report`, `EnterPlanMode` / `ExitPlanMode` $\to$ `wp_begin_planning` / `wp_finish_planning`, `EnterWorktree` / `ExitWorktree` $\to$ `wp_open_worktree` / `wp_close_worktree`, `ScheduleWakeup` $\to$ `wp_set_wakeup`, `CronCreate` / `CronDelete` / `CronList` $\to$ `wp_create_schedule` / `wp_delete_schedule` / `wp_list_schedules`
+- Extended/Planning/Workflow: `WebFetch` $\to$ `wp_fetch_url` (`read_url_content` was removed in AGY 2.25.0+), `ToolSearch` $\to$ `wp_find_tools`, `Skill` $\to$ `wp_invoke_skill`, `Workflow` $\to$ `wp_run_workflow`, `NotebookEdit` $\to$ `wp_edit_notebook`, `ReportFindings` $\to$ `wp_submit_report`, `EnterPlanMode` / `ExitPlanMode` $\to$ `wp_begin_planning` / `wp_finish_planning`, `EnterWorktree` / `ExitWorktree` $\to$ `wp_open_worktree` / `wp_close_worktree`, `ScheduleWakeup` $\to$ `wp_set_wakeup`, `CronCreate` / `CronDelete` / `CronList` $\to$ `wp_create_schedule` / `wp_delete_schedule` / `wp_list_schedules`
 - Deferred tool placeholders: `DeferredToolPlaceholder` $\to$ `wp_resolve_tool` (carried exclusively across normal protocol tool-identity positions: `tools[]`, message `tool_calls`/`tool_use`, and `tool_choice`; no unobserved special discovery carrier is claimed)
 - Undeclared tools and dynamic `mcp__*` tools receive deterministic fallback aliases (`wp_ext_<hash>`).
 - Request-scoped reversal (`requestsRequestScopedReverse`) narrows uncloaking to the active alias plan for that request, restoring exact declared source identities.
@@ -129,7 +128,7 @@ An invalid explicit value records an authoritative negative resolution (`negativ
 
 #### 4. Identity Inventories & Target Corroboration Rule (Issue #26)
 - **OMP Source Identity Inventory**: Static finite set comprising the 9 Safe Mapping Set sources plus legacy detection names (`todo`, `hub`, `eval`, `vibe_*`, Autoresearch names). Does not depend on runtime `ToolMappings`.
-- **OMP Cloaked-Target Inventory**: Exactly the 9 canonical AGY targets (`view_file`, `write_to_file`, `replace_file_content`, `run_command`, `grep_search`, `find_by_name`, `invoke_subagent`, `ask_question`, `search_web`).
+- **OMP Cloaked-Target Inventory**: Exactly the 9 canonical AGY targets (`read_file`, `write_file`, `edit_file`, `run_command`, `grep_search`, `find_by_name`, `invoke_subagent`, `ask_question`, `search_web`).
 - **Corroboration-Only Rule**: Because canonical targets are native Antigravity tools, target names alone are never standalone OMP attribution. Target-only no-marker traffic cannot resolve to OMP.
 
 #### 5. Request-Scoped Active Reverse Authority

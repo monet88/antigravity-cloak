@@ -170,10 +170,10 @@ func TestRewriteRequestBodyCloaksClaudeCodeTools(t *testing.T) {
 		t.Errorf("tools[0] description = %q, want 'Run Antigravity shell commands'", desc)
 	}
 
-	// Assert tools[1].function.name == "view_file"
+	// Assert tools[1].function.name == "read_file"
 	t1 := toolsRaw[1].(map[string]any)["function"].(map[string]any)
-	if name := t1["name"].(string); name != "view_file" {
-		t.Errorf("tools[1] name = %q, want view_file", name)
+	if name := t1["name"].(string); name != "read_file" {
+		t.Errorf("tools[1] name = %q, want read_file", name)
 	}
 
 	// Assert tool_choice.function.name == "run_command"
@@ -400,8 +400,8 @@ func TestRewriteRequestBodyCloaksAnthropicFormat(t *testing.T) {
 	}
 
 	t1 := toolsRaw[1].(map[string]any)
-	if name := t1["name"].(string); name != "view_file" {
-		t.Errorf("tools[1] name = %q, want view_file", name)
+	if name := t1["name"].(string); name != "read_file" {
+		t.Errorf("tools[1] name = %q, want read_file", name)
 	}
 
 	msgs := parsed["messages"].([]any)
@@ -483,7 +483,7 @@ func TestDetectClient(t *testing.T) {
 		// detectClient only matches original (cloak table key) names; Antigravity
 		// native tools are NOT keys, so detectClient returns "" for them.
 		{"antigravity tools return empty", []string{"ask_permission", "run_command"}, ""},
-		{"antigravity-like invoke_subagent", []string{"invoke_subagent", "view_file"}, ""},
+		{"antigravity-like invoke_subagent", []string{"invoke_subagent", "read_file"}, ""},
 		{"unknown tools", []string{"custom_tool", "another_tool"}, ""},
 		{"empty list", []string{}, ""},
 		// Only 1 original key match → below threshold of 2
@@ -528,7 +528,7 @@ func TestDetectCloakedClient(t *testing.T) {
 		// Only Tier-1 AGY roles are in the static table; Tier-2 (ListAgents,
 		// SendMessage, TaskStop, MCP resources) are in shared aliases, whose
 		// wp_ targets are not in the static uncloak table.
-		{"cloaked claude code", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "find_by_name", "invoke_subagent", "ask_question", "search_web", "read_url_content"}, "claude_code"},
+		{"cloaked claude code", []string{"run_command", "edit_file", "read_file", "write_file", "grep_search", "find_by_name", "invoke_subagent", "ask_question", "search_web"}, "claude_code"},
 		// Codex cloak TARGETS present → detected as codex.
 		// The static codex table now has fewer targets (exec->run_command,
 		// web_search->search_web, request_user_input->ask_question,
@@ -543,7 +543,7 @@ func TestDetectCloakedClient(t *testing.T) {
 		// the target-coverage fallback.
 		{"cloaked codex with pass-throughs stays undetected", []string{"run_command", "wait", "request_user_input_async", "sleep", "send_message", "wait_agent", "interrupt_agent", "ask_question", "invoke_subagent"}, ""},
 		// Both clients' targets present (native Antigravity) → returns ""
-		{"native antigravity superset", []string{"run_command", "replace_file_content", "view_file", "write_to_file", "grep_search", "find_by_name", "invoke_subagent", "ask_question", "search_web", "read_url_content", "multi_replace_file_content", "generate_image", "define_subagent", "list_permissions", "ask_permission"}, ""},
+		{"native antigravity superset", []string{"run_command", "edit_file", "read_file", "write_file", "grep_search", "find_by_name", "invoke_subagent", "ask_question", "search_web", "multi_replace_file_content", "generate_image", "define_subagent", "list_permissions", "ask_permission"}, ""},
 		// Too few targets → no match
 		{"too few matches", []string{"run_command", "ask_question"}, ""},
 		// Unknown tools → no match
@@ -614,9 +614,9 @@ func TestExtractToolNames(t *testing.T) {
 func TestReplaceToolNamesInText(t *testing.T) {
 	cloakTable := map[string]string{
 		"bash":            "run_command",
-		"read":            "view_file",
-		"edit":            "replace_file_content",
-		"write":           "write_to_file",
+		"read":            "read_file",
+		"edit":            "edit_file",
+		"write":           "write_file",
 		"agent":           "invoke_subagent",
 		"skill":           "call_mcp_tool",
 		"workflow":        "schedule",
@@ -632,8 +632,8 @@ func TestReplaceToolNamesInText(t *testing.T) {
 	}{
 		// Tier 1: Quoted context — all names, including ambiguous ones
 		{"backtick-quoted name", "Use `bash` to run", "Use `run_command` to run", true},
-		{"backtick ambiguous name", "call `read` first", "call `view_file` first", true},
-		{"double-quoted name", `Use "edit" tool`, `Use "replace_file_content" tool`, true},
+		{"backtick ambiguous name", "call `read` first", "call `read_file` first", true},
+		{"double-quoted name", `Use "edit" tool`, `Use "edit_file" tool`, true},
 		{"double-quoted ambiguous", `the "agent" handles`, `the "invoke_subagent" handles`, true},
 
 		// Tier 2: Word-boundary for unambiguous names (underscore, camelCase)
@@ -642,14 +642,14 @@ func TestReplaceToolNamesInText(t *testing.T) {
 
 		// Tier 3: Pattern-based for ambiguous names
 		{"the X tool pattern", "the bash tool runs", "the run_command tool runs", true},
-		{"the X function pattern", "the edit function", "the replace_file_content function", true},
-		{"the X command pattern", "the read command", "the view_file command", true},
-		{"use X pattern", "use read to view", "use view_file to view", true},
-		{"call X pattern", "call edit on file", "call replace_file_content on file", true},
+		{"the X function pattern", "the edit function", "the edit_file function", true},
+		{"the X command pattern", "the read command", "the read_file command", true},
+		{"use X pattern", "use read to view", "use read_file to view", true},
+		{"call X pattern", "call edit on file", "call edit_file on file", true},
 		{"invoke X pattern", "invoke agent now", "invoke invoke_subagent now", true},
-		{"with X pattern", "with write to save", "with write_to_file to save", true},
+		{"with X pattern", "with write to save", "with write_file to save", true},
 		{"case insensitive pattern", "Use Bash to run", "Use run_command to run", true},
-		{"the X tool case insensitive", "The Read Tool", "The view_file Tool", true},
+		{"the X tool case insensitive", "The Read Tool", "The read_file Tool", true},
 
 		// False-positive protection — ambiguous names NOT replaced in plain prose
 		{"plain prose read", "read the file contents", "read the file contents", false},
@@ -706,8 +706,8 @@ func TestToolDescriptionReplacesToolNames(t *testing.T) {
 
 	t1 := tools[1].(map[string]any)["function"].(map[string]any)
 	desc1 := t1["description"].(string)
-	if !strings.Contains(desc1, "view_file") {
-		t.Fatalf("expected description to contain 'view_file', got %q", desc1)
+	if !strings.Contains(desc1, "read_file") {
+		t.Fatalf("expected description to contain 'read_file', got %q", desc1)
 	}
 }
 
@@ -737,8 +737,8 @@ func TestSystemMessageReplacesToolNames(t *testing.T) {
 	if !strings.Contains(content, "run_command") {
 		t.Fatalf("expected system message to contain 'run_command', got %q", content)
 	}
-	if !strings.Contains(content, "view_file") {
-		t.Fatalf("expected system message to contain 'view_file', got %q", content)
+	if !strings.Contains(content, "read_file") {
+		t.Fatalf("expected system message to contain 'read_file', got %q", content)
 	}
 	// Tool-reference contexts ("Use Bash", "Call Read", "The Edit tool") are replaced.
 	if strings.Contains(content, "Use Bash") {
@@ -755,15 +755,14 @@ func TestBuildUncloakTableWithCloakedRequest(t *testing.T) {
 	cloakedReqBody := `{
 		"tools":[
 			{"type":"function","function":{"name":"run_command"}},
-			{"type":"function","function":{"name":"replace_file_content"}},
-			{"type":"function","function":{"name":"view_file"}},
-			{"type":"function","function":{"name":"write_to_file"}},
+			{"type":"function","function":{"name":"edit_file"}},
+			{"type":"function","function":{"name":"read_file"}},
+			{"type":"function","function":{"name":"write_file"}},
 			{"type":"function","function":{"name":"grep_search"}},
 			{"type":"function","function":{"name":"find_by_name"}},
 			{"type":"function","function":{"name":"invoke_subagent"}},
 			{"type":"function","function":{"name":"ask_question"}},
-			{"type":"function","function":{"name":"search_web"}},
-			{"type":"function","function":{"name":"read_url_content"}}
+			{"type":"function","function":{"name":"search_web"}}
 		],
 		"messages":[]
 	}`
@@ -1366,9 +1365,9 @@ func TestRewriteRequestBodyCloaksOhMyPiTools(t *testing.T) {
 	// Assert tools cloaked according to the canonical Safe Mapping Set
 	toolsRaw := parsed["tools"].([]any)
 	expectedMap := map[string]string{
-		"read":       "view_file",
-		"write":      "write_to_file",
-		"edit":       "replace_file_content",
+		"read":       "read_file",
+		"write":      "write_file",
+		"edit":       "edit_file",
 		"bash":       "run_command",
 		"grep":       "grep_search",
 		"glob":       "find_by_name",
@@ -1413,13 +1412,13 @@ func TestRewriteRequestBodyCloaksOhMyPiTools(t *testing.T) {
 	asstMsg := msgs[2].(map[string]any)
 	tcs := asstMsg["tool_calls"].([]any)
 	tc0 := tcs[0].(map[string]any)["function"].(map[string]any)
-	if tc0["name"] != "view_file" {
-		t.Errorf("messages[2].tool_calls[0].name = %q, want view_file", tc0["name"])
+	if tc0["name"] != "read_file" {
+		t.Errorf("messages[2].tool_calls[0].name = %q, want read_file", tc0["name"])
 	}
 	// Tool response message name
 	toolMsg := msgs[3].(map[string]any)
-	if toolMsg["name"] != "view_file" {
-		t.Errorf("messages[3].name = %q, want view_file", toolMsg["name"])
+	if toolMsg["name"] != "read_file" {
+		t.Errorf("messages[3].name = %q, want read_file", toolMsg["name"])
 	}
 
 	// Assert system message prose cloaking: "Use bash" -> "Use run_command"
@@ -1453,8 +1452,8 @@ func TestRewriteRequestBodyCloaksOhMyPiToolsAnthropicFormat(t *testing.T) {
 
 	toolsRaw := parsed["tools"].([]any)
 	t0 := toolsRaw[0].(map[string]any)
-	if t0["name"] != "view_file" {
-		t.Errorf("tools[0].name = %q, want view_file", t0["name"])
+	if t0["name"] != "read_file" {
+		t.Errorf("tools[0].name = %q, want read_file", t0["name"])
 	}
 	t1 := toolsRaw[1].(map[string]any)
 	if t1["name"] != "run_command" {
@@ -1467,8 +1466,8 @@ func TestRewriteRequestBodyCloaksOhMyPiToolsAnthropicFormat(t *testing.T) {
 
 	msgs := parsed["messages"].([]any)
 	cnt := msgs[0].(map[string]any)["content"].([]any)[0].(map[string]any)
-	if cnt["name"] != "view_file" {
-		t.Errorf("content[0].name = %q, want view_file", cnt["name"])
+	if cnt["name"] != "read_file" {
+		t.Errorf("content[0].name = %q, want read_file", cnt["name"])
 	}
 }
 
@@ -1494,7 +1493,7 @@ func TestUncloakResponseBodyOhMyPi(t *testing.T) {
 
 	// Anthropic shape
 	respAnthropic := []byte(`{
-		"content":[{"type":"tool_use","id":"tool_1","name":"view_file","input":{}}]
+		"content":[{"type":"tool_use","id":"tool_1","name":"read_file","input":{}}]
 	}`)
 	outAnth, changedAnth := uncloakResponseBody(respAnthropic, uncloakTable, "anthropic")
 	if !changedAnth {
@@ -1531,7 +1530,7 @@ func TestDetectClientOhMyPi(t *testing.T) {
 
 	// Cloaked tool names detection: target names alone are never sufficient
 	// to attribute to oh_my_pi without an independent signal.
-	cloakedTargets := []string{"view_file", "run_command", "replace_file_content", "write_to_file", "grep_search", "find_by_name", "invoke_subagent", "ask_question", "search_web"}
+	cloakedTargets := []string{"read_file", "run_command", "edit_file", "write_file", "grep_search", "find_by_name", "invoke_subagent", "ask_question", "search_web"}
 	cloakedClient := detectCloakedClient(cloakedTargets)
 	if cloakedClient == "oh_my_pi" {
 		t.Fatalf("detectCloakedClient(%v) = %q, want non-oh_my_pi for standalone targets", cloakedTargets, cloakedClient)
@@ -1587,10 +1586,10 @@ tool_mappings:
 	nonInjectiveCanonicalYAML := []byte(`
 tool_mappings:
   omp:
-    my_read: "view_file"
+    my_read: "read_file"
 `)
 	if _, err := parseFilterConfigYAML(nonInjectiveCanonicalYAML); err == nil {
-		t.Fatal("expected custom tool mapping to canonical target 'view_file' to be rejected")
+		t.Fatal("expected custom tool mapping to canonical target 'read_file' to be rejected")
 	}
 
 	// 4. Reject non-injective mapping: duplicate custom targets
@@ -1642,8 +1641,8 @@ tool_mappings:
 		target string
 	}{
 		{"internal_space", "has space"},
-		{"trailing_space", "view_file "},
-		{"leading_space", " view_file"},
+		{"trailing_space", "read_file "},
+		{"leading_space", " read_file"},
 		{"tab", "view\tfile"},
 		{"trailing_tab", "custom_target\t"},
 	}
@@ -1788,7 +1787,7 @@ func TestMCPPassthroughBothDirections(t *testing.T) {
 		t.Fatal("expected Anthropic request body to be rewritten")
 	}
 	anthOut := string(anthBody)
-	if !strings.Contains(anthOut, `"name":"write_to_file"`) {
+	if !strings.Contains(anthOut, `"name":"write_file"`) {
 		t.Fatalf("expected omp write cloaked in Anthropic body: %s", anthOut)
 	}
 	if !strings.Contains(anthOut, `"name":"mcp__jira__search"`) {
@@ -1798,7 +1797,7 @@ func TestMCPPassthroughBothDirections(t *testing.T) {
 	// Response side (Anthropic shape): MCP tool_use round-trips untouched
 	// while native Antigravity names restore.
 	modified, respChanged := uncloakResponseBody(
-		[]byte(`{"content":[{"type":"tool_use","id":"t1","name":"view_file","input":{}},`+
+		[]byte(`{"content":[{"type":"tool_use","id":"t1","name":"read_file","input":{}},`+
 			`{"type":"tool_use","id":"t2","name":"mcp__github__list_issues","input":{}}]}`),
 		defaultUncloakTables["oh_my_pi"], "anthropic")
 	if !respChanged {
@@ -1849,7 +1848,7 @@ func TestStreamUncloakAnthropicSSE(t *testing.T) {
 		SourceFormat: "anthropic",
 		ChunkIndex:   0,
 		Body: []byte("event: content_block_start\r\n" +
-			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"view_f`),
+			`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"read_f`),
 	}, "anthropic")
 	if !resp1.DropChunk {
 		t.Fatal("first Anthropic chunk should be buffered as an incomplete event")
@@ -1866,11 +1865,11 @@ func TestStreamUncloakAnthropicSSE(t *testing.T) {
 	}, "anthropic")
 
 	out := string(resp2.Body)
-	if strings.Contains(out, "view_file") {
-		t.Fatalf("cloaked name 'view_file' leaked through: %s", out)
+	if strings.Contains(out, "read_file") {
+		t.Fatalf("cloaked name 'read_file' leaked through: %s", out)
 	}
 	if !strings.Contains(out, `"name":"read"`) && !strings.Contains(out, `"name": "read"`) {
-		t.Fatalf("expected view_file restored to read in Anthropic stream: %s", out)
+		t.Fatalf("expected read_file restored to read in Anthropic stream: %s", out)
 	}
 
 	mgr.mu.Lock()
@@ -2486,7 +2485,7 @@ func TestStreamSessionManagerCleanupStalePreservesProtectedActiveSession(t *test
 func TestDetectCloakedClientOhMyPiStandardNineTools(t *testing.T) {
 	// Canonical 9 tools sent by Oh My Pi after cloaking (using find_by_name, not list_dir)
 	ompCloakedTools := []string{
-		"view_file", "write_to_file", "replace_file_content",
+		"read_file", "write_file", "edit_file",
 		"run_command", "grep_search", "find_by_name",
 		"invoke_subagent", "ask_question", "search_web",
 	}
@@ -2507,7 +2506,7 @@ func TestDetectCloakedClientNamespaceNormalized(t *testing.T) {
 	// A namespaced (qualified) cloaked set must contribute one observed
 	// identity per declared tool and never inflate the denominator with aliases.
 	qualifiedNine := []string{
-		"functions:view_file", "functions:write_to_file", "functions:replace_file_content",
+		"functions:read_file", "functions:write_file", "functions:edit_file",
 		"functions:run_command", "functions:grep_search", "functions:find_by_name",
 		"functions:invoke_subagent", "functions:ask_question", "functions:search_web",
 	}
@@ -2521,7 +2520,7 @@ func TestDetectCloakedClientNamespaceNormalized(t *testing.T) {
 
 	// Mixed qualified/unqualified forms of the same tool de-duplicate to one identity.
 	mixed := []string{
-		"view_file", "functions:write_to_file", "default_api:replace_file_content",
+		"read_file", "functions:write_file", "default_api:edit_file",
 		"run_command", "grep_search", "find_by_name",
 		"invoke_subagent", "ask_question", "search_web",
 	}
@@ -2535,7 +2534,7 @@ func TestDetectCloakedClientNamespaceNormalized(t *testing.T) {
 	// A set of observed identities that is mostly non-targets (below the 80%
 	// observed-coverage threshold) must not qualify as any client.
 	belowThreshold := []string{
-		"functions:view_file", "functions:write_to_file", "functions:replace_file_content",
+		"functions:read_file", "functions:write_file", "functions:edit_file",
 		"functions:run_command", "functions:custom_a", "functions:custom_b",
 		"functions:custom_c", "functions:custom_d", "functions:custom_e",
 	}
@@ -2554,9 +2553,9 @@ func TestBuildUncloakTableFallbackQualified(t *testing.T) {
 	// Target names alone MUST NOT authorize OMP reverse mutation.
 	body := `{
 		"tools":[
-			{"type":"function","function":{"name":"functions:view_file"}},
-			{"type":"function","function":{"name":"functions:write_to_file"}},
-			{"type":"function","function":{"name":"functions:replace_file_content"}},
+			{"type":"function","function":{"name":"functions:read_file"}},
+			{"type":"function","function":{"name":"functions:write_file"}},
+			{"type":"function","function":{"name":"functions:edit_file"}},
 			{"type":"function","function":{"name":"functions:run_command"}},
 			{"type":"function","function":{"name":"functions:grep_search"}},
 			{"type":"function","function":{"name":"functions:find_by_name"}},
@@ -2569,7 +2568,7 @@ func TestBuildUncloakTableFallbackQualified(t *testing.T) {
 	if client == "oh_my_pi" {
 		t.Fatalf("target-only body must not resolve to oh_my_pi, got client=%q", client)
 	}
-	if uncloakTable != nil && uncloakTable["view_file"] == "read" {
+	if uncloakTable != nil && uncloakTable["read_file"] == "read" {
 		t.Fatalf("target-only body must not authorize OMP reverse mutation, got %v", uncloakTable)
 	}
 
@@ -2589,8 +2588,8 @@ func TestBuildUncloakTableFallbackQualified(t *testing.T) {
 	if origClient != "oh_my_pi" {
 		t.Fatalf("origBody client = %q, want 'oh_my_pi'", origClient)
 	}
-	if origTable == nil || origTable["view_file"] != "read" || origTable["find_by_name"] != "glob" {
-		t.Fatalf("expected OMP uncloak table with view_file->read and find_by_name->glob, got %v", origTable)
+	if origTable == nil || origTable["read_file"] != "read" || origTable["find_by_name"] != "glob" {
+		t.Fatalf("expected OMP uncloak table with read_file->read and find_by_name->glob, got %v", origTable)
 	}
 }
 
@@ -2665,8 +2664,8 @@ func TestRewriteRequestBodyWithNamespacePrefix(t *testing.T) {
 	t1 := tools[1].(map[string]any)["function"].(map[string]any)["name"].(string)
 	t2 := tools[2].(map[string]any)["function"].(map[string]any)["name"].(string)
 
-	if t0 != "functions:view_file" {
-		t.Errorf("t0 name = %q, want functions:view_file", t0)
+	if t0 != "functions:read_file" {
+		t.Errorf("t0 name = %q, want functions:read_file", t0)
 	}
 	if t1 != "functions:invoke_subagent" {
 		t.Errorf("t1 name = %q, want functions:invoke_subagent", t1)
@@ -2678,24 +2677,24 @@ func TestRewriteRequestBodyWithNamespacePrefix(t *testing.T) {
 	// Verify messages tool calls and tool result
 	msgs := parsed["messages"].([]any)
 	tc := msgs[0].(map[string]any)["tool_calls"].([]any)[0].(map[string]any)["function"].(map[string]any)["name"].(string)
-	if tc != "functions:view_file" {
-		t.Errorf("msg[0] tool_call name = %q, want functions:view_file", tc)
+	if tc != "functions:read_file" {
+		t.Errorf("msg[0] tool_call name = %q, want functions:read_file", tc)
 	}
 	trName := msgs[1].(map[string]any)["name"].(string)
-	if trName != "functions:view_file" {
-		t.Errorf("msg[1] tool result name = %q, want functions:view_file", trName)
+	if trName != "functions:read_file" {
+		t.Errorf("msg[1] tool result name = %q, want functions:read_file", trName)
 	}
 
 	// Verify system prompt tool replacement
 	sys := parsed["system"].(string)
-	if strings.Contains(sys, "functions:read") || strings.Contains(sys, "functions:task") {
-		t.Errorf("system prompt leaked original names: %s", sys)
+	if sys != "You have access to functions:read_file and functions:invoke_subagent." {
+		t.Errorf("system prompt = %q, want %q", sys, "You have access to functions:read_file and functions:invoke_subagent.")
 	}
 }
 
 func TestUncloakResponseBodyWithNamespacePrefix(t *testing.T) {
 	uncloakTable := map[string]string{
-		"view_file":   "read",
+		"read_file":   "read",
 		"manage_task": "todo",
 		"run_command": "bash",
 	}
@@ -2706,7 +2705,7 @@ func TestUncloakResponseBodyWithNamespacePrefix(t *testing.T) {
 				"message": {
 					"role": "assistant",
 					"tool_calls": [
-						{"id": "call_1", "type": "function", "function": {"name": "functions:view_file", "arguments": "{\"path\":\"a.txt\"}"}},
+						{"id": "call_1", "type": "function", "function": {"name": "functions:read_file", "arguments": "{\"path\":\"a.txt\"}"}},
 						{"id": "call_2", "type": "function", "function": {"name": "default_api:manage_task", "arguments": "{\"op\":\"view\"}"}}
 					]
 				}
@@ -2738,12 +2737,12 @@ func TestUncloakResponseBodyWithNamespacePrefix(t *testing.T) {
 
 func TestUncloakStreamChunkWithNamespacePrefix(t *testing.T) {
 	uncloakTable := map[string]string{
-		"view_file":   "read",
+		"read_file":   "read",
 		"manage_task": "todo",
 	}
 	cached := buildTestUncloakPattern(uncloakTable)
 
-	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"functions:view_file\",\"arguments\":\"{}\"}}]}}]}\n\n"
+	chunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"functions:read_file\",\"arguments\":\"{}\"}}]}}]}\n\n"
 	got, changed := uncloakStreamChunk([]byte(chunk), cached)
 	if !changed {
 		t.Fatal("expected changed = true")
@@ -2754,8 +2753,8 @@ func TestUncloakStreamChunkWithNamespacePrefix(t *testing.T) {
 }
 func TestReplaceToolNamesInTextNamespaceSafety(t *testing.T) {
 	cloakTable := map[string]string{
-		"read":  "view_file",
-		"write": "write_to_file",
+		"read":  "read_file",
+		"write": "write_file",
 		"todo":  "manage_task",
 		"bash":  "run_command",
 	}
@@ -2765,7 +2764,7 @@ func TestReplaceToolNamesInTextNamespaceSafety(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"qualified in prose", "use functions:read here", "use functions:view_file here"},
+		{"qualified in prose", "use functions:read here", "use functions:read_file here"},
 		{"qualified todo", "manage functions:todo now", "manage functions:manage_task now"},
 		{"qualified bash", "call default_api:bash", "call default_api:run_command"},
 		{"access mode read:write", "the mode read:write", "the mode read:write"},
@@ -2816,8 +2815,8 @@ func TestReplaceToolNamesInTextExactlyOnceCustomMapping(t *testing.T) {
 
 func TestReplaceToolNamesInTextQuotedUnquotedConsistent(t *testing.T) {
 	cloakTable := map[string]string{
-		"read":  "view_file",
-		"write": "write_to_file",
+		"read":  "read_file",
+		"write": "write_file",
 	}
 	cached := buildTestCloakPatterns(cloakTable)
 	tests := []struct {
@@ -2825,11 +2824,11 @@ func TestReplaceToolNamesInTextQuotedUnquotedConsistent(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"quoted namespace", "`functions:read`", "`functions:view_file`"},
-		{"unquoted namespace", "functions:read", "functions:view_file"},
-		{"quoted base", "`read`", "`view_file`"},
+		{"quoted namespace", "`functions:read`", "`functions:read_file`"},
+		{"unquoted namespace", "functions:read", "functions:read_file"},
+		{"quoted base", "`read`", "`read_file`"},
 		{"unquoted bare ambiguous untouched", "read", "read"},
-		{"double quoted namespace", `"functions:write"`, `"functions:write_to_file"`},
+		{"double quoted namespace", `"functions:write"`, `"functions:write_file"`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2843,7 +2842,7 @@ func TestReplaceToolNamesInTextQuotedUnquotedConsistent(t *testing.T) {
 
 func TestReplaceToolNamesInTextLongTierOneBounds(t *testing.T) {
 	cached := buildTestCloakPatterns(map[string]string{
-		"read":    "view_file",
+		"read":    "read_file",
 		"foo_bar": "mapped",
 	})
 	padding := strings.Repeat("x", 9<<10)
@@ -2852,7 +2851,7 @@ func TestReplaceToolNamesInTextLongTierOneBounds(t *testing.T) {
 		input string
 		want  string
 	}{
-		{"quoted namespace", "use `functions:read` " + padding, "use `functions:view_file` " + padding},
+		{"quoted namespace", "use `functions:read` " + padding, "use `functions:read_file` " + padding},
 		{"unambiguous boundary", "foo_bar " + padding, "mapped " + padding},
 		{"unambiguous partial word", "foo_barX " + padding, "foo_barX " + padding},
 	}

@@ -268,7 +268,7 @@ func TestIssue48_ProseAndArgumentHoldsFlushInArrivalOrder(t *testing.T) {
 	// holds ".gem" too, so both lanes of block 0 hold at the terminal flush.
 	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{
 		RequestID: "issue48-prose-args", SourceFormat: "anthropic", ChunkIndex: 0,
-		Body: []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"view_file\",\"input\":{}}}\n\n" +
+		Body: []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"read_file\",\"input\":{}}}\n\n" +
 			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"p\\\":\\\"~/.gem\"}}\n\n"),
 	}, "anthropic")
 	mgr.processChunk(&pluginapi.StreamChunkInterceptRequest{

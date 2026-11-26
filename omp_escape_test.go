@@ -33,9 +33,9 @@ func TestProtectedOMPEscapedCanonicalRoundTrip(t *testing.T) {
 		t.Fatalf("escaped canonical request rejected: %s", admitted.ResponseBody)
 	}
 	for _, want := range []string{
-		`"name":"Functions:view_file"`,
-		`"name":"write_to_file"`,
-		`"name":"replace_file_content"`,
+		`"name":"Functions:read_file"`,
+		`"name":"write_file"`,
+		`"name":"edit_file"`,
 		`"name":"run_command"`,
 	} {
 		if !bytes.Contains(admitted.Body, []byte(want)) {
@@ -52,7 +52,7 @@ func TestProtectedOMPEscapedCanonicalRoundTrip(t *testing.T) {
 	if route == nil {
 		t.Fatal("ProtectedAGY route not pinned")
 	}
-	if got := route.activeReverse["Functions:view_file"]; got != "Functions:_read" {
+	if got := route.activeReverse["Functions:read_file"]; got != "Functions:_read" {
 		t.Fatalf("active reverse lost exact namespace/escape: got %q", got)
 	}
 	if got := route.activeReverse["run_command"]; got != "_bash" {
@@ -62,7 +62,7 @@ func TestProtectedOMPEscapedCanonicalRoundTrip(t *testing.T) {
 	var nonstream pluginapi.ResponseInterceptResponse
 	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
 		RequestID: requestID, SourceFormat: "openai", Model: "agy/measurement",
-		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"Functions:view_file","arguments":"{}"}},{"function":{"name":"run_command","arguments":"{}"}}]}}]}`),
+		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"Functions:read_file","arguments":"{}"}},{"function":{"name":"run_command","arguments":"{}"}}]}}]}`),
 	}, &nonstream)
 	if !bytes.Contains(nonstream.Body, []byte(`"name":"Functions:_read"`)) ||
 		!bytes.Contains(nonstream.Body, []byte(`"name":"_bash"`)) {
@@ -106,7 +106,7 @@ func TestProtectedOMPEscapedCanonicalAnthropicCarriers(t *testing.T) {
 	if admitted.Terminate {
 		t.Fatalf("escaped anthropic request rejected: %s", admitted.ResponseBody)
 	}
-	for _, want := range []string{"\"name\":\"view_file\"", "\"name\":\"run_command\""} {
+	for _, want := range []string{"\"name\":\"read_file\"", "\"name\":\"run_command\""} {
 		if !bytes.Contains(admitted.Body, []byte(want)) {
 			t.Fatalf("anthropic carrier missing %s: %s", want, admitted.Body)
 		}
@@ -115,7 +115,7 @@ func TestProtectedOMPEscapedCanonicalAnthropicCarriers(t *testing.T) {
 	var response pluginapi.ResponseInterceptResponse
 	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
 		RequestID: requestID, SourceFormat: "anthropic", Model: "agy/measurement",
-		Body: []byte("{\"content\":[{\"type\":\"tool_use\",\"name\":\"view_file\",\"input\":{}}]}"),
+		Body: []byte("{\"content\":[{\"type\":\"tool_use\",\"name\":\"read_file\",\"input\":{}}]}"),
 	}, &response)
 	if !bytes.Contains(response.Body, []byte("\"name\":\"_read\"")) {
 		t.Fatalf("anthropic response did not restore escaped source: %s", response.Body)
@@ -139,7 +139,7 @@ func TestProtectedOMPEscapeRecognitionIsFinite(t *testing.T) {
 	if admitted.Terminate {
 		t.Fatalf("request rejected: %s", admitted.ResponseBody)
 	}
-	if !bytes.Contains(admitted.Body, []byte(`"name":"view_file"`)) {
+	if !bytes.Contains(admitted.Body, []byte(`"name":"read_file"`)) {
 		t.Fatalf("verified escaped builtin was not canonicalized: %s", admitted.Body)
 	}
 	// Unknown escaped identities now get deterministic fallback aliases.
@@ -161,8 +161,8 @@ func TestProtectedOMPEscapeRecognitionIsFinite(t *testing.T) {
 func TestProtectedOMPEscapedCanonicalCollisionsReject(t *testing.T) {
 	cases := map[string][]string{
 		"bare-plus-escaped":             {"read", "_read"},
-		"escaped-plus-native-target":    {"_read", "view_file"},
-		"cross-namespace-native-target": {"functions:_read", "default_api:view_file"},
+		"escaped-plus-native-target":    {"_read", "read_file"},
+		"cross-namespace-native-target": {"functions:_read", "default_api:read_file"},
 	}
 	for name, names := range cases {
 		t.Run(name, func(t *testing.T) {

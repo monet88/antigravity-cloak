@@ -37,7 +37,7 @@ func TestOMP_CanonicalNinePlusSharedAliases(t *testing.T) {
 	}
 
 	expected := []string{
-		`"name":"view_file"`, `"name":"write_to_file"`, `"name":"replace_file_content"`,
+		`"name":"read_file"`, `"name":"write_file"`, `"name":"edit_file"`,
 		`"name":"run_command"`, `"name":"grep_search"`, `"name":"find_by_name"`,
 		`"name":"invoke_subagent"`, `"name":"ask_question"`, `"name":"search_web"`,
 		`"name":"wp_todo"`, `"name":"wp_hub"`, `"name":"wp_eval"`,
@@ -80,7 +80,7 @@ func TestOMP_UnknownDeclarationsGetFallbackAliases(t *testing.T) {
 	fbCustom := fallbackAliasForSource("custom_unknown_tool")
 
 	expected := []string{
-		`"name":"view_file"`,
+		`"name":"read_file"`,
 		`"name":"` + fbFoo + `"`,
 		`"name":"` + fbRead + `"`,
 		`"name":"` + fbCustom + `"`,
@@ -103,7 +103,7 @@ func TestOMP_UnknownDeclarationsGetFallbackAliases(t *testing.T) {
 			"message": {
 				"role": "assistant",
 				"tool_calls": [
-					{"id": "c1", "type": "function", "function": {"name": "view_file", "arguments": "{}"}},
+					{"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}},
 					{"id": "c2", "type": "function", "function": {"name": "` + fbFoo + `", "arguments": "{}"}},
 					{"id": "c3", "type": "function", "function": {"name": "` + fbRead + `", "arguments": "{}"}},
 					{"id": "c4", "type": "function", "function": {"name": "` + fbCustom + `", "arguments": "{}"}}
@@ -145,7 +145,7 @@ func TestOMP_VibeModeToolsCloaked(t *testing.T) {
 	}
 
 	expected := []string{
-		`"name":"view_file"`,
+		`"name":"read_file"`,
 		`"name":"wp_vibe_spawn"`,
 		`"name":"wp_vibe_send"`,
 		`"name":"wp_vibe_wait"`,
@@ -185,7 +185,7 @@ func TestOMP_ExtendedTableReversal(t *testing.T) {
 	var nonstream pluginapi.ResponseInterceptResponse
 	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
 		RequestID: requestID, SourceFormat: "openai", Model: "agy/measurement",
-		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}},{"function":{"name":"wp_todo","arguments":"{}"}}]}}]}`),
+		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}},{"function":{"name":"wp_todo","arguments":"{}"}}]}}]}`),
 	}, &nonstream)
 
 	if !bytes.Contains(nonstream.Body, []byte(`"name":"read"`)) ||
@@ -193,7 +193,7 @@ func TestOMP_ExtendedTableReversal(t *testing.T) {
 		t.Fatalf("non-stream response did not restore exact source spellings: %s", nonstream.Body)
 	}
 
-	if bytes.Contains(nonstream.Body, []byte(`"name":"view_file"`)) ||
+	if bytes.Contains(nonstream.Body, []byte(`"name":"read_file"`)) ||
 		bytes.Contains(nonstream.Body, []byte(`"name":"wp_todo"`)) {
 		t.Fatalf("non-stream response leaked cloaked spellings: %s", nonstream.Body)
 	}
@@ -266,7 +266,7 @@ func TestOMP_EscapedSharedAliasesCloakAndReverseExact(t *testing.T) {
 	}
 
 	// Verify cloaked targets: _todo -> wp_todo, _hub -> wp_hub, _eval -> wp_eval
-	for _, want := range []string{`"name":"view_file"`, `"name":"wp_todo"`, `"name":"wp_hub"`, `"name":"wp_eval"`} {
+	for _, want := range []string{`"name":"read_file"`, `"name":"wp_todo"`, `"name":"wp_hub"`, `"name":"wp_eval"`} {
 		if !bytes.Contains(admitted.Body, []byte(want)) {
 			t.Fatalf("cloaked request missing %s: %s", want, admitted.Body)
 		}
@@ -360,7 +360,7 @@ func TestOMP_UndeclaredHistoryAndToolChoiceCloaked(t *testing.T) {
 
 	fbCustom := fallbackAliasForSource("custom_history_tool")
 	expected := []string{
-		`"name":"view_file"`,
+		`"name":"read_file"`,
 		`"name":"run_command"`,
 		`"name":"` + fbCustom + `"`,
 		`"name":"wp_todo"`,
@@ -515,7 +515,7 @@ func TestOMP_MutatedCanonicalConfigRejects(t *testing.T) {
 	isolateOMPMeasurement(t)
 	const requestID = "omp-mutated-canonical"
 
-	// Mutate canonical read from view_file to custom_read
+	// Mutate canonical read from read_file to custom_read
 	cfg := defaultFilterConfig()
 	cfg.ToolMappings["oh_my_pi"]["read"] = "custom_read"
 	applyFilterConfig(cfg)
@@ -602,8 +602,8 @@ func TestOMP_VirtualDeviceXDProtocolPreserved(t *testing.T) {
 	}
 
 	gotReq := string(admitted.Body)
-	// Tool names read -> view_file, write -> write_to_file
-	if !strings.Contains(gotReq, `"name":"view_file"`) || !strings.Contains(gotReq, `"name":"write_to_file"`) {
+	// Tool names read -> read_file, write -> write_file
+	if !strings.Contains(gotReq, `"name":"read_file"`) || !strings.Contains(gotReq, `"name":"write_file"`) {
 		t.Fatalf("tools were not cloaked: %s", gotReq)
 	}
 	// xd:// URIs and namespaces MUST be byte-for-byte preserved and not converted to call_mcp_tool
@@ -621,8 +621,8 @@ func TestOMP_VirtualDeviceXDProtocolPreserved(t *testing.T) {
 		t.Errorf("xd:// call was incorrectly rewritten to call_mcp_tool: %s", gotReq)
 	}
 
-	// Verify streamed response uncloaks view_file -> read while preserving xd:// arguments byte-for-byte
-	chunkBody := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"view_file\",\"arguments\":\"{\\\"path\\\":\\\"xd://mcp__github_list_issues\\\"}\"}}]}}]}\n\n"
+	// Verify streamed response uncloaks read_file -> read while preserving xd:// arguments byte-for-byte
+	chunkBody := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"xd://mcp__github_list_issues\\\"}\"}}]}}]}\n\n"
 	var chunkResp pluginapi.StreamChunkInterceptResponse
 	ompMeasurementCall(t, pluginabi.MethodResponseInterceptStreamChunk, pluginapi.StreamChunkInterceptRequest{
 		RequestID:    requestID,
@@ -634,7 +634,7 @@ func TestOMP_VirtualDeviceXDProtocolPreserved(t *testing.T) {
 
 	gotChunk := string(chunkResp.Body)
 	if !strings.Contains(gotChunk, `"name":"read"`) {
-		t.Errorf("expected view_file to uncloak to read in stream: %s", gotChunk)
+		t.Errorf("expected read_file to uncloak to read in stream: %s", gotChunk)
 	}
 	if !strings.Contains(gotChunk, `xd://mcp__github_list_issues`) {
 		t.Errorf("xd:// URI in tool arguments was corrupted in stream: %s", gotChunk)
@@ -666,7 +666,7 @@ func TestOMP_AutoresearchAndMemorySharedAliases(t *testing.T) {
 	}
 
 	expected := []string{
-		`"name":"view_file"`,
+		`"name":"read_file"`,
 		`"name":"run_command"`,
 		`"name":"wp_init_experiment"`,
 		`"name":"wp_run_experiment"`,
@@ -736,10 +736,10 @@ func TestOMP_AutoresearchAndMemorySharedAliases(t *testing.T) {
 }
 
 // A namespaced Protected OMP declaration grants reverse authority for its exact
-// namespaced target only: functions:read authorizes functions:view_file ->
-// functions:read, never bare view_file -> functions:read. Native bare AGY
+// namespaced target only: functions:read authorizes functions:read_file ->
+// functions:read, never bare read_file -> functions:read. Native bare AGY
 // targets in a correlated response must stay untouched, while bare sources
-// (read -> view_file) keep their normal reverse behavior.
+// (read -> read_file) keep their normal reverse behavior.
 func TestOMP_NamespacedDeclarationGrantsExactReverseAuthorityOnly(t *testing.T) {
 	isolateOMPMeasurement(t)
 	const requestID = "omp-namespaced-exact-reverse"
@@ -752,25 +752,25 @@ func TestOMP_NamespacedDeclarationGrantsExactReverseAuthorityOnly(t *testing.T) 
 	if admitted.Terminate {
 		t.Fatalf("request rejected: %s", admitted.ResponseBody)
 	}
-	if !bytes.Contains(admitted.Body, []byte(`"name":"functions:view_file"`)) {
+	if !bytes.Contains(admitted.Body, []byte(`"name":"functions:read_file"`)) {
 		t.Fatalf("namespaced declaration was not cloaked: %s", admitted.Body)
 	}
 	route := globalLifecycleManager.getRoute(requestID)
 	if route == nil {
 		t.Fatal("ProtectedAGY route not pinned")
 	}
-	if got := route.activeReverse["functions:view_file"]; got != "functions:read" {
-		t.Fatalf("exact namespaced reverse authority lost: activeReverse[functions:view_file] = %q", got)
+	if got := route.activeReverse["functions:read_file"]; got != "functions:read" {
+		t.Fatalf("exact namespaced reverse authority lost: activeReverse[functions:read_file] = %q", got)
 	}
-	if got, exists := route.activeReverse["view_file"]; exists {
-		t.Fatalf("namespaced declaration must not authorize bare view_file: got %q", got)
+	if got, exists := route.activeReverse["read_file"]; exists {
+		t.Fatalf("namespaced declaration must not authorize bare read_file: got %q", got)
 	}
 
 	// A native bare AGY target name must remain untouched downstream.
 	var native pluginapi.ResponseInterceptResponse
 	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
 		RequestID: requestID, SourceFormat: "openai", Model: "agy/measurement",
-		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`),
+		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`),
 	}, &native)
 	if len(native.Body) != 0 {
 		t.Fatalf("native bare target was rewritten by a namespaced declaration: %s", native.Body)
@@ -780,13 +780,13 @@ func TestOMP_NamespacedDeclarationGrantsExactReverseAuthorityOnly(t *testing.T) 
 	var correlated pluginapi.ResponseInterceptResponse
 	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
 		RequestID: requestID, SourceFormat: "openai", Model: "agy/measurement",
-		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"functions:view_file","arguments":"{}"}}]}}]}`),
+		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"functions:read_file","arguments":"{}"}}]}}]}`),
 	}, &correlated)
 	if !bytes.Contains(correlated.Body, []byte(`"name":"functions:read"`)) {
 		t.Fatalf("namespaced target did not restore to its exact source: %s", correlated.Body)
 	}
 
-	// Bare-source behavior is preserved: read -> view_file reverses normally.
+	// Bare-source behavior is preserved: read -> read_file reverses normally.
 	const bareID = "omp-bare-exact-reverse"
 	var bareAdmitted pluginapi.RequestInterceptResponse
 	ompMeasurementCall(t, pluginabi.MethodRequestInterceptBefore, ompMeasurementRequest(bareID, "openai", []byte(`{"messages":[],"tools":[{"type":"function","function":{"name":"read"}}]}`)), &bareAdmitted)
@@ -797,13 +797,13 @@ func TestOMP_NamespacedDeclarationGrantsExactReverseAuthorityOnly(t *testing.T) 
 	if bareRoute == nil {
 		t.Fatal("bare ProtectedAGY route not pinned")
 	}
-	if got := bareRoute.activeReverse["view_file"]; got != "read" {
-		t.Fatalf("bare source reverse authority lost: activeReverse[view_file] = %q", got)
+	if got := bareRoute.activeReverse["read_file"]; got != "read" {
+		t.Fatalf("bare source reverse authority lost: activeReverse[read_file] = %q", got)
 	}
 	var bareRestored pluginapi.ResponseInterceptResponse
 	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
 		RequestID: bareID, SourceFormat: "openai", Model: "agy/measurement",
-		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`),
+		Body: []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`),
 	}, &bareRestored)
 	if !bytes.Contains(bareRestored.Body, []byte(`"name":"read"`)) {
 		t.Fatalf("bare target did not restore to its source: %s", bareRestored.Body)

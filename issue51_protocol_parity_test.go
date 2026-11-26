@@ -235,10 +235,10 @@ func TestIssue51_NonStreamToolArgumentsMatchStream(t *testing.T) {
 	for _, format := range []string{"openai", "anthropic"} {
 		var respBody string
 		if format == "openai" {
-			respBody = `{"choices":[{"message":{"content":"done","tool_calls":[{"function":{"name":"view_file","arguments":"` +
+			respBody = `{"choices":[{"message":{"content":"done","tool_calls":[{"function":{"name":"read_file","arguments":"` +
 				jsonEscape(t, cloakedArgs) + `"}}]}}]}`
 		} else {
-			respBody = `{"content":[{"type":"text","text":"done"},{"type":"tool_use","id":"1","name":"view_file","input":{"path":"~/.gemini/rules/style.md","url":"https://antigravity.google/docs"}}]}`
+			respBody = `{"content":[{"type":"text","text":"done"},{"type":"tool_use","id":"1","name":"read_file","input":{"path":"~/.gemini/rules/style.md","url":"https://antigravity.google/docs"}}]}`
 		}
 		reqID := "issue51-nonstream-" + format
 		reqBody := declaredToolsFor(format, "Read", "Bash")

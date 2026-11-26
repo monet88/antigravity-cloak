@@ -194,7 +194,7 @@ func TestReverseBrand_Anthropic_NonStream_OMP(t *testing.T) {
 	handlePluginCall(pluginabi.MethodRequestInterceptBefore, interceptPayload)
 
 	respBody := `{"content":[{"type":"text","text":"We are Antigravity now"},` +
-		`{"type":"tool_use","id":"1","name":"view_file",` +
+		`{"type":"tool_use","id":"1","name":"read_file",` +
 		`"input":{"path":"/home/u/.gemini/agent/notes.md","plain":"/tmp/Antigravity"}}]}`
 	payload := responseInterceptRequestJSON(t, reqBody, respBody, "anthropic")
 	var reqMap map[string]any
@@ -482,7 +482,7 @@ func TestReverseBrand_NativeAntigravityNoRewrite(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	reqID := "rev-native"
 	// Native Antigravity tools: no client is resolved, so nothing may mutate.
-	reqBody := `{"tools":[{"type":"function","function":{"name":"view_file"}}],"messages":[]}`
+	reqBody := `{"tools":[{"type":"function","function":{"name":"read_file"}}],"messages":[]}`
 	handlePluginCall(pluginabi.MethodRequestInterceptBefore, makeIntegrationRequestInterceptPayload(t, reqID, "openai", "agy/model", []byte(reqBody)))
 	respBody := `{"choices":[{"message":{"content":"Antigravity should stay"}}]}`
 	payload := responseInterceptRequestJSON(t, reqBody, respBody, "openai")

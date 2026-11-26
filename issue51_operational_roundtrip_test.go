@@ -204,7 +204,7 @@ func TestIssue51_TypedUserProseIsUntouched(t *testing.T) {
 	if strings.Contains(forward, `"name":"ToolSearch"`) {
 		t.Fatalf("declared tool name was not cloaked: %s", forward)
 	}
-	if !strings.Contains(forward, `"name":"write_to_file"`) {
+	if !strings.Contains(forward, `"name":"write_file"`) {
 		t.Fatalf("core tool declaration was not cloaked: %s", forward)
 	}
 
@@ -248,8 +248,8 @@ func TestIssue51_UserTypedToolNameSurvivesWriteRoundTrip(t *testing.T) {
 		if tools, ok := parsed["tools"].([]any); ok {
 			for _, tr := range tools {
 				if tm, ok := tr.(map[string]any); ok {
-					if tm["name"] == "write_to_file" {
-						writeAlias = "write_to_file"
+					if tm["name"] == "write_file" {
+						writeAlias = "write_file"
 					}
 				}
 			}
@@ -270,12 +270,12 @@ func TestIssue51_UserTypedToolNameSurvivesWriteRoundTrip(t *testing.T) {
 	if !strings.Contains(back, `"ToolSearch"`) {
 		t.Fatalf("file content was rewritten: %s", back)
 	}
-	// Tool identity is exact-uncloak authority: write_to_file came from the
+	// Tool identity is exact-uncloak authority: write_file came from the
 	// client's own Write and goes back to Write.
 	if !strings.Contains(back, `"name":"Write"`) {
 		t.Fatalf("tool identity did not round-trip: %s", back)
 	}
-	if strings.Contains(back, "write_to_file") {
+	if strings.Contains(back, "write_file") {
 		t.Fatalf("the alias leaked to the client: %s", back)
 	}
 }

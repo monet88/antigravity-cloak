@@ -3745,7 +3745,7 @@ func buildRequestAliasPlan(client string, sourceIdentities []string, preferred m
 				}
 				overridden = true
 			} else if knownTargets[base] {
-				// Source declares a native target identity (e.g. view_file or default_api:view_file).
+				// Source declares a native target identity (e.g. read_file or default_api:read_file).
 				if prefix != "" {
 					target = prefix + base
 				} else {
@@ -5088,14 +5088,14 @@ func reverseCloakedBrandBody(body []byte, client string) ([]byte, bool) {
 var defaultCloakTables = map[string]map[string]string{
 	"claude_code": {
 		// Tier-1: Core file/shell tools — proven one-to-one AGY role names.
-		"Bash": "run_command", "Edit": "replace_file_content", "Read": "view_file",
-		"Write": "write_to_file", "Grep": "grep_search",
+		"Bash": "run_command", "Edit": "edit_file", "Read": "read_file",
+		"Write": "write_file", "Grep": "grep_search",
 		"Glob": "find_by_name", // Issue #36: was list_dir — AGY list_dir lists one dir, Glob is a pattern matcher.
 		// Tier-1: Subagent/interaction — proven AGY role names.
 		"Agent": "invoke_subagent", "AskUserQuestion": "ask_question",
 		// Tier-1: Web tools — proven AGY role names (one-to-one, no schema conflict).
-		"WebSearch": "search_web", "WebFetch": "read_url_content",
-		// Tier-2 tools (ListAgents, SendMessage, TaskStop, ListMcpResourcesTool,
+		"WebSearch": "search_web",
+		// Tier-2 tools (WebFetch, ListAgents, SendMessage, TaskStop, ListMcpResourcesTool,
 		// ReadMcpResourceTool, etc.) are in claudeCodeSharedAliases with approved
 		// parent #32 vocabulary — they have no proven one-to-one AGY role.
 	},
@@ -5136,9 +5136,9 @@ var defaultCloakTables = map[string]map[string]string{
 		"collaboration__spawn_agent": "invoke_subagent",
 	},
 	"oh_my_pi": {
-		"read":       "view_file",
-		"write":      "write_to_file",
-		"edit":       "replace_file_content",
+		"read":       "read_file",
+		"write":      "write_file",
+		"edit":       "edit_file",
 		"bash":       "run_command",
 		"grep":       "grep_search",
 		"glob":       "find_by_name",
@@ -5150,9 +5150,9 @@ var defaultCloakTables = map[string]map[string]string{
 
 // canonicalOMPSafeMappingSet is the canonical nine-tool Safe Mapping Set for Oh My Pi.
 var canonicalOMPSafeMappingSet = map[string]string{
-	"read":       "view_file",
-	"write":      "write_to_file",
-	"edit":       "replace_file_content",
+	"read":       "read_file",
+	"write":      "write_file",
+	"edit":       "edit_file",
 	"bash":       "run_command",
 	"grep":       "grep_search",
 	"glob":       "find_by_name",
@@ -5241,6 +5241,8 @@ var claudeCodeSharedAliases = map[string]string{
 	"ToolSearch": "wp_find_tools",
 	"Skill":      "wp_invoke_skill",
 	"Workflow":   "wp_run_workflow",
+	// Web fetch (read_url_content was removed in AGY 2.25.0+).
+	"WebFetch": "wp_fetch_url",
 	// Subagent control — unproven semantic match to AGY targets.
 	"ListAgents":  "wp_list_workers",
 	"SendMessage": "wp_send_message",
@@ -5326,15 +5328,15 @@ var ompSharedAliases = map[string]string{
 // These target identities are corroboration/static evidence only and
 // MUST NEVER be used as standalone attribution without an independent OMP signal.
 var ompCloakedTargetIdentityInventory = map[string]bool{
-	"view_file":            true,
-	"write_to_file":        true,
-	"replace_file_content": true,
-	"run_command":          true,
-	"grep_search":          true,
-	"find_by_name":         true,
-	"invoke_subagent":      true,
-	"ask_question":         true,
-	"search_web":           true,
+	"read_file":       true,
+	"write_file":      true,
+	"edit_file":       true,
+	"run_command":     true,
+	"grep_search":     true,
+	"find_by_name":    true,
+	"invoke_subagent": true,
+	"ask_question":    true,
+	"search_web":      true,
 }
 
 // clientDistinctiveTools lists harness-specific source tool names whose
@@ -8070,15 +8072,20 @@ func detectCloakedClientWithSignal(toolNames []string, ompAttributed bool) strin
 	var matches []cloakTargetMatch
 
 	var clients []string
-	for client := range cfg.ToolMappings {
-		if client != "oh_my_pi" {
-			clients = append(clients, client)
-		}
-	}
 	if ompAttributed {
-		clients = append(clients, "oh_my_pi")
+		// Corroborate exclusively against OMP's canonical target inventory when
+		// an independent OMP attribution signal is already established; racing
+		// claude_code here would trigger fullCoverageCount >= 2 because both
+		// clients share the same 9 Tier-1 AGY targets.
+		clients = []string{"oh_my_pi"}
+	} else {
+		for client := range cfg.ToolMappings {
+			if client != "oh_my_pi" {
+				clients = append(clients, client)
+			}
+		}
+		sort.Strings(clients)
 	}
-	sort.Strings(clients)
 
 	for _, client := range clients {
 		hits := 0

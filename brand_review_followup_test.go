@@ -710,7 +710,7 @@ func TestToolArgumentsKeepProseRulesOutOMP(t *testing.T) {
 	const reqID = "args-omp-nonstream"
 	req := `{"tools":[{"name":"read"},{"name":"task"},{"name":"hub"}],"messages":[]}`
 	pay := `{"command":"` + typedCommand + `","path":"~/.gemini/agent/AGENTS.md"}`
-	resp := `{"content":[{"type":"text","text":"Antigravity ships it"},{"type":"tool_use","name":"view_file","input":` + pay + `}]}`
+	resp := `{"content":[{"type":"text","text":"Antigravity ships it"},{"type":"tool_use","name":"read_file","input":` + pay + `}]}`
 
 	raw, code := handlePluginCall("request.intercept_before",
 		makeIntegrationRequestInterceptPayload(t, reqID, "anthropic", "agy/model", []byte(req)))

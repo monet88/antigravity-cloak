@@ -53,7 +53,7 @@ func TestOMPToolSurfaceIsFullyCloaked(t *testing.T) {
 			t.Errorf("tool %q reached upstream uncloaked", n)
 		}
 	}
-	if !strings.Contains(upstream, `"name":"view_file"`) || !strings.Contains(upstream, `"name":"run_command"`) {
+	if !strings.Contains(upstream, `"name":"read_file"`) || !strings.Contains(upstream, `"name":"run_command"`) {
 		t.Errorf("canonical tools did not reach the shared aliases: %s", upstream)
 	}
 }

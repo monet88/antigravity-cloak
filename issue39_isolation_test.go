@@ -225,7 +225,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 			}
 			cloakedReq := decodeEnvelopeBody(t, rawEnvelope)
 			if !strings.Contains(string(cloakedReq), `"run_command"`) ||
-				!strings.Contains(string(cloakedReq), `"view_file"`) ||
+				!strings.Contains(string(cloakedReq), `"read_file"`) ||
 				!strings.Contains(string(cloakedReq), `"wp_vibe_send"`) ||
 				!strings.Contains(string(cloakedReq), `"wp_ext_`) {
 				t.Errorf("OMP request cloaking incomplete: %s", cloakedReq)
@@ -255,7 +255,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 					"message": {
 						"tool_calls": [
 							{"function": {"name": "run_command", "arguments": "{}"}},
-							{"function": {"name": "view_file", "arguments": "{}"}},
+							{"function": {"name": "read_file", "arguments": "{}"}},
 							{"function": {"name": "wp_vibe_send", "arguments": "{}"}},
 							{"function": {"name": "%s", "arguments": "{}"}}
 						]
@@ -329,14 +329,14 @@ func TestIssue39_NegativeCrossAuthority(t *testing.T) {
 	// - wp_send_message (shared alias, but NOT declared by this CC request)
 	// - wp_list_workers (shared alias, but NOT declared by this CC request)
 	// - wp_ext_0123456789abcdef (foreign dynamic fallback)
-	// - view_file (native AGY target for undeclared Read)
+	// - read_file (native AGY target for undeclared Read)
 	respBody := []byte(`{
 		"content": [
 			{"type": "tool_use", "id": "t1", "name": "run_command", "input": {}},
 			{"type": "tool_use", "id": "t2", "name": "wp_send_message", "input": {}},
 			{"type": "tool_use", "id": "t3", "name": "wp_list_workers", "input": {}},
 			{"type": "tool_use", "id": "t4", "name": "wp_ext_0123456789abcdef", "input": {}},
-			{"type": "tool_use", "id": "t5", "name": "view_file", "input": {}}
+			{"type": "tool_use", "id": "t5", "name": "read_file", "input": {}}
 		]
 	}`)
 	respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-model", respBody)
@@ -358,13 +358,13 @@ func TestIssue39_NegativeCrossAuthority(t *testing.T) {
 		t.Fatalf("undeclared wp_list_workers was improperly uncloaked: %s", decodedResp)
 	}
 	if strings.Contains(decodedResp, `"Read"`) {
-		t.Fatalf("undeclared view_file was improperly uncloaked to Read: %s", decodedResp)
+		t.Fatalf("undeclared read_file was improperly uncloaked to Read: %s", decodedResp)
 	}
 	// Foreign / undeclared targets must remain byte-for-byte intact
 	if !strings.Contains(decodedResp, `"wp_send_message"`) ||
 		!strings.Contains(decodedResp, `"wp_list_workers"`) ||
 		!strings.Contains(decodedResp, `"wp_ext_0123456789abcdef"`) ||
-		!strings.Contains(decodedResp, `"view_file"`) {
+		!strings.Contains(decodedResp, `"read_file"`) {
 		t.Fatalf("undeclared targets were altered or dropped: %s", decodedResp)
 	}
 
@@ -588,7 +588,7 @@ func TestIssue39_NoDynamicIdentityGuessingInStaticFallbacks(t *testing.T) {
 // neither AGY-role targets (run_command) nor wp_* shared aliases are reversed on either
 // response or stream paths. Both paths must pass through unmutated rather than guess or
 // fall back to static tables, even when executed bodies contain full static target sets
-// (view_file, write_to_file, run_command).
+// (read_file, write_file, run_command).
 func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	handlePluginCall(pluginabi.MethodPluginReconfigure, lifecycleRequestJSON(t, []byte("model_prefixes: [agy/]")))
@@ -715,7 +715,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 	// 3. Correlated request with missing plan carrying executed body with full static AGY targets
 	{
 		const unadmittedID = "unadmitted-cc-03"
-		executedBody := []byte(`{"tools":[{"type":"function","function":{"name":"view_file"}},{"type":"function","function":{"name":"write_to_file"}},{"type":"function","function":{"name":"run_command"}}]}`)
+		executedBody := []byte(`{"tools":[{"type":"function","function":{"name":"read_file"}},{"type":"function","function":{"name":"write_file"}},{"type":"function","function":{"name":"run_command"}}]}`)
 		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`)
 
 		respPayload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, unadmittedID, "openai", "agy/claude-model", respBody, executedBody, nil)
@@ -743,7 +743,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 
 	// 4. Missing authority entirely: NO RequestID, NO marker, NO UA, with executed Claude/Codex body
 	{
-		executedBody := []byte(`{"tools":[{"type":"function","function":{"name":"view_file"}},{"type":"function","function":{"name":"write_to_file"}},{"type":"function","function":{"name":"run_command"}}]}`)
+		executedBody := []byte(`{"tools":[{"type":"function","function":{"name":"read_file"}},{"type":"function","function":{"name":"write_file"}},{"type":"function","function":{"name":"run_command"}}]}`)
 		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`)
 
 		respPayload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "", "openai", "agy/model", respBody, executedBody, nil)
@@ -885,26 +885,26 @@ func TestIssue39_UncorrelatedAliasPlanBodiesPassThroughOnResponseAndStream(t *te
 // TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended proves that legitimate
 // legacy fallback behavior continues to function for non-alias-plan clients (Oh My Pi)
 // across surviving stream sessions, UA evidence, and body detection, even when executed
-// request bodies contain full sets of static AGY targets (view_file, write_to_file, run_command),
+// request bodies contain full sets of static AGY targets (read_file, write_file, run_command),
 // while protected routes retain exact authority.
 func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	model := "agy/gemini-3.7-flash"
 	executedBodyWithStaticTargets := []byte(`{
 		"tools": [
-			{"type": "function", "function": {"name": "view_file"}},
-			{"type": "function", "function": {"name": "write_to_file"}},
+			{"type": "function", "function": {"name": "read_file"}},
+			{"type": "function", "function": {"name": "write_file"}},
 			{"type": "function", "function": {"name": "run_command"}}
 		]
 	}`)
 
-	// Probe a: Surviving legacy OMP stream session, response with executed RequestBody: view_file -> read
+	// Probe a: Surviving legacy OMP stream session, response with executed RequestBody: read_file -> read
 	{
 		const reqID = "probe-a-omp-session-resp"
 		origOMPBody := []byte(`{"tools":[{"type":"function","function":{"name":"read"}},{"type":"function","function":{"name":"write"}},{"type":"function","function":{"name":"bash"}}]}`)
 		globalStreamManager.resetSession("req:"+reqID, "oh_my_pi", requestScopedUncloakPattern("oh_my_pi", origOMPBody, "openai"), 1)
 
-		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 		payload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, reqID, "openai", model, respBody, executedBodyWithStaticTargets, nil)
 		rawResp, code := handlePluginCall(pluginabi.MethodResponseInterceptAfter, payload)
 		if code != 0 {
@@ -938,10 +938,10 @@ func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 		globalStreamManager.deleteSession("req:" + reqID)
 	}
 
-	// Probe c: User-Agent: omp/... response with executed RequestBody: view_file -> read
+	// Probe c: User-Agent: omp/... response with executed RequestBody: read_file -> read
 	{
 		reqHeaders := http.Header{"User-Agent": []string{"omp/1.2.3"}}
-		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`)
+		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 		rawResp, code := handlePluginCall(pluginabi.MethodResponseInterceptAfter,
 			makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "probe-c-ua-resp", "openai", model, respBody, executedBodyWithStaticTargets, reqHeaders))
 		if code != 0 {
@@ -970,7 +970,7 @@ func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 		}
 	}
 
-	// 5. Oh My Pi body detection from uncloaked tools (read, write, bash) uncloaks view_file -> read
+	// 5. Oh My Pi body detection from uncloaked tools (read, write, bash) uncloaks read_file -> read
 	{
 		origBody := `{
 			"tools": [
@@ -980,7 +980,7 @@ func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 				{"type": "function", "function": {"name": "hub"}}
 			]
 		}`
-		respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"view_file","arguments":"{}"}}]}}]}`
+		respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`
 		payload := responseInterceptRequestJSON(t, origBody, respBody, "openai")
 		rawResp, _ := handlePluginCall(pluginabi.MethodResponseInterceptAfter, payload)
 		out := string(decodeEnvelopeBody(t, rawResp))
@@ -1009,7 +1009,7 @@ func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 			"choices": [{
 				"message": {
 					"tool_calls": [
-						{"function": {"name": "view_file", "arguments": "{}"}},
+						{"function": {"name": "read_file", "arguments": "{}"}},
 						{"function": {"name": "run_command", "arguments": "{}"}},
 						{"function": {"name": "wp_vibe_send", "arguments": "{}"}}
 					]

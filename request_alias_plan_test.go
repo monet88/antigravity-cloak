@@ -35,10 +35,10 @@ func requestAliasPairForTest(plan *requestAliasPlan, source string) *requestAlia
 }
 
 func TestRequestAliasPlanDeterministicFallbackAndPairs(t *testing.T) {
-	sourcesA := []string{"mcp__server__tool", "Functions:CustomTool", "view_file", "functions:run_command"}
-	sourcesB := []string{"functions:run_command", "view_file", "Functions:CustomTool", "mcp__server__tool"}
+	sourcesA := []string{"mcp__server__tool", "Functions:CustomTool", "read_file", "functions:run_command"}
+	sourcesB := []string{"functions:run_command", "read_file", "Functions:CustomTool", "mcp__server__tool"}
 	preferred := map[string]string{
-		"view_file":             "view_file",
+		"read_file":             "read_file",
 		"functions:run_command": "functions:run_command",
 	}
 
@@ -68,8 +68,8 @@ func TestRequestAliasPlanDeterministicFallbackAndPairs(t *testing.T) {
 		}
 	}
 
-	pair := requestAliasPairForTest(planA, "view_file")
-	if pair == nil || pair.SourceIdentity != "view_file" || pair.UpstreamIdentity != "view_file" || pair.Changed {
+	pair := requestAliasPairForTest(planA, "read_file")
+	if pair == nil || pair.SourceIdentity != "read_file" || pair.UpstreamIdentity != "read_file" || pair.Changed {
 		t.Fatalf("unchanged native identity not recorded exactly: %#v", pair)
 	}
 	namespacedNative := requestAliasPairForTest(planA, "functions:run_command")
@@ -88,14 +88,14 @@ func TestRequestAliasPlanRejectsNonInjectiveTargets(t *testing.T) {
 		sources   []string
 		preferred map[string]string
 	}{
-		{"static collision", []string{"Read", "Write"}, map[string]string{"Read": "view_file", "Write": "view_file"}},
-		{"native target collision", []string{"Read", "view_file"}, map[string]string{"Read": "view_file", "view_file": "view_file"}},
+		{"static collision", []string{"Read", "Write"}, map[string]string{"Read": "read_file", "Write": "read_file"}},
+		{"native target collision", []string{"Read", "read_file"}, map[string]string{"Read": "read_file", "read_file": "read_file"}},
 		{"static generated collision", []string{"Read", "DynamicTool"}, map[string]string{"Read": fallbackAliasForSource("DynamicTool")}},
 		{"invalid empty override", []string{"Read"}, map[string]string{"Read": ""}},
 		{"namespace variants collision", []string{"functions:foo", "default_api:foo"}, nil},
-		{"namespace mapped variants collision", []string{"functions:Read", "default_api:Read"}, map[string]string{"Read": "view_file"}},
-		{"namespace and bare mapped collision", []string{"Read", "functions:Read"}, map[string]string{"Read": "view_file"}},
-		{"namespace and native target collision", []string{"functions:Read", "default_api:view_file"}, map[string]string{"Read": "view_file"}},
+		{"namespace mapped variants collision", []string{"functions:Read", "default_api:Read"}, map[string]string{"Read": "read_file"}},
+		{"namespace and bare mapped collision", []string{"Read", "functions:Read"}, map[string]string{"Read": "read_file"}},
+		{"namespace and native target collision", []string{"functions:Read", "default_api:read_file"}, map[string]string{"Read": "read_file"}},
 		{"namespace and bare unknown collision", []string{"foo", "functions:foo"}, nil},
 	}
 	for _, tc := range cases {
@@ -123,7 +123,7 @@ func TestRequestAliasPlanAdmissionFailsClosed(t *testing.T) {
 		{req: pluginapi.RequestInterceptRequest{RequestID: "trailing-json", SourceFormat: "openai", Body: append(validBody, []byte(" {}")...)}},
 		{
 			req:       pluginapi.RequestInterceptRequest{RequestID: "collision", SourceFormat: "openai", Body: []byte("{\"tools\":[{\"type\":\"function\",\"function\":{\"name\":\"Read\"}},{\"type\":\"function\",\"function\":{\"name\":\"Write\"}}]}")},
-			preferred: map[string]string{"Read": "view_file", "Write": "view_file"},
+			preferred: map[string]string{"Read": "read_file", "Write": "read_file"},
 		},
 	}
 	for _, tc := range cases {
@@ -184,11 +184,11 @@ func TestRequestAliasPlanPinnedAcrossReloadAndDisposableCleanup(t *testing.T) {
 
 	// The pinned plan is authoritative even when it has no reverse match.
 	// Falling through to the legacy Claude table here would incorrectly turn
-	// view_file into Read even though this request mapped Read -> target_a.
+	// read_file into Read even though this request mapped Read -> target_a.
 	var unrelated pluginapi.ResponseInterceptResponse
 	ompMeasurementCall(t, pluginabi.MethodResponseInterceptAfter, pluginapi.ResponseInterceptRequest{
 		RequestID: requestID, SourceFormat: "openai", Model: "agy/model", RequestedModel: "agy/model",
-		Body: []byte("{\"choices\":[{\"message\":{\"tool_calls\":[{\"function\":{\"name\":\"view_file\",\"arguments\":\"{}\"}}]}}]}"),
+		Body: []byte("{\"choices\":[{\"message\":{\"tool_calls\":[{\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]}}]}"),
 	}, &unrelated)
 	if len(unrelated.Body) != 0 {
 		t.Fatalf("active alias plan must block legacy reverse fallback: %s", unrelated.Body)
