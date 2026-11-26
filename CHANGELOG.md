@@ -4,6 +4,11 @@ All notable changes to `antigravity-cloak` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Current releases use semantic version tags; the one-off `v.26.09.06` CalVer release is retained below as historical release metadata.
 
+## [0.7.5] - 2026-11-26
+
+### Changed
+- **Aligned built-in Antigravity tool targets with AGY Hub 2.25.0+ / AGY CLI 1.5.18.** Updated core file-tool targets for both `oh_my_pi` and `claude_code` (`view_file` -> `read_file`, `write_to_file` -> `write_file`, `replace_file_content` -> `edit_file`), and moved Claude Code `WebFetch` from the removed `read_url_content` target to the Tier-2 shared alias `wp_fetch_url`. Updated `detectCloakedClientWithSignal` so corroborated OMP attribution (`ompAttributed == true`) evaluates `oh_my_pi` exclusively without colliding against `claude_code`'s identical 9-target set.
+
 ## [0.7.4] - 2026-11-15
 
 ### Fixed
