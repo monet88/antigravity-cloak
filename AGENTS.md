@@ -57,6 +57,11 @@ coding-CLI traffic as Antigravity. Two jobs:
   integration/e2e scripts in `tests/` (`.py`, `.sh`) are a separate, runnable
   layer against a live CLIProxyAPI instance and are never invoked by `go test`.
 
+## Active focus & maintenance scope
+
+- **Primary active focus:** **Oh My Pi (`oh_my_pi` / `omp`)** over **`openai-completions`** (OpenAI Chat Completions wire). Prioritize new work, hardening, and verification here.
+- **Maintenance-only / non-expanding:** `claude_code`, `codex`, Anthropic Messages, and deferred OpenAI Responses stay documented to match existing code, but should not be expanded with new features or proactive refactors unless explicitly requested.
+
 ## Activation model (important)
 
 Two gates decide whether cloaking runs, checked in this order in every handler:
@@ -118,16 +123,16 @@ Casing MUST match what the client actually sends, because uncloak restores the
 exact key string back to the client and tool names are case-sensitive.
 
 Supported clients:
-- `claude_code` (PascalCase: Core tools `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `WebSearch`, `WebFetch` map to proven Antigravity equivalents. Tier-2 subagent control, planning, and MCP-resource tools cloak to shared aliases `wp_*`, with unknown/MCP tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
+- `claude_code` (PascalCase: Core tools `Bash`, `Edit`, `Read`, `Write`, `Grep`, `Glob`, `Agent`, `AskUserQuestion`, `WebSearch` map to proven Antigravity equivalents (`read_file`, `write_file`, `edit_file`, `run_command`, `grep_search`, `find_by_name`, `invoke_subagent`, `ask_question`, `search_web`). `WebFetch -> wp_fetch_url` plus Tier-2 subagent control, planning, and MCP-resource tools cloak to shared aliases `wp_*`, with unknown/MCP tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
 - `codex` (snake_case: `exec`, `exec_command`, `web_search`, `request_user_input`, `collaboration__spawn_agent`. In `defaultCloakTables["codex"]`, only code-mode entry point `exec` and direct AGY role targets are kept so `defaultUncloakTables` remains injective at `init()`. Shell-mode `exec_command -> run_command`, helpers (`apply_patch`, `write_stdin`, `view_image`), and collaboration tools cloak to shared aliases `wp_*` via `codexSharedAliases` in the request-scoped alias plan. Dynamic `mcp__*` and unknown tools receive deterministic fallback aliases `wp_ext_<hash>`. Response and stream reversal restores exact original source names without cross-mode collision.)
-- `oh_my_pi` (9-tool Safe Mapping Set: `read -> view_file`, `write -> write_to_file`, `edit -> replace_file_content`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Extended tools `todo`, `hub`, `eval`, `goal`, `yield`, `wait`, `vibe_*`, and Autoresearch tools cloak to shared aliases `wp_*`, with unknown tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
+- `oh_my_pi` (9-tool Safe Mapping Set: `read -> read_file`, `write -> write_file`, `edit -> edit_file`, `bash -> run_command`, `grep -> grep_search`, `glob -> find_by_name`, `task -> invoke_subagent`, `ask -> ask_question`, `web_search -> search_web`. Extended tools `todo`, `hub`, `eval`, `goal`, `yield`, `wait`, `vibe_*`, and Autoresearch tools cloak to shared aliases `wp_*`, with unknown tools receiving deterministic fallback aliases `wp_ext_<hash>`.)
 > Full detailed mapping tables and domain definitions are documented in **[CONTEXT.md](CONTEXT.md)**.
 > Past debugging notes, root causes, and verification steps are recorded in **[NOTE-DEBUGS.md](NOTE-DEBUGS.md)**.
 > Which tool names a given Codex model actually sends, and the recommended mapping for the shell-mode surface, are recorded in **[the Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**.
 > Historical gap analysis and ranked fix options prior to Issues #32/#36 are recorded in **[the Claude Code gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md)**.
 
 ### MCP tools behavior
-- **Oh My Pi (`oh_my_pi`)** mounts MCP servers under the virtual-device protocol (`xd://mcp__<server>_<tool>`) and invokes them through its standard `read`/`write` tools. Those core tools are already cloaked to `view_file`/`write_to_file`, so OMP MCP traffic is protected without a separate top-level mapping.
+- **Oh My Pi (`oh_my_pi`)** mounts MCP servers under the virtual-device protocol (`xd://mcp__<server>_<tool>`) and invokes them through its standard `read`/`write` tools. Those core tools are already cloaked to `read_file`/`write_file`, so OMP MCP traffic is protected without a separate top-level mapping.
 - **Do not convert OMP virtual-device MCP calls into `call_mcp_tool`.** That would require additional payload/schema transformation and risks breaking streaming semantics.
 - **Top-level `mcp__*` tools** from clients using alias plans (Claude Code, Codex) or Protected OMP are admitted with deterministic reversible fallback aliases (`wp_ext_<hash>`), cloaking their identity upstream and restoring exact source names on return without schema rewriting.
 ### Oh My Pi Routing & Lifecycle (Issue #25, #26, #27, #28)

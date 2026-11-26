@@ -4,6 +4,8 @@
 
 `antigravity-cloak` is a dynamic Go C-shared plugin (`buildmode=c-shared`) for [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) v7 (ABI version 1). Its purpose is to disguise traffic from AI coding CLI assistants (Claude Code, OpenAI Codex, Oh My Pi) as Antigravity when communicating with upstream LLM providers. Dependencies: `CLIProxyAPI/v7` SDK (`sdk/pluginapi`, `sdk/pluginabi`) and `gopkg.in/yaml.v3`.
 
+**Active focus:** Ongoing development focuses on **Oh My Pi (`oh_my_pi` / `omp`)** over **`openai-completions`** (OpenAI Chat Completions). `claude_code`, `codex`, and Anthropic Messages remain documented below to reflect existing code in maintenance-only mode; OpenAI Responses stays deferred/out of active focus.
+
 ## Core Concepts & Glossary
 
 ### 1. Brand Rewriting
