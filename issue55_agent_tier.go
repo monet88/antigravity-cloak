@@ -22,25 +22,49 @@ package main
 import (
 	"encoding/json"
 	"strings"
+
+	"github.com/monet88/antigravity-cloak/internal/spec"
 )
 
 // ─────────────────────────── Contract A ───────────────────────────
 
-// claudeNewsURL is the exact source link from the captured system sentence.
-const claudeNewsURL = "https://www.anthropic.com/news/claude-fable-5-mythos-5"
+var (
+	claudeNewsURL                     string
+	claudeNewsURLSanitized            string
+	claudeNewsSentenceForms           []string
+	claudeAgentToolSourceName         string
+	claudeAgentTierAliases            map[string]string
+	claudeAgentTierNatives            map[string]string
+	claudeAgentModelDescriptionPrefix string
+)
 
-// claudeNewsURLSanitized is the neutral root the recognized sentence carries upstream.
-const claudeNewsURLSanitized = "https://antigravity.google"
-
-// claudeNewsSentencePrefix forms the two recognized sentences together with the
-// exact URL. Case-sensitive, exact: a different sentence, URL suffix, host or
-// casing never matches. Form 0 is the native capture; form 1 is what the
-// existing default brand rewrite turns it into.
-const claudeNewsSentencePrefix = "If the person asks about the differences between the two, "
-
-var claudeNewsSentenceForms = [2]string{
-	claudeNewsSentencePrefix + "Claude can direct them to " + claudeNewsURL + " for more information.",
-	claudeNewsSentencePrefix + "Antigravity can direct them to " + claudeNewsURL + " for more information.",
+func setClaudeFingerprintData(news *spec.NewsURLSanitization, tier *spec.AgentTierConfig) {
+	if news != nil {
+		claudeNewsURL = news.SourceURL
+		claudeNewsURLSanitized = news.ReplacementURL
+		claudeNewsSentenceForms = append([]string(nil), news.SentenceForms...)
+	} else {
+		claudeNewsURL = ""
+		claudeNewsURLSanitized = ""
+		claudeNewsSentenceForms = nil
+	}
+	if tier != nil {
+		claudeAgentToolSourceName = tier.ToolSourceName
+		claudeAgentModelDescriptionPrefix = tier.ModelDescriptionPrefix
+		aliases := make(map[string]string, len(tier.TierAliases))
+		natives := make(map[string]string, len(tier.TierAliases))
+		for native, alias := range tier.TierAliases {
+			aliases[native] = alias
+			natives[alias] = native
+		}
+		claudeAgentTierAliases = aliases
+		claudeAgentTierNatives = natives
+	} else {
+		claudeAgentToolSourceName = ""
+		claudeAgentModelDescriptionPrefix = ""
+		claudeAgentTierAliases = nil
+		claudeAgentTierNatives = nil
+	}
 }
 
 // sanitizeClaudeNewsSentences replaces only the URL inside a recognized exact
@@ -82,35 +106,9 @@ func sanitizeSystemNewsURL(root map[string]any, format string) bool {
 
 // ─────────────────────────── Contract B ───────────────────────────
 
-// claudeAgentToolSourceName is the native Claude Code subagent tool. The tier
-// feature is bounded to this one declaration; the upstream identity it is
-// translated to is never hardcoded, it is resolved through the admitted plan.
-const claudeAgentToolSourceName = "Agent"
-
-// claudeAgentTierAliases is the native tier -> upstream alias vocabulary from
-// the spec. These are schema/argument aliases, not gateway model IDs: the
-// body's routing model and provider selection are untouched.
-var claudeAgentTierAliases = map[string]string{
-	"opus":   "gemini-pro",
-	"sonnet": "gemini-flash",
-	"haiku":  "gemini-flash-lite",
-	"fable":  "gemini-argon",
-}
-
-// claudeAgentTierNatives inverts the alias map so response-side reverse
-// translation never guesses: an alias maps back to exactly its native tier.
-var claudeAgentTierNatives = func() map[string]string {
-	out := make(map[string]string, len(claudeAgentTierAliases))
-	for native, alias := range claudeAgentTierAliases {
-		out[alias] = native
-	}
-	return out
-}()
-
-// claudeAgentModelDescriptionPrefix is the recognizable help signature of the
-// captured declaration; an altered or unrecognized signature leaves the tier
-// feature inactive instead of guessing.
-const claudeAgentModelDescriptionPrefix = "Optional model override for this agent."
+// Contract B runtime helpers read claudeAgentToolSourceName, claudeAgentTierAliases,
+// claudeAgentTierNatives, and claudeAgentModelDescriptionPrefix populated by
+// setClaudeFingerprintData during initializeClients.
 
 // requestTierAuthority is pinned inside the admitting requestAliasPlan for the
 // request that advertised the translatable enum. No cross-request memory and no

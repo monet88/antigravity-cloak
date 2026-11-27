@@ -7,6 +7,10 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/monet88/antigravity-cloak/internal/clients/claudecode"
+	"github.com/monet88/antigravity-cloak/internal/clients/codex"
+	"github.com/monet88/antigravity-cloak/internal/clients/omp"
 )
 
 func TestHandlePluginCallRegisterDeclaresRequestInterceptor(t *testing.T) {
@@ -657,4 +661,28 @@ func responseInterceptRequestJSON(t *testing.T, reqBody, respBody, sourceFormat 
 		t.Fatalf("marshal: %v", err)
 	}
 	return raw
+}
+
+func TestInitializeClientsRepeatedIsIdempotent(t *testing.T) {
+	defer restoreDefaultFilterConfig(t)
+
+	uaCountBefore := len(userAgentEvidence)
+	presetCountBefore := len(defaultOMPSanitizationPresets)
+	cloakTableCountBefore := len(defaultCloakTables)
+
+	initializeClients(claudecode.Spec(), codex.Spec(), omp.Spec())
+	initializeClients(claudecode.Spec(), codex.Spec(), omp.Spec())
+
+	if len(userAgentEvidence) != uaCountBefore {
+		t.Fatalf("userAgentEvidence len = %d, want %d (must not accumulate)", len(userAgentEvidence), uaCountBefore)
+	}
+	if len(defaultOMPSanitizationPresets) != presetCountBefore {
+		t.Fatalf("defaultOMPSanitizationPresets len = %d, want %d (must not accumulate)", len(defaultOMPSanitizationPresets), presetCountBefore)
+	}
+	if len(defaultCloakTables) != cloakTableCountBefore {
+		t.Fatalf("defaultCloakTables len = %d, want %d (must not accumulate)", len(defaultCloakTables), cloakTableCountBefore)
+	}
+	if got := len(activeFilterConfig().ompSanitizationRules); got != presetCountBefore {
+		t.Fatalf("activeFilterConfig().ompSanitizationRules len = %d, want %d", got, presetCountBefore)
+	}
 }

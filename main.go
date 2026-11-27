@@ -56,6 +56,10 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/monet88/antigravity-cloak/internal/clients/claudecode"
+	"github.com/monet88/antigravity-cloak/internal/clients/codex"
+	"github.com/monet88/antigravity-cloak/internal/clients/omp"
+	"github.com/monet88/antigravity-cloak/internal/spec"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"gopkg.in/yaml.v3"
@@ -118,15 +122,12 @@ const explicitClientHeader = "X-Cloak-Client"
 const negativeClientResolution = "__none__"
 
 // userAgentEvidence lists conservative User-Agent prefixes that may resolve a
-// client. Each entry is verified against active ToolMappings; an entry without
-// a usable mapping (e.g. opencode before any table exists) stays inert and
-// never invents a client.
-var userAgentEvidence = []struct {
+// client, populated by initializeClients. Each entry is verified against active
+// ToolMappings; an entry without a usable mapping (e.g. opencode before any
+// table exists) stays inert and never invents a client.
+var userAgentEvidence []struct {
 	prefix string
 	client string
-}{
-	{"omp/", "oh_my_pi"},
-	{"opencode/", "opencode"},
 }
 
 func main() {}
@@ -771,28 +772,17 @@ func validateProtectedPostTransform(rootMap map[string]any, sourceFormat string,
 
 const protectedBrandSentinel = "\x00__ANTIGRAVITY_PROTECTED_OMP_BRAND__\x00"
 
-var mandatoryProtectedOMPAliases = []string{
-	"Oh My Pi",
-	"oh-my-pi",
-	"omp",
-}
+const (
+	ompSchemePreserve        = omp.SchemePreserve
+	ompClaudeCodeInstruction = omp.ClaudeCodeOAuthInstruction
+	codexIdentityLine        = codex.IdentityLine
+	codexGeneralIdentityLine = codex.GeneralIdentityLine
+)
 
-// ompSchemePreserve is the client's own virtual-device scheme, an operational
-// address rather than brand prose. A rule that masks the bare alias carries it
-// as an exclusion, so "omp://xd/mcp__server_tool" reaches the model
-// byte-for-byte while the same word in prose is still masked.
-const ompSchemePreserve = "://"
-
-// ompIdentityLines rewrite Oh My Pi's opening sentence whole, rather than
-// substituting the bare alias inside it. The harness ships the sentence
-// verbatim ("You are omp's trusted coding assistant."), so the bare-alias pass
-// would otherwise turn it into "You are Antigravity's trusted coding
-// assistant." and leave a sentence that names no product and no vendor. These
-// must run BEFORE mandatoryProtectedOMPAliases: that pass swaps the "omp" for
-// the sentinel, after which the sentence no longer exists to match.
-var ompIdentityLines = []rewriteMapping{
-	{Match: "You are omp's trusted coding assistant.", Replacement: antigravityIdentity},
-}
+var (
+	mandatoryProtectedOMPAliases []string
+	ompIdentityLines             []rewriteMapping
+)
 
 func isOMPAlias(match string) bool {
 	m := strings.ToLower(strings.TrimSpace(match))
@@ -3499,52 +3489,12 @@ type streamSession struct {
 }
 
 const (
-	reverseBrandMatch       = "Antigravity"
-	reverseBrandReplacement = "omp"
+	reverseBrandMatch       = omp.ReverseBrandMatch
+	reverseBrandReplacement = omp.ReverseBrandReplacement
 )
 
-// ompProtectedReverseTable is Oh My Pi's entire reverse authority: the one
-// protected pair its lane owns, plus the operational home directory the
-// forward path-segment remap produced. Packaged as a table so the flush path
-// can treat every client the same way without allocating per chunk, and
-// applied to the block's single lane as one set, so the path rules and the
-// protected pair share one carry instead of deadlocking each other.
-var ompProtectedReverseTable = []rewriteMapping{
-	// The protected pair owns the bare brand word. Its exclusion is what keeps
-	// the real Antigravity host intact: the dot after "Antigravity" is a
-	// non-word byte, so the rule's right boundary passes inside
-	// "antigravity.google" and it would otherwise hand the client the dead host
-	// "omp.google". An exclusion is also chunk-safe, which the repair rule this
-	// replaces was not: with "omp.google" as the only guard, a stream that
-	// split the host as "antigravity.oo" + "gle" emitted "omp.oo" and left the
-	// second half unrecoverable.
-	{Match: reverseBrandMatch, Replacement: reverseBrandReplacement, NotFollowedBy: antigravityHostPreserve},
-	// Must precede the .gemini rules below, which would otherwise consume the
-	// directory first and leave "AGENTS.md" attached to the wrong root. The
-	// "/AGENTS.md" right after ".gemini/" is what makes this reversible: no
-	// .omp path carries that shape, because OMP's own is ".omp/agent/AGENTS.md".
-	// Only the file is remapped this way, never the .claude directory itself -
-	// a blanket .claude -> .gemini would land on the same target as .omp and
-	// leave the reverse unable to tell the two apart.
-	//
-	// The JSON-escaped spelling is its own rule: inside a tool call's arguments
-	// the path arrives as JSON text, where each backslash is written twice, and
-	// the plain directory rule below would claim the directory alone and hand
-	// the client ".omp\\AGENTS.md" instead of ".claude\\CLAUDE.md".
-	{Match: ".gemini/AGENTS.md", Replacement: ".claude/CLAUDE.md", WholeSegment: true, ArgumentSafe: true},
-	{Match: `.gemini\AGENTS.md`, Replacement: `.claude\CLAUDE.md`, WholeSegment: true, ArgumentSafe: true},
-	{Match: `.gemini\\AGENTS.md`, Replacement: `.claude\\CLAUDE.md`, WholeSegment: true, ArgumentSafe: true},
-	{Match: ".gemini/", Replacement: ".omp/", WholeSegment: true, ArgumentSafe: true},
-	{Match: `.gemini\`, Replacement: `.omp\`, WholeSegment: true, ArgumentSafe: true},
-	// The bare form, matching the forward remap's end-of-string case. It is the
-	// one rule that needs SegmentEnd: its match ends in a word byte, so the
-	// generic right boundary is happy with any non-word byte after it, and
-	// ".gemini-backup" or ".gemini.foo" would come back as ".omp-backup" and
-	// ".omp.foo" - spellings the forward pass deliberately preserves and never
-	// produces. The rule only fires where the forward dot-segment remap does:
-	// at the end of the path.
-	{Match: ".gemini", Replacement: ".omp", WholeSegment: true, SegmentEnd: true, ArgumentSafe: true},
-}
+// ompProtectedReverseTable is Oh My Pi's entire reverse authority, populated by initializeClients.
+var ompProtectedReverseTable []rewriteMapping
 
 // filterArgumentReverseTable keeps the rules a tool-argument carrier may run:
 // the operational identifiers (paths, domains, SDK and skill names) the model
@@ -3894,23 +3844,12 @@ func admitRequestAliasPlanOrReject(req *pluginapi.RequestInterceptRequest, resp 
 }
 
 // sharedAliasesFor returns the merged preferred alias map for a client: the
-// static cloak table targets plus the client's shared/neutral aliases. The
-// result is used by admitRequestAliasPlan as the "preferred" map, so declared
-// tools that have a static table entry get their proven target, and those in
-// the shared alias map get their wp_ alias. Undeclared tools fall through to
-// fallbackAliasForSource (deterministic wp_ext_<hash>).
+// static cloak table targets plus the client's shared/neutral aliases.
 func sharedAliasesFor(client string) map[string]string {
 	cfg := activeFilterConfig()
 	cloakTable := cfg.ToolMappings[client]
-	var shared map[string]string
-	switch client {
-	case "claude_code":
-		shared = claudeCodeSharedAliases
-	case "codex":
-		shared = codexSharedAliases
-	case "oh_my_pi":
-		shared = ompSharedAliases
-	default:
+	shared, ok := sharedAliasesByClient[client]
+	if !ok {
 		if cloakTable == nil {
 			return nil
 		}
@@ -3923,7 +3862,7 @@ func sharedAliasesFor(client string) map[string]string {
 	for k, v := range cloakTable {
 		merged[k] = v
 	}
-	if client == "oh_my_pi" {
+	if client == omp.ClientID {
 		for k, v := range canonicalOMPSafeMappingSet {
 			merged[k] = v
 		}
@@ -3932,13 +3871,9 @@ func sharedAliasesFor(client string) map[string]string {
 }
 
 // clientUsesAliasPlan reports whether a client should use the request-scoped
-// alias plan machinery for full declaration cloaking. Clients on this list
-// route through admitRequestAliasPlanOrReject instead of the legacy
-// rewriteRequestBodyForClient path, giving them fail-closed admission,
-// per-request reversal, and deterministic fallback aliases for unknown
-// declarations.
+// alias plan machinery for full declaration cloaking.
 func clientUsesAliasPlan(client string) bool {
-	return client == "claude_code" || client == "codex"
+	return aliasPlanClients[client]
 }
 
 type explicitOMPRouteState struct {
@@ -4666,693 +4601,49 @@ func safeMarshal(v any) ([]byte, error) {
 	return b, nil
 }
 
-// antigravityIdentity is the opening <identity> line the real Antigravity CLI
-// sends, captured verbatim from a native session's system prompt. The main
-// session and its subagents share it.
-const antigravityIdentity = "You are Antigravity, a powerful agentic AI coding assistant designed by the Google Deepmind team working on Advanced Agentic Coding."
-
-// antigravityHostPreserve is the native Antigravity host, a real operational
-// domain rather than brand prose. The bare "Antigravity" reverse rule carries
-// it as an exclusion: the dot after the word is a non-word byte, so the rule's
-// right boundary passes inside "antigravity.google" and would otherwise hand
-// the client a host that does not exist ("omp.google", "Codex.google"). Naming
-// the exclusion is also what makes the reverse chunk-safe - a lane holds the
-// word while this suffix is still arriving instead of resolving it early.
-const antigravityHostPreserve = ".google"
-
-// Forward brand tables, one per client. Exactly one is consulted per request:
-// the resolved client — an explicit X-Cloak-Client header first, then verified
-// User-Agent evidence, then body detection — selects its own table and no other.
-// Adding a client (opencode, cursor, ...) is one table here plus one line in
-// brandMappingsByClient; nothing else in the rewrite path changes.
-//
-// A client's forward and reverse table are declared together, because they are
-// two halves of one identity: whatever that client's own words are rewritten to
-// must be rewritten back to that same client's words, and nothing else.
-var claudeCodeBrandMappings = slices.Concat(
-	[]rewriteMapping{
-		// Opening identity lines. Each names the vendor twice, so token substitution
-		// alone yields nonsense ("Antigravity, Google's official CLI for
-		// Antigravity"). The replacements are the verbatim <identity> lines used by
-		// the real Antigravity CLI, for both its main session and its subagents, so a
-		// cloaked request is indistinguishable from native traffic.
-		// Must precede every other "Claude"/"Anthropic" rule.
-		{Match: "You are Claude Code, Anthropic's official CLI for Claude.", Replacement: antigravityIdentity},
-		{Match: "You are a Claude agent, built on Anthropic's Claude Agent SDK.", Replacement: antigravityIdentity},
-		{Match: "Claude Code", Replacement: "Antigravity"},
-		// The context group Claude Code injects into the system context, global
-		// and project-local alike, per its documented memory hierarchy:
-		//
-		//   ~/.claude/CLAUDE.md        user's private global instructions
-		//   ~/.claude/rules/*.md      user rules
-		//   ~/.claude/projects/<slug>/memory/   per-project auto memory
-		//   ./.claude/CLAUDE.md        project instructions
-		//   ./.claude/rules/*.md       project rules
-		//
-		// Built by claudeContextMappings, which matches the home directory as a
-		// whole segment at any position because that is the only spelling Claude
-		// Code actually emits on Windows. See pathRules.
-	},
-	claudeContextMappings,
-	[]rewriteMapping{
-		// Only claude_code needs this: its table also carries the bare "Claude"
-		// rule, which would otherwise consume the vendor prefix inside CLAUDE.md
-		// and produce Antigravity.md - which the reverse can only restore to
-		// Claude.md, corrupting the file name's case. Codex and Oh My Pi have no
-		// bare-Claude rule, so their CLAUDE.md passes through untouched already.
-		{Match: "CLAUDE.md", Replacement: "AGENTS.md"},
-		// Official product/URL names, taken from antigravity.google and its docs.
-		// The product is "Antigravity SDK" (pip install google-antigravity); the
-		// platform lives on antigravity.google.
-		//
-		// These two forward rules share one target deliberately: the single
-		// reverse rule ("Antigravity SDK" -> "Anthropic SDK") is the approved
-		// resolution, so a client that wrote "Claude Agent SDK" reads "Anthropic
-		// SDK" back. Do not add a second reverse target to tell them apart; no
-		// evidence-backed one exists.
-		{Match: "Anthropic SDK", Replacement: "Antigravity SDK"},
-		{Match: "Claude Agent SDK", Replacement: "Antigravity SDK"},
-		{Match: "claude.ai", Replacement: "antigravity.google"},
-		// Deliberately no client model IDs here. All four rows that used to sit
-		// here - claude-fable-5-1 and claude-opus-5-5 (both mapped onto
-		// gemini-3.1-pro-low, two sources with one target), claude-sonnet-5
-		// (gemini-3.8-flash) and claude-haiku-4-5-20251001
-		// (gemini-3.5-flash-lite) - were one-way: none of them can be inverted
-		// from a route the gateway serves, and keeping only the two that look
-		// one-to-one would hand the client back an AGY model name it never
-		// wrote. A one-way rewrite is the failure this table exists to avoid:
-		// the request looks clean while the client is handed a model name it
-		// cannot resolve. Brand-masking a prose model ID is not worth that.
-		// Claude Code's multi-agent workflow tool. Antigravity ships the same
-		// capability as teamwork_preview_layer, so a cloaked request names the tool
-		// Antigravity traffic would actually use. It is a client-specific surface,
-		// not a brand token.
-		{Match: "Workflow", Replacement: "teamwork_preview_layer"},
-		// Plural of the tool name above. Matching is word-bounded, so "Workflows" in
-		// prose is a distinct token and would otherwise survive. Grammar is
-		// deliberately not repaired, same policy as the bare-brand rules below.
-		{Match: "Workflows", Replacement: "teamwork_preview_layer"},
-		// Bare vendor name. Mapped to "Google Deepmind" rather than a plain "Google"
-		// so the reverse pass has a token specific enough to match safely: a bare
-		// "Google" would fire on ordinary response prose, while "Google Deepmind" is
-		// exactly the vendor's own name and nothing else.
-		{Match: "Anthropic", Replacement: "Google Deepmind"},
-		// Catch-all. Must stay after every longer "Claude" form above.
-		{Match: "Claude", Replacement: "Antigravity"},
-	},
+const (
+	antigravityIdentity     = spec.AntigravityIdentity
+	antigravityHostPreserve = spec.AntigravityHostPreserve
 )
 
-// codexIdentityLine is the opening sentence the Codex client really ships,
-// verified verbatim in
-// .ref/CLIProxyAPI/internal/registry/models/codex_client_models.json:
-// "You are Codex, an agent based on GPT-6. You and the user share one
-// workspace, ...". It is replaced whole, the way the Claude Code and Oh My Pi
-// identities are, because token substitution alone leaves a sentence that names
-// neither this product nor its vendor. Longer Codex identity prose after it
-// (including the OpenAI spelling some builds ship) is handled by the residual
-// rules below, so this stays a sentence rule and not a whole-prompt rule.
-const codexIdentityLine = "You are Codex, an agent based on GPT-6."
+type rewriteMapping = spec.RewriteMapping
 
-// codexGeneralIdentityLine is the second opening sentence the Codex client
-// ships, supplied from a real session:
-//
-//	You are Codex, an OpenAI general-purpose agentic assistant that helps the
-//	user complete tasks across coding, browsing, apps, documents, research, and
-//	other digital workflows.
-//
-// It is replaced whole for the same reason as the line above, and it has to be
-// a whole-sentence rule rather than residual substitution: "OpenAI" alone would
-// turn it into "an Google Deepmind general-purpose agentic assistant", which is
-// both grammatically wrong and a sentence no client ever wrote.
-const codexGeneralIdentityLine = "You are Codex, an OpenAI general-purpose agentic assistant that helps the user complete tasks across coding, browsing, apps, documents, research, and other digital workflows."
-
-var codexBrandMappings = slices.Concat(
-
-	// Codex keeps its file names; only the home directory is rewritten. See
-	// pathRules for why the match is not anchored to a ~/ or ./ spelling.
-	codexContextMappings,
-	[]rewriteMapping{
-		// Whole identity first, before any shorter token. Both shipped opening
-		// sentences are terminal rewrites: the native identity line replaces
-		// them whole, so the vendor word inside them never reaches the residual
-		// rules and cannot come out as "an Google Deepmind ..." prose.
-		{Match: codexIdentityLine, Replacement: antigravityIdentity},
-		{Match: codexGeneralIdentityLine, Replacement: antigravityIdentity},
-		// Residual client-scoped prose. Codex's own prompts carry the client
-		// name and the model family it is built on ("based on GPT-6"); some
-		// builds' longer identity prose names the vendor as OpenAI. Each pair
-		// is inverted exactly by codexReverseBrandMappings, in this same order.
-		{Match: "OpenAI", Replacement: "Google Deepmind"},
-		{Match: "GPT-6", Replacement: "Gemini 3"},
-		// Bare client name, after every longer form above. Its casing follows
-		// the text it matched (Codex -> Antigravity, codex -> antigravity,
-		// CODEX -> ANTIGRAVITY) via isProseBrandRule, so one rule covers all
-		// three spellings and none can shadow another.
-		{Match: "Codex", Replacement: "Antigravity"},
-	},
-)
-
-var ompBrandMappings = []rewriteMapping{
-	// Same whole-sentence rewrite as the protected route, for an OMP marker
-	// that did not take the protected branch. See ompIdentityLines.
-	ompIdentityLines[0],
-	// Oh My Pi reads the user's GLOBAL Claude memory, ~/.claude/CLAUDE.md
-	// (discovery/claude.ts:65-69,163-188), while its own root context file is a
-	// neutral AGENTS.md (discovery/agents-md.ts:21). That global file exists on
-	// disk, so its path is a real operational identifier on this route. Only
-	// this one file is remapped, in both spellings plus the JSON-escaped one,
-	// and as a whole path element: the .claude directory itself stays verbatim,
-	// because a blanket .claude -> .gemini would collide with .omp -> .gemini
-	// and make the reverse ambiguous. There is no project-local
-	// .claude/CLAUDE.md in play, so nothing else is claimed.
-	// ompProtectedReverseTable inverts this pair.
-	{Match: ".claude/CLAUDE.md", Replacement: ".gemini/AGENTS.md", WholeSegment: true},
-	{Match: `.claude\CLAUDE.md`, Replacement: `.gemini\AGENTS.md`, WholeSegment: true},
-	{Match: `.claude\\CLAUDE.md`, Replacement: `.gemini\\AGENTS.md`, WholeSegment: true},
-	// Oh My Pi coding agent & harness. On the protected route these go through
-	// the sentinel path instead; these entries cover an OMP marker that did not
-	// take the protected branch. The bare alias carries the scheme exclusion so
-	// a real "omp://" internal URI stays byte-for-byte.
-	{Match: "Oh My Pi", Replacement: "Antigravity"},
-	{Match: "oh-my-pi", Replacement: "Antigravity"},
-	{Match: "omp", Replacement: "Antigravity", NotFollowedBy: ompSchemePreserve},
-}
-
-// brandMappingsByClient is the whole forward surface. A resolved client with no
-// entry has no forward brand table, so its request body is left untouched.
-var brandMappingsByClient = map[string][]rewriteMapping{
-	"claude_code": claudeCodeBrandMappings,
-	"codex":       codexBrandMappings,
-	"oh_my_pi":    ompBrandMappings,
-}
-
-// Reverse tables, same shape and the same selection rule by resolved client. A
-// reverse entry's Match is what that client's forward table produced, so the two
-// are read together: claude_code rewrites Claude -> Antigravity and reads
-// Antigravity -> Claude back.
-//
-// Oh My Pi has no entry here: it runs the protected brand lane, whose
-// Antigravity -> omp pair is its own reverse authority.
-var claudeCodeReverseBrandMappings = slices.Concat(
-	// The context group, including the JSON-escaped spelling of its Windows
-	// file rule that arrives inside streamed tool-call arguments. Generated by
-	// pathRules with the pairs swapped, so the reverse of every forward rule is
-	// its exact mirror and the escaped twin cannot drift out of the group.
-	claudeReverseContextMappings,
-	[]rewriteMapping{
-		// Deliberately no bare "GEMINI.md" rule: the forward pass always
-		// rewrites the directory with it, so matching the file name alone would
-		// invert a path the forward pass never produced. That drift is what
-		// collapsed a README edit into a no-op during live acceptance.
-		// Inverse of the forward domain rule. It has to precede the bare brand
-		// word below, or "Antigravity" would match inside "antigravity.google"
-		// and the client would receive "Claude.google".
-		{Match: "antigravity.google", Replacement: "claude.ai", ArgumentSafe: true},
-		// Inverse of the bare vendor rule. Safe to reverse precisely because the
-		// replacement is the two-word vendor name and not the bare "Google", which
-		// would collide with ordinary prose in model output.
-		{Match: "Google Deepmind", Replacement: "Anthropic"},
-		// A client-declared identifier, like a tool name: the skill slug lives in
-		// the client's own registry, so the response has to hand back a slug the
-		// client can actually resolve. Without this the model calls
-		// Skill("Antigravity-api") and the client answers "Unknown skill".
-		{Match: "Antigravity-api", Replacement: "claude-api", ArgumentSafe: true},
-		{Match: "Antigravity SDK", Replacement: "Anthropic SDK", ArgumentSafe: true},
-		// Inverse of the prose rule that names this client's multi-agent
-		// workflow tool. Antigravity ships the capability as
-		// teamwork_preview_layer, so the model reads - and may echo - that name
-		// in its prose; the client only ever declared "Workflow". A mention in
-		// prose is not a declaration, so the exact alias-plan authority cannot
-		// restore it and this table has to. The plural forward rule maps back
-		// onto the same singular name: grammar is not repaired in either
-		// direction.
-		//
-		// Prose only - deliberately not ArgumentSafe. The forward pass writes
-		// this literal into prompts, never into a tool argument, so a
-		// teamwork_preview_layer literal inside an argument is the client's own
-		// text (a command the user typed, a file the model was told to write)
-		// and rewriting it corrupts data the client executes. The tool NAME in
-		// an argument or a declaration is a different surface: it round-trips
-		// through the alias plan's own exact authority.
-		{Match: "teamwork_preview_layer", Replacement: "Workflow"},
-		// The bare brand word, listed last so the two longer "Antigravity" tokens
-		// above win the prefix. This client's forward pass produced that word only
-		// from its own name, so inverting it here is unambiguous.
-		{Match: "Antigravity", Replacement: "Claude"},
-	},
-)
-
-// pathRules builds one direction of a client context group. The home directory
-// is matched as a whole segment at ANY position, not only in a ~/ or ./
-// spelling. That is not a preference: live acceptance measured 114 absolute
-// paths per request going to the model uncloaked, because Claude Code on
-// Windows puts C:\Users\<name>\.claude\transcripts and friends in its system
-// context and never uses the tilde form at all. A home-prefixed match misses
-// every one of them.
-//
-// Both pairs are passed in MATCH-then-REPLACE order, so a reverse table is this
-// same call with both pairs swapped, and TestContextGroupsAreExactInverses is
-// what holds that true.
-//
-// Every rule is WholeSegment, so the directory has to begin a whole path
-// element: "foo.claude/settings.json" and "foo.codex/config.toml" are not
-// matches and are handed through byte-for-byte. The dot itself is not a word
-// byte, so the generic word-boundary test cannot see the element a ".claude" is
-// glued to; this flag is that test.
-//
-// Each separator spelling gets two rules, and the order is load-bearing three
-// deep: the file rule must precede its own directory rule so its longer match
-// wins, and the JSON-ESCAPED file rule must precede the plain "\" directory
-// rule. A path inside a tool call's arguments arrives as JSON text, not as
-// decoded prose - the model escapes every backslash when it writes the path
-// into OpenAI function.arguments or Anthropic partial_json - so the plain
-// directory rule would consume the directory, leave the file name behind, and
-// hand the client ".claude\\GEMINI.md": half its file name, half ours. The
-// escaped directory rule is not needed, because the plain directory rule
-// already leaves the second backslash of the pair in place.
 func pathRules(fromDir, toDir, fromFile, toFile string) []rewriteMapping {
-	fileRule := func(sep string) rewriteMapping {
-		return rewriteMapping{
-			Match:        fromDir + sep + strings.ReplaceAll(fromFile, "/", sep),
-			Replacement:  toDir + sep + strings.ReplaceAll(toFile, "/", sep),
-			WholeSegment: true,
-			// A path is what the model actually writes into a command or a
-			// file, so every rule of this group runs over tool arguments too.
-			ArgumentSafe: true,
-		}
-	}
-	dirRule := func(sep string) rewriteMapping {
-		return rewriteMapping{Match: fromDir + sep, Replacement: toDir + sep, WholeSegment: true, ArgumentSafe: true}
-	}
-	return []rewriteMapping{
-		fileRule("/"),
-		dirRule("/"),
-		fileRule(`\`),
-		// The escaped spelling of fileRule(`\`): JSON writes each backslash
-		// twice, and JSON never escapes a forward slash, so the "/" rules above
-		// need no twin.
-		fileRule(`\\`),
-		dirRule(`\`),
-	}
+	return spec.PathRules(fromDir, toDir, fromFile, toFile)
 }
 
-// Claude Code keeps its file name too, because CLAUDE.md is brand-bearing
-// prose the model would otherwise quote straight back.
-var claudeContextMappings = pathRules(".claude", ".gemini", "CLAUDE.md", "GEMINI.md")
+var (
+	explicitClientAliasMap            map[string]string
+	aliasPlanClients                  map[string]bool
+	sharedAliasesByClient             map[string]map[string]string
+	sourceIdentityInventoriesByClient map[string]map[string]bool
 
-var claudeReverseContextMappings = pathRules(".gemini", ".claude", "GEMINI.md", "CLAUDE.md")
+	brandMappingsByClient        map[string][]rewriteMapping
+	reverseBrandMappingsByClient map[string][]rewriteMapping
 
-// Codex keeps its file names, per codex-rs/core/src/agents_md.rs: AGENTS.md is
-// already the neutral name Codex reads, so there is no brand in the file name to
-// hide and none is invented. Only the directory is rewritten.
-var codexContextMappings = pathRules(".codex", ".gemini", "AGENTS.md", "AGENTS.md")
+	claudeCodeBrandMappings        []rewriteMapping
+	claudeCodeReverseBrandMappings []rewriteMapping
+	claudeContextMappings          []rewriteMapping
+	claudeReverseContextMappings   []rewriteMapping
+	claudeCodeSharedAliases        map[string]string
 
-var codexReverseContextMappings = pathRules(".gemini", ".codex", "AGENTS.md", "AGENTS.md")
+	codexBrandMappings           []rewriteMapping
+	codexReverseBrandMappings    []rewriteMapping
+	codexContextMappings         []rewriteMapping
+	codexReverseContextMappings  []rewriteMapping
+	codexSharedAliases           map[string]string
+	codexSourceIdentityInventory map[string]bool
 
-var codexReverseBrandMappings = slices.Concat(
-	// The exact inverse of the forward context group. Not a blanket ".gemini/"
-	// -> ".codex/": the forward pass never introduced one, so a blanket here
-	// would rewrite a ".gemini" the user typed.
-	codexReverseContextMappings,
-	[]rewriteMapping{
-		// Exact inverses of the residual identity prose, in forward order.
-		{Match: "Google Deepmind", Replacement: "OpenAI"},
-		{Match: "Gemini 3", Replacement: "GPT-6"},
-		// The bare brand word, last so the longer tokens above win the prefix.
-		// The exclusion is what keeps the real Antigravity host intact: the dot
-		// after "Antigravity" is a non-word byte, so its right boundary passes
-		// and this rule would otherwise hand the client "Codex.google", a host
-		// that does not exist. Codex's forward pass never introduces that
-		// domain, so nothing there has to be restored, and an exclusion is the
-		// right shape where a repair rule would have to invent an "omp.google"
-		// or "Codex.google" source domain that the contract does not have.
-		{Match: "Antigravity", Replacement: "Codex", NotFollowedBy: antigravityHostPreserve},
-	},
+	ompBrandMappings                  []rewriteMapping
+	canonicalOMPSafeMappingSet        map[string]string
+	ompSourceIdentityInventory        map[string]bool
+	ompSharedAliases                  map[string]string
+	ompCloakedTargetIdentityInventory map[string]bool
+
+	defaultCloakTables     map[string]map[string]string
+	defaultUncloakTables   map[string]map[string]string
+	clientDistinctiveTools map[string]map[string]bool
 )
-
-var reverseBrandMappingsByClient = map[string][]rewriteMapping{
-	"claude_code": claudeCodeReverseBrandMappings,
-	"codex":       codexReverseBrandMappings,
-}
-
-// brandMappingsFor returns the forward table for one client, or nil when the
-// client has none. Order within a table is load-bearing: a longer token that
-// contains a shorter one must run first.
-func brandMappingsFor(client string) []rewriteMapping {
-	return brandMappingsByClient[client]
-}
-
-// reverseBrandMappingsFor returns the reverse table for one client, or nil when
-// the client has none. Order is load-bearing here too, for the bare
-// "Antigravity" token in particular.
-func reverseBrandMappingsFor(client string) []rewriteMapping {
-	return reverseBrandMappingsByClient[client]
-}
-
-type rewriteMapping struct {
-	Match       string
-	Replacement string
-	// Client scopes the rule to one resolved client id (e.g. "claude_code").
-	// Empty applies the rule to every client.
-	Client string
-	// WholeSegment requires the match to begin a whole path element: the byte
-	// before it may not be a word byte, so ".claude/" is not a match inside
-	// "foo.claude/settings.json". Set on the path groups (pathRules and the
-	// client path pairs), where the match begins with a dot and the generic
-	// word-boundary test cannot see the element it is glued to. Left off prose
-	// rules, which are matched wherever their own word boundary allows.
-	WholeSegment bool
-	// SegmentEnd requires the match to END a whole path element: the byte after
-	// it must be end of string or a path separator. It is the right-hand half of
-	// WholeSegment, and the reason the bare ".gemini" reverse rule cannot hand
-	// the client ".omp-backup": the generic word boundary accepts a dot or a
-	// hyphen after the match, so ".gemini-backup" and ".gemini.foo" would be
-	// rewritten into paths the forward pass deliberately never produced. Only
-	// the bare form needs it - a rule that ends in "/" or "\" already forces its
-	// own right boundary.
-	SegmentEnd bool
-	// NotFollowedBy is an exclusion suffix: the rule does not apply when the
-	// bytes immediately after the match begin with this string. It is how a
-	// rule names a spelling that must survive it untouched - the OMP scheme
-	// "omp://" on the forward pass, and the real Antigravity host
-	// "antigravity.google" on the reverse pass, where the bare brand rule would
-	// otherwise hand the client "omp.google". Chunk-safe: the stream lanes hold
-	// a complete match whose exclusion suffix is still arriving rather than
-	// resolving it early.
-	NotFollowedBy string
-	// ArgumentSafe marks a rule the reverse pass may also run over a
-	// tool-argument carrier (`input_json_delta.partial_json`,
-	// `tool_use.input`, `tool_calls[].function.arguments`).
-	//
-	// An argument is DATA the client executes or writes to disk, not text it
-	// displays, so only an operational identifier the model can legitimately
-	// echo from the cloaked prompt belongs there: a path, an SDK or domain name,
-	// a client-declared skill or tool identifier. A bare prose brand word does
-	// not: the forward pass never writes one into an argument (it rewrites
-	// prompts, never tool arguments), so a blind reverse only corrupts literals
-	// the model copied from the user - `cd antigravity-cloak && go test ./...`
-	// came back as `cd Claude-cloak` and the client ran a directory that does not
-	// exist. Prose rules stay prose: they reverse assistant text, and this flag
-	// keeps them out of the argument carriers.
-	ArgumentSafe bool
-}
-
-// reverseCloakedBrandBody maps the tokens this plugin introduced back onto the
-// client's own spelling, so a cloaked conversation reads to the client exactly
-// as it did before. It runs after tool-name uncloaking and uses the same
-// recursive walk as the forward pass, with the table selected by the resolved
-// client: the protected pair and home directory for oh_my_pi, the client's own
-// table for claude_code and codex.
-func reverseCloakedBrandBody(body []byte, client string) ([]byte, bool) {
-	var root any
-	if err := safeUnmarshal(body, &root); err != nil {
-		return nil, false
-	}
-	// Carrier-aware, never a recursive all-string walk. The walk used to reach
-	// tool_use.name, so a client-declared tool that happens to be spelled like
-	// a cloaked token (Claude Code declares "Antigravity-api") was rewritten
-	// AFTER exact uncloak had already restored it, and the client got a tool it
-	// never declared. Tool identity, ids, types and metadata belong to the
-	// exact alias-plan authority alone; brand reverse owns assistant prose and
-	// the VALUES inside tool arguments.
-	if !reverseAssistantBrandInJSON(root, client) {
-		return nil, false
-	}
-	raw, err := safeMarshal(root)
-	if err != nil {
-		return nil, false
-	}
-	return raw, true
-}
-
-var defaultCloakTables = map[string]map[string]string{
-	"claude_code": {
-		// Tier-1: Core file/shell tools — proven one-to-one AGY role names.
-		"Bash": "run_command", "Edit": "edit_file", "Read": "read_file",
-		"Write": "write_file", "Grep": "grep_search",
-		"Glob": "find_by_name", // Issue #36: was list_dir — AGY list_dir lists one dir, Glob is a pattern matcher.
-		// Tier-1: Subagent/interaction — proven AGY role names.
-		"Agent": "invoke_subagent", "AskUserQuestion": "ask_question",
-		// Tier-1: Web tools — proven AGY role names (one-to-one, no schema conflict).
-		"WebSearch": "search_web",
-		// Tier-2 tools (WebFetch, ListAgents, SendMessage, TaskStop, ListMcpResourcesTool,
-		// ReadMcpResourceTool, etc.) are in claudeCodeSharedAliases with approved
-		// parent #32 vocabulary — they have no proven one-to-one AGY role.
-	},
-	"codex": {
-		// Code mode is the default for every routed provider here, so this table
-		// keys on what a code-mode session actually declares. The list below was
-		// read off this plugin's own debug log for a live cpa/agy session over
-		// opencodex's openai-chat adapter (2026-09-12), which delivers Chat
-		// Completions:
-		//
-		//   exec, wait, request_user_input, request_user_input_async,
-		//   clock__sleep, collaboration__followup_task,
-		//   collaboration__interrupt_agent, collaboration__list_agents,
-		//   collaboration__send_message, collaboration__spawn_agent,
-		//   collaboration__wait_agent, web_search
-		//
-		// Namespaced children are keyed flattened, the way opencodex's
-		// namespacedToolName lowers them ("<namespace>__<child>") so they survive
-		// the chat-completions function-tool format. That exact spelling is what
-		// the request-scoped reverse matches a declared name against, so these
-		// pairs survive narrowing; a bare "spawn_agent" key would not.
-		//
-		// Only names that occupy a tool-name position are listed. The helpers that
-		// exist solely as prose inside the "exec" description -- apply_patch,
-		// exec_command, write_stdin, view_image, tool_search, the goal and
-		// MCP-resource tools -- stay pass-through deliberately: the reverse path
-		// restores a name only where it appears as a tool name, so cloaking prose
-		// would hand the client a helper it never declared.
-		//
-		// "exec" is the code-mode entry point and owns run_command in this static
-		// table. A shell-mode session declares exec_command instead, which maps to
-		// run_command via codexSharedAliases; it is kept out of defaultCloakTables
-		// so defaultUncloakTables stays injective at init(), and is admitted per-request
-		// through the alias plan machinery without collision.
-		"exec":                       "run_command",
-		"web_search":                 "search_web",
-		"request_user_input":         "ask_question",
-		"collaboration__spawn_agent": "invoke_subagent",
-	},
-	"oh_my_pi": {
-		"read":       "read_file",
-		"write":      "write_file",
-		"edit":       "edit_file",
-		"bash":       "run_command",
-		"grep":       "grep_search",
-		"glob":       "find_by_name",
-		"task":       "invoke_subagent",
-		"ask":        "ask_question",
-		"web_search": "search_web",
-	},
-}
-
-// canonicalOMPSafeMappingSet is the canonical nine-tool Safe Mapping Set for Oh My Pi.
-var canonicalOMPSafeMappingSet = map[string]string{
-	"read":       "read_file",
-	"write":      "write_file",
-	"edit":       "edit_file",
-	"bash":       "run_command",
-	"grep":       "grep_search",
-	"glob":       "find_by_name",
-	"task":       "invoke_subagent",
-	"ask":        "ask_question",
-	"web_search": "search_web",
-}
-
-// ompSourceIdentityInventory contains the static OMP source tool names used
-// for request body detection in detectClient. It contains the nine canonical
-// Safe Mapping Set source names plus former OMP-specific pass-through names:
-// todo, hub, eval, the finite 5 vibe_* tools, and 4 autoresearch tools.
-// Arbitrary operator tool_mappings must not extend this inventory.
-var ompSourceIdentityInventory = map[string]bool{
-	"read":            true,
-	"write":           true,
-	"edit":            true,
-	"bash":            true,
-	"grep":            true,
-	"glob":            true,
-	"task":            true,
-	"ask":             true,
-	"web_search":      true,
-	"todo":            true,
-	"hub":             true,
-	"eval":            true,
-	"vibe_spawn":      true,
-	"vibe_send":       true,
-	"vibe_wait":       true,
-	"vibe_kill":       true,
-	"vibe_list":       true,
-	"init_experiment": true,
-	"run_experiment":  true,
-	"log_experiment":  true,
-	"update_notes":    true,
-}
-
-// codexSourceIdentityInventory contains the static Codex source tool names used
-// for request body detection in detectClient. It spans BOTH tool modes so that
-// detection survives the mode switch described on defaultCloakTables["codex"]:
-// shell mode contributes exec_command, write_stdin, apply_patch and view_image,
-// code mode contributes the freeform exec, web_search and the collaboration
-// children.
-//
-// The collaboration entries are listed BOTH bare and in opencodex's flattened
-// "<namespace>__<child>" spelling, because that flattened form is what actually
-// reaches this plugin over the openai-chat adapter; a bare-only inventory would
-// score a real code-mode request one hit short of minToolNameHits whenever it
-// declares exec plus namespace children and nothing else.
-//
-// Names generic enough to belong to any harness ("wait", "clock__sleep",
-// "send_message") are deliberately absent from this inventory: client detection
-// must stay independent of cloakability. Even though tools like "wait" and
-// "clock__sleep" are cloaked via codexSharedAliases when a request is attributed
-// to Codex, their presence in an unattributed request must never serve as
-// evidence that the client is Codex.
-var codexSourceIdentityInventory = map[string]bool{
-	"exec":                           true,
-	"exec_command":                   true,
-	"write_stdin":                    true,
-	"apply_patch":                    true,
-	"view_image":                     true,
-	"web_search":                     true,
-	"request_user_input":             true,
-	"request_user_input_async":       true,
-	"spawn_agent":                    true,
-	"followup_task":                  true,
-	"list_agents":                    true,
-	"wait_agent":                     true,
-	"interrupt_agent":                true,
-	"collaboration__spawn_agent":     true,
-	"collaboration__followup_task":   true,
-	"collaboration__list_agents":     true,
-	"collaboration__wait_agent":      true,
-	"collaboration__interrupt_agent": true,
-	"collaboration__send_message":    true,
-}
-
-// claudeCodeSharedAliases is the preferred alias map for Claude Code tools that
-// have no proven one-to-one AGY role (Tier-2 per parent #32). These wp_ aliases
-// are used by admitRequestAliasPlan when CC is admitted through the alias-plan
-// path, giving each CC-specific tool a stable upstream identity without claiming
-// a real AGY tool name. Names are the exact parent #32 vocabulary.
-var claudeCodeSharedAliases = map[string]string{
-	// Discovery / workflow.
-	"ToolSearch": "wp_find_tools",
-	"Skill":      "wp_invoke_skill",
-	"Workflow":   "wp_run_workflow",
-	// Web fetch (read_url_content was removed in AGY 2.25.0+).
-	"WebFetch": "wp_fetch_url",
-	// Subagent control — unproven semantic match to AGY targets.
-	"ListAgents":  "wp_list_workers",
-	"SendMessage": "wp_send_message",
-	"TaskStop":    "wp_cancel_task",
-	// Scheduling / planning / worktree.
-	"ScheduleWakeup": "wp_set_wakeup",
-	"CronCreate":     "wp_create_schedule",
-	"CronDelete":     "wp_delete_schedule",
-	"CronList":       "wp_list_schedules",
-	"EnterPlanMode":  "wp_begin_planning",
-	"ExitPlanMode":   "wp_finish_planning",
-	"EnterWorktree":  "wp_open_worktree",
-	"ExitWorktree":   "wp_close_worktree",
-	// Notebook / reporting.
-	"NotebookEdit":   "wp_edit_notebook",
-	"ReportFindings": "wp_submit_report",
-	// Deferred / MCP resource tools — Tier-2 (no proven one-to-one AGY role).
-	"DeferredToolPlaceholder": "wp_resolve_tool",
-	"WaitForMcpServers":       "wp_wait_integrations",
-	"ListMcpResourcesTool":    "wp_list_resources",
-	"ReadMcpResourceTool":     "wp_read_resource",
-	"ReadMcpResourceDirTool":  "wp_list_resource_dir",
-}
-
-// codexSharedAliases is the preferred alias map for Codex tools that have no
-// proven one-to-one AGY role, or whose previous mappings were unproven semantic
-// matches. Issue #38 moves collaboration__followup_task and
-// collaboration__list_agents here (previously mapped to manage_task and
-// manage_subagents respectively — those AGY tools have different semantics).
-var codexSharedAliases = map[string]string{
-	// Previously intentional pass-through, now cloaked to shared aliases.
-	"wait":                           "wp_wait",
-	"request_user_input_async":       "wp_request_user_input_async",
-	"clock__sleep":                   "wp_clock_sleep",
-	"collaboration__wait_agent":      "wp_collaboration_wait_agent",
-	"collaboration__interrupt_agent": "wp_collaboration_interrupt_agent",
-	"collaboration__send_message":    "wp_send_message",
-	// Moved from unproven semantic mappings in defaultCloakTables.
-	"collaboration__followup_task": "wp_collaboration_followup_task",
-	"collaboration__list_agents":   "wp_list_workers",
-	// Shell-mode tools that need cloaking. exec_command is the shell-mode
-	// entry point (proven semantic match to run_command, same as exec in
-	// code mode). Kept here rather than in defaultCloakTables to avoid a
-	// non-injective inverse map at init(); each request must declare or use
-	// only one entry point; distinct sources sharing run_command in a single
-	// request reject admission.
-	"exec_command": "run_command",
-	"apply_patch":  "wp_apply_patch",
-	"write_stdin":  "wp_write_stdin",
-	"view_image":   "wp_view_image",
-}
-
-// ompSharedAliases is the preferred alias map for OMP tools beyond the
-// canonical nine. Issue #37: the effective table can exceed nine; these tools
-// were formerly intentional pass-through but now get cloaked to shared aliases
-// on ProtectedAGY routes through the alias plan machinery. Unknown declarations
-// (e.g. custom operator tools) fall through to fallbackAliasForSource.
-var ompSharedAliases = map[string]string{
-	// Standard pass-through tools.
-	"todo": "wp_todo", "hub": "wp_hub", "eval": "wp_eval",
-	// Vibe Mode.
-	"vibe_spawn": "wp_vibe_spawn", "vibe_send": "wp_vibe_send",
-	"vibe_wait": "wp_vibe_wait", "vibe_kill": "wp_vibe_kill", "vibe_list": "wp_vibe_list",
-	// Autoresearch Mode.
-	"init_experiment": "wp_init_experiment", "run_experiment": "wp_run_experiment",
-	"log_experiment": "wp_log_experiment", "update_notes": "wp_update_notes",
-	// Memory & skill (no AGY equivalent).
-	"learn": "wp_learn", "manage_skill": "wp_manage_skill",
-	// Semantic search (cannot map to grep_search: declaration collision).
-	"find": "wp_find",
-	// Goal and loop runtime. These are declared only while /goal, /guided-goal
-	// or /loop is active, so they are invisible in a default session and were
-	// silently taking the deterministic wp_ext_<hash> fallback. Every family
-	// above is named rather than hashed, and codex has mapped its own "wait" to
-	// wp_wait all along, so leaving the Oh My Pi equivalents out was an omission
-	// rather than a decision. The fallback stays: any tool a future Oh My Pi
-	// release declares still resolves through it.
-	"goal": "wp_goal", "yield": "wp_yield", "wait": "wp_wait",
-}
-
-// ompCloakedTargetIdentityInventory contains the nine canonical AGY-facing
-// target tool names from the Safe Mapping Set.
-// These target identities are corroboration/static evidence only and
-// MUST NEVER be used as standalone attribution without an independent OMP signal.
-var ompCloakedTargetIdentityInventory = map[string]bool{
-	"read_file":       true,
-	"write_file":      true,
-	"edit_file":       true,
-	"run_command":     true,
-	"grep_search":     true,
-	"find_by_name":    true,
-	"invoke_subagent": true,
-	"ask_question":    true,
-	"search_web":      true,
-}
-
-// clientDistinctiveTools lists harness-specific source tool names whose
-// presence alone identifies a client. Clients whose source names are mostly
-// common words ("read", "bash") collide with arbitrary user-defined tools,
-// so those names require several simultaneous matches instead.
-//
-// For Oh My Pi, this matches the distinctive subset of ompSourceIdentityInventory;
-// for other clients, it stays in sync with defaultCloakTables.
-var clientDistinctiveTools = map[string]map[string]bool{
-	"oh_my_pi": {
-		"hub": true, "task": true, "todo": true, "eval": true, "web_search": true,
-		"vibe_spawn": true, "vibe_send": true, "vibe_wait": true, "vibe_kill": true, "vibe_list": true,
-		"init_experiment": true, "run_experiment": true, "log_experiment": true, "update_notes": true,
-	},
-}
 
 const (
 	// minToolNameHits is the minimum number of tool-name hits required before
@@ -5369,23 +4660,190 @@ const (
 	minCloakTargetHitDen = 5
 )
 
-var defaultUncloakTables map[string]map[string]string
+func brandMappingsFor(client string) []rewriteMapping {
+	return brandMappingsByClient[client]
+}
 
-func init() {
+func reverseBrandMappingsFor(client string) []rewriteMapping {
+	return reverseBrandMappingsByClient[client]
+}
+
+// reverseCloakedBrandBody maps the tokens this plugin introduced back onto the
+// client's own spelling, so a cloaked conversation reads to the client exactly
+// as it did before. It runs after tool-name uncloaking and uses the same
+// recursive walk as the forward pass, with the table selected by the resolved
+// client: the protected pair and home directory for oh_my_pi, the client's own
+// table for claude_code and codex.
+func reverseCloakedBrandBody(body []byte, client string) ([]byte, bool) {
+	var root any
+	if err := safeUnmarshal(body, &root); err != nil {
+		return nil, false
+	}
+	if !reverseAssistantBrandInJSON(root, client) {
+		return nil, false
+	}
+	raw, err := safeMarshal(root)
+	if err != nil {
+		return nil, false
+	}
+	return raw, true
+}
+
+func cloneStringMap(m map[string]string) map[string]string {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneBoolMap(m map[string]bool) map[string]bool {
+	if m == nil {
+		return nil
+	}
+	out := make(map[string]bool, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// initializeClients replaces the complete client registry and derived mapping
+// tables from specs, then publishes defaultFilterConfig atomically. Repeated
+// calls replace rather than accumulate state.
+func initializeClients(specs ...spec.ClientSpec) {
+	explicitClientAliasMap = make(map[string]string)
+	aliasPlanClients = make(map[string]bool)
+	sharedAliasesByClient = make(map[string]map[string]string)
+	sourceIdentityInventoriesByClient = make(map[string]map[string]bool)
+	brandMappingsByClient = make(map[string][]rewriteMapping)
+	reverseBrandMappingsByClient = make(map[string][]rewriteMapping)
+	argumentReverseTablesByClient = make(map[string][]rewriteMapping)
+	defaultCloakTables = make(map[string]map[string]string)
+	defaultUncloakTables = make(map[string]map[string]string)
+	clientDistinctiveTools = make(map[string]map[string]bool)
+	userAgentEvidence = nil
+
+	mandatoryProtectedOMPAliases = nil
+	ompIdentityLines = nil
+	ompProtectedReverseTable = nil
+	ompBrandMappings = nil
+	canonicalOMPSafeMappingSet = nil
+	ompSourceIdentityInventory = nil
+	ompSharedAliases = nil
+	ompCloakedTargetIdentityInventory = nil
+
+	claudeCodeBrandMappings = nil
+	claudeCodeReverseBrandMappings = nil
+	claudeContextMappings = nil
+	claudeReverseContextMappings = nil
+	claudeCodeSharedAliases = nil
+
+	codexBrandMappings = nil
+	codexReverseBrandMappings = nil
+	codexContextMappings = nil
+	codexReverseContextMappings = nil
+	codexSharedAliases = nil
+	codexSourceIdentityInventory = nil
+
+	setDefaultOMPSanitizationPresets(nil)
+	setClaudeFingerprintData(nil, nil)
+
+	for _, s := range specs {
+		for _, alias := range s.ExplicitAliases {
+			if norm := strings.ToLower(strings.TrimSpace(alias)); norm != "" {
+				explicitClientAliasMap[norm] = s.ID
+			}
+		}
+		for _, prefix := range s.UserAgentPrefixes {
+			userAgentEvidence = append(userAgentEvidence, struct {
+				prefix string
+				client string
+			}{prefix: prefix, client: s.ID})
+		}
+		if s.UsesAliasPlan {
+			aliasPlanClients[s.ID] = true
+		}
+		if len(s.ForwardBrandMappings) > 0 {
+			brandMappingsByClient[s.ID] = append([]rewriteMapping(nil), s.ForwardBrandMappings...)
+		}
+		if len(s.ReverseBrandMappings) > 0 {
+			reverseBrandMappingsByClient[s.ID] = append([]rewriteMapping(nil), s.ReverseBrandMappings...)
+		}
+		if len(s.DefaultCloakTools) > 0 {
+			defaultCloakTables[s.ID] = cloneStringMap(s.DefaultCloakTools)
+		}
+		if len(s.SharedAliases) > 0 {
+			sharedAliasesByClient[s.ID] = cloneStringMap(s.SharedAliases)
+		}
+		if len(s.SourceIdentityTools) > 0 {
+			sourceIdentityInventoriesByClient[s.ID] = cloneBoolMap(s.SourceIdentityTools)
+		}
+		if len(s.DistinctiveTools) > 0 {
+			clientDistinctiveTools[s.ID] = cloneBoolMap(s.DistinctiveTools)
+		}
+
+		switch s.ID {
+		case omp.ClientID:
+			mandatoryProtectedOMPAliases = append([]string(nil), s.MandatoryBrandAliases...)
+			ompIdentityLines = append([]rewriteMapping(nil), s.IdentityLines...)
+			ompProtectedReverseTable = append([]rewriteMapping(nil), s.ProtectedReverseBrand...)
+			ompBrandMappings = append([]rewriteMapping(nil), s.ForwardBrandMappings...)
+			canonicalOMPSafeMappingSet = cloneStringMap(s.DefaultCloakTools)
+			ompSourceIdentityInventory = cloneBoolMap(s.SourceIdentityTools)
+			ompSharedAliases = cloneStringMap(s.SharedAliases)
+			ompCloakedTargetIdentityInventory = cloneBoolMap(s.CloakedTargetTools)
+			setDefaultOMPSanitizationPresets(s.PromptSanitizations)
+		case claudecode.ClientID:
+			claudeContextMappings = append([]rewriteMapping(nil), s.ContextMappings...)
+			claudeReverseContextMappings = append([]rewriteMapping(nil), s.ReverseContextMappings...)
+			claudeCodeBrandMappings = append([]rewriteMapping(nil), s.ForwardBrandMappings...)
+			claudeCodeReverseBrandMappings = append([]rewriteMapping(nil), s.ReverseBrandMappings...)
+			claudeCodeSharedAliases = cloneStringMap(s.SharedAliases)
+			setClaudeFingerprintData(s.NewsURLSanitization, s.AgentTier)
+		case codex.ClientID:
+			codexContextMappings = append([]rewriteMapping(nil), s.ContextMappings...)
+			codexReverseContextMappings = append([]rewriteMapping(nil), s.ReverseContextMappings...)
+			codexBrandMappings = append([]rewriteMapping(nil), s.ForwardBrandMappings...)
+			codexReverseBrandMappings = append([]rewriteMapping(nil), s.ReverseBrandMappings...)
+			codexSharedAliases = cloneStringMap(s.SharedAliases)
+			codexSourceIdentityInventory = cloneBoolMap(s.SourceIdentityTools)
+		}
+	}
+
+	// Inert User-Agent guard entry: stays inert until a usable ToolMappings table exists.
+	userAgentEvidence = append(userAgentEvidence, struct {
+		prefix string
+		client string
+	}{prefix: "opencode/", client: "opencode"})
+
 	for client, table := range reverseBrandMappingsByClient {
 		argumentReverseTablesByClient[client] = filterArgumentReverseTable(table)
 	}
-	argumentReverseTablesByClient["oh_my_pi"] = filterArgumentReverseTable(ompProtectedReverseTable)
-	defaultUncloakTables = make(map[string]map[string]string)
+	if len(ompProtectedReverseTable) > 0 {
+		argumentReverseTablesByClient[omp.ClientID] = filterArgumentReverseTable(ompProtectedReverseTable)
+	}
 	for client, cloaks := range defaultCloakTables {
-		uncloaks := make(map[string]string)
+		uncloaks := make(map[string]string, len(cloaks))
 		for orig, mapped := range cloaks {
 			uncloaks[mapped] = orig
 		}
 		defaultUncloakTables[client] = uncloaks
 	}
+
 	cfg := defaultFilterConfig()
 	globalFilterConfig.Store(&cfg)
+}
+
+func init() {
+	initializeClients(
+		claudecode.Spec(),
+		codex.Spec(),
+		omp.Spec(),
+	)
 }
 
 func copyToolMappings(m map[string]map[string]string) map[string]map[string]string {
@@ -5738,12 +5196,10 @@ func parseExplicitClientMarker(headers http.Header) explicitMarkerResult {
 
 func normalizeExplicitClientToken(token string) string {
 	lower := strings.ToLower(strings.TrimSpace(token))
-	switch lower {
-	case "oh_my_pi", "omp", "oh-my-pi":
-		return "oh_my_pi"
-	default:
-		return normalizeClientKey(token)
+	if canonical, ok := explicitClientAliasMap[lower]; ok {
+		return canonical
 	}
+	return normalizeClientKey(token)
 }
 
 // resolveUserAgentClient returns a client derived from conservative
@@ -7920,14 +7376,7 @@ func extractToolNames(body map[string]any, sourceFormat string) []string {
 // sourceIdentityInventoryFor returns the static source identity inventory for a
 // client, or nil when the client is detected from its runtime rename table.
 func sourceIdentityInventoryFor(client string) map[string]bool {
-	switch client {
-	case "oh_my_pi":
-		return ompSourceIdentityInventory
-	case "codex":
-		return codexSourceIdentityInventory
-	default:
-		return nil
-	}
+	return sourceIdentityInventoriesByClient[client]
 }
 
 // detectClient identifies the client from ORIGINAL (uncloaked) tool names.
