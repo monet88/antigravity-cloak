@@ -79,5 +79,5 @@ When upgrading an already-loaded `antigravity-cloak` `.so` on a live host (for e
 
 To complete an in-place upgrade cleanly without duplicate-ID plugin discovery conflicts:
 1. Run `POST /v0/management/plugin-store/antigravity-cloak/install` with the target version (`{"version":"0.7.4"}`).
-2. Stop the gateway container (`docker compose stop cli-proxy-api`), move `antigravity-cloak-v<old>.so` outside the `plugins/` discovery directory (for example `mv plugins/linux/amd64/antigravity-cloak-v0.7.3.so ./antigravity-cloak-v0.7.3.so.bak`), and start it back up (`docker compose up -d cli-proxy-api`).
+2. Discover the live gateway container name first (`docker ps --format '{{.Names}}'`, e.g. `cli-proxy-api-origin` on VPS) instead of assuming `cli-proxy-api`. Stop it (`docker stop <container>`), move `antigravity-cloak-v<old>.so` outside the `plugins/` discovery directory (for example `mv plugins/linux/amd64/antigravity-cloak-v0.7.3.so ./antigravity-cloak-v0.7.3.so.bak`), and start it back up (`docker start <container>`).
 3. Confirm via `GET /v0/management/plugins` that `antigravity-cloak` reports `path: "plugins/linux/amd64/antigravity-cloak-v<new>.so"`, `metadata.version: "<new>"`, `registered: true`, and `effective_enabled: true`.

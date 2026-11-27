@@ -324,6 +324,8 @@ $OmpExit = $LASTEXITCODE
 if ($OmpExit) { Write-Warning "OMP exited $OmpExit; inspect local evidence and run cleanup" }
 ```
 
+> **Non-TTY / automated shells:** Always pass explicit `--profile cloak-live` (otherwise OMP targets the default production profile) and close stdin (e.g. `subprocess.run(..., stdin=subprocess.DEVNULL)` in Python or `$null | omp ...` in PowerShell) so `omp -p` does not hang waiting on TTY input.
+
 Appending the original wrapper ensures a client whose bundle was previously
 patched to `<agent-conventions>` still tests the plugin fix. Keep the unique
 marker in system text. The provider prefix `cpa/` is OMP-local; the plugin sees

@@ -16,7 +16,7 @@ patterns in the existing code, not from aspirational rules.
 
 | Path | Purpose |
 | :--- | :--- |
-| `main.go` | Plugin core: lifecycle, interceptors, brand rewriter, stream manager, configuration. ~7.5 k lines. |
+| `main.go` | Plugin core: lifecycle, interceptors, brand rewriter, stream manager, configuration. |
 | `issue55_agent_tier.go` | Issue #55 Claude Code fingerprint machinery (news-URL sanitation, reversible Agent model tiers). |
 | `omp_prompt_sanitization.go` | Oh My Pi `agy/*` prompt sanitization (system-conventions tags, RFC 2119 presets, injected OAuth instruction preset, live config). |
 | `*_test.go` (root) | Unit/lifecycle tests. `package main` — full internal access. |
@@ -82,7 +82,6 @@ tables, and small features belong in `main.go`.
 
 ## Testing
 
-- ~388 test functions across 32 test files, with ~78 subtests.
 - **Offline harness**: `httptest`-backed round-trip driving rewritten requests
   into a local mock upstream and back through the stream interceptor. No
   external network.
@@ -94,9 +93,10 @@ tables, and small features belong in `main.go`.
   structural contracts and block regressions.
 - **Round-trip tests**: Every cloak mapping asserts request→upstream→response
   round trip, not just one direction.
-- **Run before commit**:
+- **Run before commit** (enforced by CI; local `.git/hooks/pre-commit` runs `gofmt`, `go vet`, and `go test`):
   ```powershell
-  go test ./...
+  gofmt -l (git ls-files '*.go')
+  go test -race ./...
   go test ./.github/scripts
   go vet ./...
   ```

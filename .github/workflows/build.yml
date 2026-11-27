@@ -29,8 +29,17 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Check gofmt
+        run: |
+          unformatted="$(git ls-files -z '*.go' | xargs -0 gofmt -l)"
+          if [[ -n "$unformatted" ]]; then
+            echo "Unformatted Go files:"
+            echo "$unformatted"
+            exit 1
+          fi
+
       - name: Test plugin
-        run: go test ./...
+        run: go test -race ./...
 
       - name: Test release packaging helper
         run: go test ./.github/scripts

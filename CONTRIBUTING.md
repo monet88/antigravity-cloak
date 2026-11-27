@@ -112,7 +112,7 @@ procedure, see
 [docs/verification-checklist.md](docs/verification-checklist.md#2-build-a-clean-linuxamd64-shared-library).
 
 > [!WARNING]
-> Read the [silent build/deploy traps](AGENTS.md#build-and-deploy-traps-that-fail-silently)
+> Read the [silent build/deploy traps](AGENTS.md#build--deploy-silent-traps)
 > before your first build. Both traps produce a wrong artifact with no error.
 
 ## Live Acceptance
