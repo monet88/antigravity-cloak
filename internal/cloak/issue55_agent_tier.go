@@ -108,7 +108,7 @@ func sanitizeSystemNewsURL(root map[string]any, format string) bool {
 
 // Contract B runtime helpers read claudeAgentToolSourceName, claudeAgentTierAliases,
 // claudeAgentTierNatives, and claudeAgentModelDescriptionPrefix populated by
-// setClaudeFingerprintData during initializeClients.
+// setClaudeFingerprintData during Initialize.
 
 // requestTierAuthority is pinned inside the admitting requestAliasPlan for the
 // request that advertised the translatable enum. No cross-request memory and no

@@ -8,14 +8,33 @@ import (
 	"github.com/monet88/antigravity-cloak/internal/clients/claudecode"
 	"github.com/monet88/antigravity-cloak/internal/clients/codex"
 	"github.com/monet88/antigravity-cloak/internal/clients/omp"
+	"github.com/monet88/antigravity-cloak/internal/spec"
+)
+
+const antigravityIdentity = spec.AntigravityIdentity
+
+var (
+	claudeCodeBrandMappings      []rewriteMapping
+	claudeContextMappings        []rewriteMapping
+	claudeReverseContextMappings []rewriteMapping
+	codexContextMappings         []rewriteMapping
+	codexReverseContextMappings  []rewriteMapping
+	ompBrandMappings             []rewriteMapping
 )
 
 func TestMain(m *testing.M) {
-	Initialize(
-		claudecode.Spec(),
-		codex.Spec(),
-		omp.Spec(),
-	)
+	ccSpec := claudecode.Spec()
+	codexSpec := codex.Spec()
+	ompSpec := omp.Spec()
+
+	claudeCodeBrandMappings = ccSpec.ForwardBrandMappings
+	claudeContextMappings = ccSpec.ContextMappings
+	claudeReverseContextMappings = ccSpec.ReverseContextMappings
+	codexContextMappings = codexSpec.ContextMappings
+	codexReverseContextMappings = codexSpec.ReverseContextMappings
+	ompBrandMappings = ompSpec.ForwardBrandMappings
+
+	Initialize(ccSpec, codexSpec, ompSpec)
 	os.Exit(m.Run())
 }
 

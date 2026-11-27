@@ -6,6 +6,8 @@ import (
 	"github.com/monet88/antigravity-cloak/internal/spec"
 )
 
+type rewriteMapping = spec.RewriteMapping
+
 const (
 	clientIDClaudeCode = "claude_code"
 	clientIDCodex      = "codex"
@@ -13,7 +15,7 @@ const (
 )
 
 // userAgentEvidence lists conservative User-Agent prefixes that may resolve a
-// client, populated by initializeClients. Each entry is verified against active
+// client, populated by Initialize. Each entry is verified against active
 // ToolMappings; an entry without a usable mapping (e.g. opencode before any
 // table exists) stays inert and never invents a client.
 var userAgentEvidence []struct {
@@ -21,24 +23,13 @@ var userAgentEvidence []struct {
 	client string
 }
 
-const (
-	ompSchemePreserve        = "://"
-	ompClaudeCodeInstruction = "You are Claude Code, Anthropic's official CLI for Claude."
-	codexIdentityLine        = "You are Codex, an agent based on GPT-6."
-	codexGeneralIdentityLine = "You are Codex, an OpenAI general-purpose agentic assistant that helps the user complete tasks across coding, browsing, apps, documents, research, and other digital workflows."
-)
-
 var (
+	ompSchemePreserve            string
 	mandatoryProtectedOMPAliases []string
 	ompIdentityLines             []rewriteMapping
 )
 
-const (
-	reverseBrandMatch       = "Antigravity"
-	reverseBrandReplacement = "omp"
-)
-
-// ompProtectedReverseTable is Oh My Pi's entire reverse authority, populated by initializeClients.
+// ompProtectedReverseTable is Oh My Pi's entire reverse authority, populated by Initialize.
 var ompProtectedReverseTable []rewriteMapping
 
 // filterArgumentReverseTable keeps the rules a tool-argument carrier may run:
@@ -59,14 +50,14 @@ func filterArgumentReverseTable(table []rewriteMapping) []rewriteMapping {
 // carried tokens: the protected pair for Oh My Pi, that client's own reverse
 // table for every other resolved client.
 func brandReverseTableFor(client string) []rewriteMapping {
-	if client == "oh_my_pi" {
+	if protectedRouteClients[client] {
 		return ompProtectedReverseTable
 	}
 	return reverseBrandMappingsFor(client)
 }
 
 // argumentReverseTablesByClient holds brandReverseTableFor(client) narrowed to
-// the rules marked ArgumentSafe. Built once in init(), so the per-chunk stream
+// the rules marked ArgumentSafe. Built once in Initialize, so the per-chunk stream
 // path never allocates or filters a table.
 var argumentReverseTablesByClient = map[string][]rewriteMapping{}
 
@@ -77,40 +68,16 @@ func argumentReverseTableFor(client string) []rewriteMapping {
 	return argumentReverseTablesByClient[client]
 }
 
-const (
-	antigravityIdentity     = spec.AntigravityIdentity
-	antigravityHostPreserve = spec.AntigravityHostPreserve
-)
-
-type rewriteMapping = spec.RewriteMapping
-
-func pathRules(fromDir, toDir, fromFile, toFile string) []rewriteMapping {
-	return spec.PathRules(fromDir, toDir, fromFile, toFile)
-}
-
 var (
 	explicitClientAliasMap            map[string]string
 	aliasPlanClients                  map[string]bool
+	protectedRouteClients             map[string]bool
 	sharedAliasesByClient             map[string]map[string]string
 	sourceIdentityInventoriesByClient map[string]map[string]bool
 
 	brandMappingsByClient        map[string][]rewriteMapping
 	reverseBrandMappingsByClient map[string][]rewriteMapping
 
-	claudeCodeBrandMappings        []rewriteMapping
-	claudeCodeReverseBrandMappings []rewriteMapping
-	claudeContextMappings          []rewriteMapping
-	claudeReverseContextMappings   []rewriteMapping
-	claudeCodeSharedAliases        map[string]string
-
-	codexBrandMappings           []rewriteMapping
-	codexReverseBrandMappings    []rewriteMapping
-	codexContextMappings         []rewriteMapping
-	codexReverseContextMappings  []rewriteMapping
-	codexSharedAliases           map[string]string
-	codexSourceIdentityInventory map[string]bool
-
-	ompBrandMappings                  []rewriteMapping
 	canonicalOMPSafeMappingSet        map[string]string
 	ompSourceIdentityInventory        map[string]bool
 	ompSharedAliases                  map[string]string
@@ -151,12 +118,13 @@ func cloneBoolMap(m map[string]bool) map[string]bool {
 	return out
 }
 
-// initializeClients replaces the complete client registry and derived mapping
+// Initialize replaces the complete client registry and derived mapping
 // tables from specs, then publishes defaultFilterConfig atomically. Repeated
 // calls replace rather than accumulate state.
 func Initialize(specs ...spec.ClientSpec) {
 	explicitClientAliasMap = make(map[string]string)
 	aliasPlanClients = make(map[string]bool)
+	protectedRouteClients = make(map[string]bool)
 	sharedAliasesByClient = make(map[string]map[string]string)
 	sourceIdentityInventoriesByClient = make(map[string]map[string]bool)
 	brandMappingsByClient = make(map[string][]rewriteMapping)
@@ -167,27 +135,14 @@ func Initialize(specs ...spec.ClientSpec) {
 	clientDistinctiveTools = make(map[string]map[string]bool)
 	userAgentEvidence = nil
 
+	ompSchemePreserve = ""
 	mandatoryProtectedOMPAliases = nil
 	ompIdentityLines = nil
 	ompProtectedReverseTable = nil
-	ompBrandMappings = nil
 	canonicalOMPSafeMappingSet = nil
 	ompSourceIdentityInventory = nil
 	ompSharedAliases = nil
 	ompCloakedTargetIdentityInventory = nil
-
-	claudeCodeBrandMappings = nil
-	claudeCodeReverseBrandMappings = nil
-	claudeContextMappings = nil
-	claudeReverseContextMappings = nil
-	claudeCodeSharedAliases = nil
-
-	codexBrandMappings = nil
-	codexReverseBrandMappings = nil
-	codexContextMappings = nil
-	codexReverseContextMappings = nil
-	codexSharedAliases = nil
-	codexSourceIdentityInventory = nil
 
 	setDefaultOMPSanitizationPresets(nil)
 	setClaudeFingerprintData(nil, nil)
@@ -226,31 +181,20 @@ func Initialize(specs ...spec.ClientSpec) {
 			clientDistinctiveTools[s.ID] = cloneBoolMap(s.DistinctiveTools)
 		}
 
-		switch s.ID {
-		case clientIDOMP:
+		if s.HasProtectedRoute {
+			protectedRouteClients[s.ID] = true
+			ompSchemePreserve = s.SchemePreserve
 			mandatoryProtectedOMPAliases = append([]string(nil), s.MandatoryBrandAliases...)
 			ompIdentityLines = append([]rewriteMapping(nil), s.IdentityLines...)
 			ompProtectedReverseTable = append([]rewriteMapping(nil), s.ProtectedReverseBrand...)
-			ompBrandMappings = append([]rewriteMapping(nil), s.ForwardBrandMappings...)
 			canonicalOMPSafeMappingSet = cloneStringMap(s.DefaultCloakTools)
 			ompSourceIdentityInventory = cloneBoolMap(s.SourceIdentityTools)
 			ompSharedAliases = cloneStringMap(s.SharedAliases)
 			ompCloakedTargetIdentityInventory = cloneBoolMap(s.CloakedTargetTools)
 			setDefaultOMPSanitizationPresets(s.PromptSanitizations)
-		case clientIDClaudeCode:
-			claudeContextMappings = append([]rewriteMapping(nil), s.ContextMappings...)
-			claudeReverseContextMappings = append([]rewriteMapping(nil), s.ReverseContextMappings...)
-			claudeCodeBrandMappings = append([]rewriteMapping(nil), s.ForwardBrandMappings...)
-			claudeCodeReverseBrandMappings = append([]rewriteMapping(nil), s.ReverseBrandMappings...)
-			claudeCodeSharedAliases = cloneStringMap(s.SharedAliases)
+		}
+		if s.NewsURLSanitization != nil || s.AgentTier != nil {
 			setClaudeFingerprintData(s.NewsURLSanitization, s.AgentTier)
-		case clientIDCodex:
-			codexContextMappings = append([]rewriteMapping(nil), s.ContextMappings...)
-			codexReverseContextMappings = append([]rewriteMapping(nil), s.ReverseContextMappings...)
-			codexBrandMappings = append([]rewriteMapping(nil), s.ForwardBrandMappings...)
-			codexReverseBrandMappings = append([]rewriteMapping(nil), s.ReverseBrandMappings...)
-			codexSharedAliases = cloneStringMap(s.SharedAliases)
-			codexSourceIdentityInventory = cloneBoolMap(s.SourceIdentityTools)
 		}
 	}
 
@@ -264,7 +208,9 @@ func Initialize(specs ...spec.ClientSpec) {
 		argumentReverseTablesByClient[client] = filterArgumentReverseTable(table)
 	}
 	if len(ompProtectedReverseTable) > 0 {
-		argumentReverseTablesByClient[clientIDOMP] = filterArgumentReverseTable(ompProtectedReverseTable)
+		for client := range protectedRouteClients {
+			argumentReverseTablesByClient[client] = filterArgumentReverseTable(ompProtectedReverseTable)
+		}
 	}
 	for client, cloaks := range defaultCloakTables {
 		uncloaks := make(map[string]string, len(cloaks))
@@ -274,6 +220,5 @@ func Initialize(specs ...spec.ClientSpec) {
 		defaultUncloakTables[client] = uncloaks
 	}
 
-	cfg := defaultFilterConfig()
-	globalFilterConfig.Store(&cfg)
+	applyFilterConfig(defaultFilterConfig())
 }

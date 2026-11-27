@@ -35,6 +35,7 @@ func Spec() spec.ClientSpec {
 		ExplicitAliases:       []string{"oh_my_pi", "omp", "oh-my-pi"},
 		UserAgentPrefixes:     []string{"omp/"},
 		HasProtectedRoute:     true,
+		SchemePreserve:        SchemePreserve,
 		IdentityLines:         identityLines,
 		MandatoryBrandAliases: []string{"Oh My Pi", "oh-my-pi", "omp"},
 		ForwardBrandMappings: []spec.RewriteMapping{

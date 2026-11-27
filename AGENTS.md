@@ -13,7 +13,7 @@ CLIProxyAPI v7 dynamic Go C-shared plugin (`buildmode=c-shared`, Go 1.26.0, ABI 
 
 ## Navigation pointers
 
-- **Brand tables, tool mappings, activation gates, OMP ProtectedAGY/bypass lifecycle, alias plans, or Issue #55:** read **[CONTEXT.md](CONTEXT.md)** (canonical contract; `main.go` tables are source of truth for behaviour).
+- **Brand tables, tool mappings, activation gates, OMP ProtectedAGY/bypass lifecycle, alias plans, or Issue #55:** read **[CONTEXT.md](CONTEXT.md)** (canonical contract; `internal/clients/*` specs are source of truth for behaviour).
 - **Code style, new `.go` / `*_test.go` placement, concurrency/error rules, commit format:** read **[docs/guides/CODING_STANDARDS.md](docs/guides/CODING_STANDARDS.md)**.
 - **Clean Linux/amd64 `.so` build, local Docker Compose deploy, controlled debug, or OMP live acceptance:** read **[docs/verification/verification-checklist.md](docs/verification/verification-checklist.md)** (and **[docs/verification/verification-checklist-omp.md](docs/verification/verification-checklist-omp.md)** for the 9-tool OMP matrix).
 - **Remote VPS deploy or in-place `.so` upgrade:** read **[docs/deployment/vps.md](docs/deployment/vps.md)**.

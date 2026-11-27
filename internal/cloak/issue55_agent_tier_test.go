@@ -118,10 +118,7 @@ func issue55Admit(t *testing.T, reqID, format string, body []byte) []byte {
 	t.Helper()
 	isolateRequestAliasPlan(t)
 	h := map[string][]string{"X-Cloak-Client": {"claude_code"}}
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, format, "agy/probe", body, h)), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, format, "agy/probe", body, h))
 	return decodeEnvelopeBody(t, raw)
 }
 
@@ -229,10 +226,7 @@ func TestIssue55NewsURLGateFollowsUseDefaultKeywords(t *testing.T) {
 	}
 	h := map[string][]string{"X-Cloak-Client": {"claude_code"}}
 	admit := func(reqID string) []byte {
-		raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/probe", issue55FixtureBody("anthropic"), h)), 0
-		if code != 0 {
-			t.Fatalf("code=%d envelope=%s", code, raw)
-		}
+		raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/probe", issue55FixtureBody("anthropic"), h))
 		return decodeEnvelopeBody(t, raw)
 	}
 	setConfig(false)
@@ -254,10 +248,7 @@ func TestIssue55NewsURLSkipsWhenCustomMappingOwnsTheURL(t *testing.T) {
 	cfg.CustomMappings = []rewriteMapping{{Match: "anthropic.com/news/claude-fable-5-mythos-5", Replacement: "example.com/custom-news", WholeSegment: true}}
 	applyFilterConfig(cfg)
 	h := map[string][]string{"X-Cloak-Client": {"claude_code"}}
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue55-url-custom", "anthropic", "agy/probe", issue55FixtureBody("anthropic"), h)), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue55-url-custom", "anthropic", "agy/probe", issue55FixtureBody("anthropic"), h))
 	forward := decodeEnvelopeBody(t, raw)
 	root := issue55Decode(t, forward)
 	blocks, _ := root["system"].([]any)
@@ -577,10 +568,7 @@ func issue55ReverseTierResponse(t *testing.T, upstream, reqID, format string) st
 	if err != nil {
 		t.Fatalf("marshal response: %v", err)
 	}
-	raw, code := HandleResponseIntercept(respRaw), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	raw := HandleResponseIntercept(respRaw)
 	return string(decodeEnvelopeBody(t, raw))
 }
 
@@ -624,10 +612,7 @@ func TestIssue55AgentTierIsClaudeCodeOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, code := HandleRequestInterceptBefore(callRaw), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, out)
-	}
+	out := HandleRequestInterceptBefore(callRaw)
 	forward := decodeEnvelopeBody(t, out)
 	if strings.Contains(string(forward), claudeAgentTierAliases["sonnet"]) {
 		t.Fatalf("codex request gained claude tier authority: %s", forward)
@@ -705,10 +690,7 @@ func TestIssue55ResponsesCarrierIsDeferred(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue55-responses-defer", "openai-response", "agy/probe", body, h)), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue55-responses-defer", "openai-response", "agy/probe", body, h))
 	forward := string(decodeEnvelopeBody(t, raw))
 	if strings.Contains(forward, "https://antigravity.google for more information") {
 		t.Fatalf("URL sanitation ran on the deferred Responses carrier: %s", forward)
@@ -1007,10 +989,7 @@ func TestIssue55TierStaysActiveWhenACustomMappingOnlyTouchesAWordInterior(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, code := HandleRequestInterceptBefore(callRaw), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(callRaw)
 	forward := string(decodeEnvelopeBody(t, raw))
 	if !strings.Contains(forward, claudeAgentTierAliases["sonnet"]) {
 		t.Fatalf("tier enum stayed native although the prefix survived: %s", forward)
@@ -1080,10 +1059,7 @@ func TestIssue55TierAuthorityIgnoresAnotherToolsAgentAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, code := HandleRequestInterceptBefore(callRaw), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(callRaw)
 	forward := issue55Decode(t, decodeEnvelopeBody(t, raw))
 	uses := issue55AssistantToolUses(forward)
 	if got := uses["invoke_subagent"]["model"]; got != claudeAgentTierAliases["opus"] {
@@ -1276,10 +1252,7 @@ func TestIssue55NewsURLIsClaudeCodeOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, code := HandleRequestInterceptBefore(callRaw), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(callRaw)
 	forward := string(decodeEnvelopeBody(t, raw))
 	if !strings.Contains(forward, claudeNewsURL) {
 		t.Fatalf("codex system sentence lost its URL: %s", forward)
@@ -1311,10 +1284,7 @@ func TestIssue55TierInactiveWhenProseMappingsAlterSignature(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, code := HandleRequestInterceptBefore(callRaw), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(callRaw)
 	forward := string(decodeEnvelopeBody(t, raw))
 	if strings.Contains(forward, claudeAgentTierAliases["sonnet"]) {
 		t.Fatalf("tier enum translated despite an altered help signature: %s", forward)
@@ -1523,10 +1493,7 @@ func TestIssue55TierStreamDivergingNameRevokesAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, code := HandleRequestInterceptBefore(callRaw), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	HandleRequestInterceptBefore(callRaw)
 	frames := []string{
 		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
 		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"_extra"}}]}}]}` + "\n\n",
@@ -1571,10 +1538,7 @@ func TestIssue55TierStreamResetFragmentDoesNotArm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, code := HandleRequestInterceptBefore(callRaw), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	HandleRequestInterceptBefore(callRaw)
 	frames := []string{
 		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_"}}]}}]}` + "\n\n",
 		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
@@ -1619,10 +1583,7 @@ func TestIssue55TierStreamDoubledFullNameFragmentsDoNotArm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, code := HandleRequestInterceptBefore(callRaw), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	HandleRequestInterceptBefore(callRaw)
 	frames := []string{
 		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
 		"data: " + `{"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"name":"invoke_subagent"}}]}}]}` + "\n\n",
@@ -1708,10 +1669,7 @@ func TestIssue55TierStreamRevokedBlockStartInputUntouched(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, code := HandleRequestInterceptBefore(callRaw), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	HandleRequestInterceptBefore(callRaw)
 	first := "event: content_block_start\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu","name":"invoke_subagent","input":{}}}` + "\n\n"
 	second := "event: content_block_start\n" + `data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu","name":"invoke_subagent_extra","input":{"model":"gemini-pro"}}}` + "\n\n"
 	resp := globalStreamManager.processChunk(&pluginapi.StreamChunkInterceptRequest{

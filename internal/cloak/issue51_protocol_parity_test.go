@@ -49,10 +49,7 @@ func TestIssue51_AliasTablesAreEquivalentAcrossCarriers(t *testing.T) {
 		for _, format := range []string{"openai", "anthropic"} {
 			toolName := "shared/probe-" + client + "-" + format
 			body := declaredToolsFor(format, names...)
-			raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayload(t, toolName, format, "agy/probe", []byte(body))), 0
-			if code != 0 {
-				t.Fatalf("%s/%s code=%d envelope=%s", client, format, code, raw)
-			}
+			raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayload(t, toolName, format, "agy/probe", []byte(body)))
 			forward := string(decodeEnvelopeBody(t, raw))
 			for _, n := range names {
 				if strings.Contains(forward, `"name":"`+n+`"`) || strings.Contains(forward, `"name": "`+n+`"`) {
@@ -179,10 +176,7 @@ func TestIssue51_OMPMachineGeneratedProseUsesRequestScopedAliases(t *testing.T) 
 		]
 	}`
 	h := map[string][]string{"X-Cloak-Client": {"oh_my_pi"}}
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue51-omp", "anthropic", "agy/omp-probe", []byte(req), h)), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue51-omp", "anthropic", "agy/omp-probe", []byte(req), h))
 	forward := string(decodeEnvelopeBody(t, raw))
 	// A declared tool named in tool-reference context is cloaked in the system
 	// block, the description surface and the declaration itself.
@@ -244,9 +238,9 @@ func TestIssue51_NonStreamToolArgumentsMatchStream(t *testing.T) {
 		// different spelling per client, which is the point of the gate.
 		h := http.Header{}
 		h.Set("X-Cloak-Client", "claude_code")
-		reqRaw, reqCode := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, format, "agy/model", []byte(reqBody), h)), 0
-		if reqCode != 0 || strings.Contains(string(reqRaw), `"StatusCode":503`) {
-			t.Fatalf("%s: request-stage cloak failed: code=%d %s", format, reqCode, reqRaw)
+		reqRaw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, format, "agy/model", []byte(reqBody), h))
+		if strings.Contains(string(reqRaw), `"StatusCode":503`) {
+			t.Fatalf("%s: request-stage cloak failed: %s", format, reqRaw)
 		}
 		if globalAliasPlanManager.get(reqID) == nil {
 			t.Fatalf("%s: request-stage cloak pinned no alias plan for %s", format, reqID)

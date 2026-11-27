@@ -64,10 +64,7 @@ func TestIntegration_Precedence_InvalidExplicitSuppressesUA_Lifecycle(t *testing
 		ChunkIndex:     pluginapi.StreamChunkHeaderInitIndex,
 		RequestHeaders: respHeaders,
 	})
-	rawInit, code := HandleStreamChunkIntercept(initPayload), 0
-	if code != 0 {
-		t.Fatalf("header-init failed code=%d", code)
-	}
+	rawInit := HandleStreamChunkIntercept(initPayload)
 	if out := decodeEnvelopeBody(t, rawInit); len(out) != 0 {
 		t.Fatalf("header-init should return empty body, got: %s", out)
 	}

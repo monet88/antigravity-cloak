@@ -147,6 +147,7 @@ type ClientSpec struct {
 	UserAgentPrefixes      []string
 	UsesAliasPlan          bool
 	HasProtectedRoute      bool
+	SchemePreserve         string
 	IdentityLines          []RewriteMapping
 	MandatoryBrandAliases  []string
 	ForwardBrandMappings   []RewriteMapping

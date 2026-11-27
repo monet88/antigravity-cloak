@@ -44,7 +44,7 @@ tool_mappings:
 	}
 }
 
-func TestHandlePluginCallReconfigureAppliesCustomMappingsAndDefaultToggle(t *testing.T) {
+func TestHandlePluginLifecycleReconfigureAppliesCustomMappingsAndDefaultToggle(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
 	raw := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
@@ -75,7 +75,7 @@ custom_mappings:
 	}
 }
 
-func TestHandlePluginCallReconfigureAcceptsDelimitedCustomMappings(t *testing.T) {
+func TestHandlePluginLifecycleReconfigureAcceptsDelimitedCustomMappings(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
 	raw := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
@@ -100,7 +100,7 @@ custom_mappings: |
 	}
 }
 
-func TestHandlePluginCallReconfigureKeepsPreviousConfigOnInvalidInput(t *testing.T) {
+func TestHandlePluginLifecycleReconfigureKeepsPreviousConfigOnInvalidInput(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 
 	raw := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
@@ -143,7 +143,7 @@ custom_mappings:
 	}
 }
 
-func TestHandlePluginCallReconfigureOMPPromptSanitizationsPreservesConfigOnInvalidInput(t *testing.T) {
+func TestHandlePluginLifecycleReconfigureOMPPromptSanitizationsPreservesConfigOnInvalidInput(t *testing.T) {
 	isolateOMPMeasurement(t)
 
 	raw := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
@@ -188,43 +188,41 @@ omp_prompt_sanitizations:
 
 	for _, tc := range invalidConfigs {
 		t.Run(tc.name, func(t *testing.T) {
-			for _, method := range []string{"plugin.reconfigure", "plugin.register"} {
-				rawErr := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(tc.yaml)), nil)
-				var envelope struct {
-					OK    bool `json:"ok"`
-					Error struct {
-						Code string `json:"code"`
-					} `json:"error"`
-				}
-				mustUnmarshalJSON(t, rawErr, &envelope)
-				if envelope.OK {
-					t.Fatalf("%s unexpectedly accepted %s: %s", method, tc.name, rawErr)
-				}
-				if envelope.Error.Code != "invalid_config" {
-					t.Fatalf("%s error code = %q, want invalid_config", method, envelope.Error.Code)
-				}
+			rawErr := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(tc.yaml)), nil)
+			var envelope struct {
+				OK    bool `json:"ok"`
+				Error struct {
+					Code string `json:"code"`
+				} `json:"error"`
+			}
+			mustUnmarshalJSON(t, rawErr, &envelope)
+			if envelope.OK {
+				t.Fatalf("HandlePluginLifecycle unexpectedly accepted %s: %s", tc.name, rawErr)
+			}
+			if envelope.Error.Code != "invalid_config" {
+				t.Fatalf("HandlePluginLifecycle error code = %q, want invalid_config", envelope.Error.Code)
+			}
 
-				reqBody := ompMeasurementJSON(t, map[string]any{
-					"system":   "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. active-sentinel",
-					"messages": []any{},
-					"tools":    []any{},
-				})
-				req := ompMeasurementRequest("preserve-"+tc.name+"-"+method, "anthropic", reqBody)
-				rawIntercept := HandleRequestInterceptBefore(ompMeasurementJSON(t, req))
-				var icEnv struct {
-					OK     bool `json:"ok"`
-					Result struct {
-						Body string `json:"Body"`
-					} `json:"result"`
-				}
-				mustUnmarshalJSON(t, rawIntercept, &icEnv)
-				decoded, decErr := base64.StdEncoding.DecodeString(icEnv.Result.Body)
-				if decErr != nil {
-					t.Fatalf("decode body: %v", decErr)
-				}
-				if !strings.Contains(string(decoded), "Active custom header. preserved-sentinel") {
-					t.Fatalf("active config was clobbered after %s (%s): got %s", tc.name, method, decoded)
-				}
+			reqBody := ompMeasurementJSON(t, map[string]any{
+				"system":   "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. active-sentinel",
+				"messages": []any{},
+				"tools":    []any{},
+			})
+			req := ompMeasurementRequest("preserve-"+tc.name, "anthropic", reqBody)
+			rawIntercept := HandleRequestInterceptBefore(ompMeasurementJSON(t, req))
+			var icEnv struct {
+				OK     bool `json:"ok"`
+				Result struct {
+					Body string `json:"Body"`
+				} `json:"result"`
+			}
+			mustUnmarshalJSON(t, rawIntercept, &icEnv)
+			decoded, decErr := base64.StdEncoding.DecodeString(icEnv.Result.Body)
+			if decErr != nil {
+				t.Fatalf("decode body: %v", decErr)
+			}
+			if !strings.Contains(string(decoded), "Active custom header. preserved-sentinel") {
+				t.Fatalf("active config was clobbered after %s: got %s", tc.name, decoded)
 			}
 		})
 	}

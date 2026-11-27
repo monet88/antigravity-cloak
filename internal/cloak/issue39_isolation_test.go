@@ -42,11 +42,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 			}`)
 			headers := http.Header{"X-Cloak-Client": []string{"claude_code"}}
 			reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-3-7-sonnet", reqBody, headers)
-			rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-			if code != 0 {
-				t.Errorf("CC req intercept failed: %d", code)
-				return
-			}
+			rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 			cloakedReq := decodeEnvelopeBody(t, rawEnvelope)
 			if !strings.Contains(string(cloakedReq), `"run_command"`) ||
 				!strings.Contains(string(cloakedReq), `"wp_send_message"`) ||
@@ -74,11 +70,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 				]
 			}`, fallbackTarget))
 			respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-3-7-sonnet", respBody)
-			rawResp, codeResp := HandleResponseIntercept(respPayload), 0
-			if codeResp != 0 {
-				t.Errorf("CC resp intercept failed: %d", codeResp)
-				return
-			}
+			rawResp := HandleResponseIntercept(respPayload)
 			decodedResp := string(decodeEnvelopeBody(t, rawResp))
 			if !strings.Contains(decodedResp, `"Bash"`) ||
 				!strings.Contains(decodedResp, `"SendMessage"`) ||
@@ -94,11 +86,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 			// Streaming chunk uncloak
 			chunkBody := []byte(fmt.Sprintf("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"name\":\"run_command\"}}\n\n"))
 			streamPayload := makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/claude-3-7-sonnet", 0, chunkBody, cloakedReq)
-			rawChunk, codeChunk := HandleStreamChunkIntercept(streamPayload), 0
-			if codeChunk != 0 {
-				t.Errorf("CC stream chunk failed: %d", codeChunk)
-				return
-			}
+			rawChunk := HandleStreamChunkIntercept(streamPayload)
 			decodedChunk := string(decodeEnvelopeBody(t, rawChunk))
 			if !strings.Contains(decodedChunk, `"Bash"`) {
 				t.Errorf("CC stream chunk restoration failed: %s", decodedChunk)
@@ -128,11 +116,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 			}`)
 			headers := http.Header{"X-Cloak-Client": []string{"codex"}}
 			reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", "agy/codex-model", reqBody, headers)
-			rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-			if code != 0 {
-				t.Errorf("Codex req intercept failed: %d", code)
-				return
-			}
+			rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 			cloakedReq := decodeEnvelopeBody(t, rawEnvelope)
 			if !strings.Contains(string(cloakedReq), `"run_command"`) ||
 				!strings.Contains(string(cloakedReq), `"wp_send_message"`) ||
@@ -163,11 +147,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 				}]
 			}`, fallbackTarget))
 			respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "openai", "agy/codex-model", respBody)
-			rawResp, codeResp := HandleResponseIntercept(respPayload), 0
-			if codeResp != 0 {
-				t.Errorf("Codex resp intercept failed: %d", codeResp)
-				return
-			}
+			rawResp := HandleResponseIntercept(respPayload)
 			decodedResp := string(decodeEnvelopeBody(t, rawResp))
 			if !strings.Contains(decodedResp, `"exec"`) ||
 				!strings.Contains(decodedResp, `"collaboration__send_message"`) ||
@@ -183,11 +163,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 			// Streaming chunk uncloak
 			chunkBody := []byte(fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"))
 			streamPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/codex-model", 0, chunkBody, cloakedReq)
-			rawChunk, codeChunk := HandleStreamChunkIntercept(streamPayload), 0
-			if codeChunk != 0 {
-				t.Errorf("Codex stream chunk failed: %d", codeChunk)
-				return
-			}
+			rawChunk := HandleStreamChunkIntercept(streamPayload)
 			decodedChunk := string(decodeEnvelopeBody(t, rawChunk))
 			if !strings.Contains(decodedChunk, `"exec"`) {
 				t.Errorf("Codex stream chunk restoration failed: %s", decodedChunk)
@@ -217,11 +193,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 			}`)
 			headers := http.Header{"X-Cloak-Client": []string{"oh_my_pi"}}
 			reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", "agy/omp-model", reqBody, headers)
-			rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-			if code != 0 {
-				t.Errorf("OMP req intercept failed: %d", code)
-				return
-			}
+			rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 			cloakedReq := decodeEnvelopeBody(t, rawEnvelope)
 			if !strings.Contains(string(cloakedReq), `"run_command"`) ||
 				!strings.Contains(string(cloakedReq), `"read_file"`) ||
@@ -262,11 +234,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 				}]
 			}`, fallbackTarget))
 			respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "openai", "agy/omp-model", respBody)
-			rawResp, codeResp := HandleResponseIntercept(respPayload), 0
-			if codeResp != 0 {
-				t.Errorf("OMP resp intercept failed: %d", codeResp)
-				return
-			}
+			rawResp := HandleResponseIntercept(respPayload)
 			decodedResp := string(decodeEnvelopeBody(t, rawResp))
 			if !strings.Contains(decodedResp, `"bash"`) ||
 				!strings.Contains(decodedResp, `"read"`) ||
@@ -282,11 +250,7 @@ func TestIssue39_ConcurrentTargetReuseIsolation(t *testing.T) {
 			// Streaming chunk uncloak
 			chunkBody := []byte(fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"))
 			streamPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/omp-model", 0, chunkBody, cloakedReq)
-			rawChunk, codeChunk := HandleStreamChunkIntercept(streamPayload), 0
-			if codeChunk != 0 {
-				t.Errorf("OMP stream chunk failed: %d", codeChunk)
-				return
-			}
+			rawChunk := HandleStreamChunkIntercept(streamPayload)
 			decodedChunk := string(decodeEnvelopeBody(t, rawChunk))
 			if !strings.Contains(decodedChunk, `"bash"`) {
 				t.Errorf("OMP stream chunk restoration failed: %s", decodedChunk)
@@ -339,10 +303,7 @@ func TestIssue39_NegativeCrossAuthority(t *testing.T) {
 		]
 	}`)
 	respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-model", respBody)
-	rawResp, codeResp := HandleResponseIntercept(respPayload), 0
-	if codeResp != 0 {
-		t.Fatalf("response intercept failed: %d", codeResp)
-	}
+	rawResp := HandleResponseIntercept(respPayload)
 	decodedResp := string(decodeEnvelopeBody(t, rawResp))
 
 	// Declared tool run_command must uncloak to Bash
@@ -411,10 +372,7 @@ tool_mappings:
 		}]
 	}`)
 	respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "openai", "agy/codex-model", respBody)
-	rawResp, codeResp := HandleResponseIntercept(respPayload), 0
-	if codeResp != 0 {
-		t.Fatalf("response intercept failed: %d", codeResp)
-	}
+	rawResp := HandleResponseIntercept(respPayload)
 	decodedResp := string(decodeEnvelopeBody(t, rawResp))
 	if !strings.Contains(decodedResp, `"exec"`) || !strings.Contains(decodedResp, `"collaboration__send_message"`) {
 		t.Fatalf("in-flight response failed to restore via pinned plan: %s", decodedResp)
@@ -527,8 +485,8 @@ func TestIssue39_LifecycleCleanupIdempotenceAndLeaks(t *testing.T) {
 	}`)
 	headers := http.Header{"X-Cloak-Client": []string{"codex"}}
 	reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, collidingReqID, "openai", "agy/codex-model", collidingBody, headers)
-	raw, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 || !strings.Contains(string(raw), `"StatusCode":503`) {
+	raw := HandleRequestInterceptBefore(reqPayload)
+	if !strings.Contains(string(raw), `"StatusCode":503`) {
 		t.Fatalf("expected 503 tool_cloak_required, got: %s", raw)
 	}
 	// Rejection should leave no pinned plan or route
@@ -605,10 +563,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		}`)
 		headers := http.Header{"X-Cloak-Client": []string{"claude_code"}}
 		reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-model", reqBody, headers)
-		rawEnv, code := HandleRequestInterceptBefore(reqPayload), 0
-		if code != 0 {
-			t.Fatalf("CC req intercept failed: %d", code)
-		}
+		rawEnv := HandleRequestInterceptBefore(reqPayload)
 		cloakedReq := decodeEnvelopeBody(t, rawEnv)
 
 		// Lifecycle completes: deletes plan and session
@@ -627,10 +582,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 			]
 		}`)
 		respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-model", lateResp)
-		rawResp, codeResp := HandleResponseIntercept(respPayload), 0
-		if codeResp != 0 {
-			t.Fatalf("late response intercept failed: %d", codeResp)
-		}
+		rawResp := HandleResponseIntercept(respPayload)
 		decodedResp := string(decodeEnvelopeBody(t, rawResp))
 		// MUST NOT reverse either AGY-role target (run_command) or wp_* target (wp_send_message)
 		if strings.Contains(decodedResp, `"Bash"`) || strings.Contains(decodedResp, `"SendMessage"`) {
@@ -640,10 +592,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		// Late stream chunk arrives with RequestID carrying run_command
 		lateChunk := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"name\":\"run_command\"}}\n\n")
 		streamPayload := makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/claude-model", 0, lateChunk, cloakedReq)
-		rawChunk, codeChunk := HandleStreamChunkIntercept(streamPayload), 0
-		if codeChunk != 0 {
-			t.Fatalf("late stream chunk failed: %d", codeChunk)
-		}
+		rawChunk := HandleStreamChunkIntercept(streamPayload)
 		decodedChunk := string(decodeEnvelopeBody(t, rawChunk))
 		if strings.Contains(decodedChunk, `"Bash"`) {
 			t.Fatalf("late stream chunk with missing authority improperly reversed run_command to Bash: %s", decodedChunk)
@@ -664,10 +613,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		}`)
 		headers := http.Header{"X-Cloak-Client": []string{"codex"}}
 		reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", "agy/codex-model", reqBody, headers)
-		rawEnv, code := HandleRequestInterceptBefore(reqPayload), 0
-		if code != 0 {
-			t.Fatalf("Codex req intercept failed: %d", code)
-		}
+		rawEnv := HandleRequestInterceptBefore(reqPayload)
 		cloakedReq := decodeEnvelopeBody(t, rawEnv)
 
 		// Lifecycle completes
@@ -687,10 +633,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 			}]
 		}`)
 		respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "openai", "agy/codex-model", lateResp)
-		rawResp, codeResp := HandleResponseIntercept(respPayload), 0
-		if codeResp != 0 {
-			t.Fatalf("late response intercept failed: %d", codeResp)
-		}
+		rawResp := HandleResponseIntercept(respPayload)
 		decodedResp := string(decodeEnvelopeBody(t, rawResp))
 		if strings.Contains(decodedResp, `"exec"`) ||
 			strings.Contains(decodedResp, `"collaboration__send_message"`) ||
@@ -701,10 +644,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		// Late stream chunk arrives with run_command
 		lateChunk := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
 		streamPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", "agy/codex-model", 0, lateChunk, cloakedReq)
-		rawChunk, codeChunk := HandleStreamChunkIntercept(streamPayload), 0
-		if codeChunk != 0 {
-			t.Fatalf("late stream chunk failed: %d", codeChunk)
-		}
+		rawChunk := HandleStreamChunkIntercept(streamPayload)
 		decodedChunk := string(decodeEnvelopeBody(t, rawChunk))
 		if strings.Contains(decodedChunk, `"exec"`) {
 			t.Fatalf("late Codex stream chunk with missing authority improperly reversed run_command to exec: %s", decodedChunk)
@@ -718,10 +658,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`)
 
 		respPayload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, unadmittedID, "openai", "agy/claude-model", respBody, executedBody, nil)
-		rawResp, codeResp := HandleResponseIntercept(respPayload), 0
-		if codeResp != 0 {
-			t.Fatalf("response intercept failed: %d", codeResp)
-		}
+		rawResp := HandleResponseIntercept(respPayload)
 		decodedResp := decodeEnvelopeBody(t, rawResp)
 		if decodedResp != nil && !bytes.Equal(decodedResp, respBody) {
 			t.Fatalf("unadmitted CC request reversed targets without authority: %s", string(decodedResp))
@@ -730,10 +667,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		// Stream chunk for unadmitted CC request
 		chunkBody := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
 		streamPayload := makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, unadmittedID, "openai", "agy/claude-model", 0, chunkBody, executedBody, nil)
-		rawChunk, codeChunk := HandleStreamChunkIntercept(streamPayload), 0
-		if codeChunk != 0 {
-			t.Fatalf("stream chunk failed: %d", codeChunk)
-		}
+		rawChunk := HandleStreamChunkIntercept(streamPayload)
 		decodedChunk := decodeEnvelopeBody(t, rawChunk)
 		if decodedChunk != nil && !bytes.Equal(decodedChunk, chunkBody) {
 			t.Fatalf("unadmitted CC stream chunk reversed targets without authority: %s", string(decodedChunk))
@@ -746,10 +680,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`)
 
 		respPayload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "", "openai", "agy/model", respBody, executedBody, nil)
-		rawResp, codeResp := HandleResponseIntercept(respPayload), 0
-		if codeResp != 0 {
-			t.Fatalf("response intercept failed: %d", codeResp)
-		}
+		rawResp := HandleResponseIntercept(respPayload)
 		decodedResp := decodeEnvelopeBody(t, rawResp)
 		if decodedResp != nil && !bytes.Equal(decodedResp, respBody) {
 			t.Fatalf("no-authority response guessed claude_code and reversed run_command to Bash: %s", string(decodedResp))
@@ -758,10 +689,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		// Stream chunk with no RequestID, no marker, no UA, executed body
 		chunkBody := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
 		streamPayload := makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, "", "openai", "agy/model", 0, chunkBody, executedBody, nil)
-		rawChunk, codeChunk := HandleStreamChunkIntercept(streamPayload), 0
-		if codeChunk != 0 {
-			t.Fatalf("stream chunk failed: %d", codeChunk)
-		}
+		rawChunk := HandleStreamChunkIntercept(streamPayload)
 		decodedChunk := decodeEnvelopeBody(t, rawChunk)
 		if decodedChunk != nil && !bytes.Equal(decodedChunk, chunkBody) {
 			t.Fatalf("no-authority stream chunk guessed claude_code and reversed run_command to Bash: %s", string(decodedChunk))
@@ -775,10 +703,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		respBody := []byte(`{"content":[{"type":"tool_use","id":"tu_1","name":"run_command","input":{"command":"ls"}}]}`)
 
 		respPayload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "", "anthropic", "agy/claude-test", respBody, executedBody, nil)
-		rawResp, codeResp := HandleResponseIntercept(respPayload), 0
-		if codeResp != 0 {
-			t.Fatalf("same-protocol no-authority response intercept failed: %d", codeResp)
-		}
+		rawResp := HandleResponseIntercept(respPayload)
 		decodedResp := decodeEnvelopeBody(t, rawResp)
 		if decodedResp != nil && !bytes.Equal(decodedResp, respBody) {
 			t.Fatalf("same-protocol no-authority response guessed claude_code and reversed run_command to Bash: %s", string(decodedResp))
@@ -787,10 +712,7 @@ func TestIssue39_AliasPlanMissingAuthority_PassesThroughAGYAndSharedTargets(t *t
 		// Stream chunk on same-protocol (anthropic) with no RequestID, no marker, no UA, three-target executed body
 		chunkBody := []byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"tu_1\",\"name\":\"run_command\"}}\n\n")
 		streamPayload := makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, "", "anthropic", "agy/claude-test", 0, chunkBody, executedBody, nil)
-		rawChunk, codeChunk := HandleStreamChunkIntercept(streamPayload), 0
-		if codeChunk != 0 {
-			t.Fatalf("same-protocol no-authority stream chunk failed: %d", codeChunk)
-		}
+		rawChunk := HandleStreamChunkIntercept(streamPayload)
 		decodedChunk := decodeEnvelopeBody(t, rawChunk)
 		if decodedChunk != nil && !bytes.Equal(decodedChunk, chunkBody) {
 			t.Fatalf("same-protocol no-authority stream chunk guessed claude_code and reversed run_command to Bash: %s", string(decodedChunk))
@@ -861,19 +783,13 @@ func TestIssue39_UncorrelatedAliasPlanBodiesPassThroughOnResponseAndStream(t *te
 			reqBody := []byte(tc.reqBody)
 
 			respPayload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "", tc.sourceFormat, "agy/test-model", []byte(tc.respBody), reqBody, nil)
-			rawResp, code := HandleResponseIntercept(respPayload), 0
-			if code != 0 {
-				t.Fatalf("response intercept failed: %d", code)
-			}
+			rawResp := HandleResponseIntercept(respPayload)
 			if got := decodeEnvelopeBody(t, rawResp); got != nil && !bytes.Equal(got, []byte(tc.respBody)) {
 				t.Fatalf("response was not passed through byte-identically:\n got %s\nwant %s", got, tc.respBody)
 			}
 
 			streamPayload := makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, "", tc.sourceFormat, "agy/test-model", 0, []byte(tc.chunkBody), reqBody, nil)
-			rawChunk, codeChunk := HandleStreamChunkIntercept(streamPayload), 0
-			if codeChunk != 0 {
-				t.Fatalf("stream chunk intercept failed: %d", codeChunk)
-			}
+			rawChunk := HandleStreamChunkIntercept(streamPayload)
 			if got := decodeEnvelopeBody(t, rawChunk); got != nil && !bytes.Equal(got, []byte(tc.chunkBody)) {
 				t.Fatalf("stream chunk was not passed through byte-identically:\n got %s\nwant %s", got, tc.chunkBody)
 			}
@@ -905,10 +821,7 @@ func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 
 		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 		payload := makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, reqID, "openai", model, respBody, executedBodyWithStaticTargets, nil)
-		rawResp, code := HandleResponseIntercept(payload), 0
-		if code != 0 {
-			t.Fatalf("Probe a: response intercept failed: %d", code)
-		}
+		rawResp := HandleResponseIntercept(payload)
 		out := string(decodeEnvelopeBody(t, rawResp))
 		expectedResp := `{"choices":[{"message":{"tool_calls":[{"function":{"arguments":"{}","name":"read"}}]}}]}`
 		if out != expectedResp {
@@ -925,10 +838,7 @@ func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 
 		chunkBody := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
 		payload := makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, reqID, "openai", model, 0, chunkBody, executedBodyWithStaticTargets, nil)
-		rawChunk, code := HandleStreamChunkIntercept(payload), 0
-		if code != 0 {
-			t.Fatalf("Probe b: stream chunk intercept failed: %d", code)
-		}
+		rawChunk := HandleStreamChunkIntercept(payload)
 		chunkOut := string(decodeEnvelopeBody(t, rawChunk))
 		expectedChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"bash\"}}]}}]}\n\n"
 		if chunkOut != expectedChunk {
@@ -941,10 +851,7 @@ func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 	{
 		reqHeaders := http.Header{"User-Agent": []string{"omp/1.2.3"}}
 		respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
-		rawResp, code := HandleResponseIntercept(makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "probe-c-ua-resp", "openai", model, respBody, executedBodyWithStaticTargets, reqHeaders)), 0
-		if code != 0 {
-			t.Fatalf("Probe c: response intercept failed: %d", code)
-		}
+		rawResp := HandleResponseIntercept(makeIntegrationResponseInterceptPayloadWithRequestBodyAndHeaders(t, "probe-c-ua-resp", "openai", model, respBody, executedBodyWithStaticTargets, reqHeaders))
 		out := string(decodeEnvelopeBody(t, rawResp))
 		expectedResp := `{"choices":[{"message":{"tool_calls":[{"function":{"arguments":"{}","name":"read"}}]}}]}`
 		if out != expectedResp {
@@ -956,10 +863,7 @@ func TestIssue39_LegitimateLegacyFallbackStillWorksWhereIntended(t *testing.T) {
 	{
 		streamHeaders := http.Header{"User-Agent": []string{"omp/9.0"}}
 		chunkBody := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n")
-		rawChunk, code := HandleStreamChunkIntercept(makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, "probe-d-ua-stream", "openai", model, 0, chunkBody, executedBodyWithStaticTargets, streamHeaders)), 0
-		if code != 0 {
-			t.Fatalf("Probe d: stream chunk intercept failed: %d", code)
-		}
+		rawChunk := HandleStreamChunkIntercept(makeIntegrationStreamChunkPayloadWithRequestBodyAndHeaders(t, "probe-d-ua-stream", "openai", model, 0, chunkBody, executedBodyWithStaticTargets, streamHeaders))
 		chunkOut := string(decodeEnvelopeBody(t, rawChunk))
 		expectedChunk := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"bash\"}}]}}]}\n\n"
 		if chunkOut != expectedChunk {

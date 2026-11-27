@@ -78,14 +78,11 @@ func TestProtectedBrandLeavesBlockMetadataAndToolArgumentsIntact(t *testing.T) {
 
 func TestOMPPromptSanitizationsDoNotCascadeIntoOperatorsLongestOverride(t *testing.T) {
 	isolateOMPMeasurement(t)
-	raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+	HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 omp_prompt_sanitizations:
   "RFC 2119": "Short marker"
   "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.": "Specific full override. Keep RFC 2119 exact."
-`)), nil), 0
-	if code != 0 {
-		t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-	}
+`)), nil)
 	defer restoreDefaultFilterConfig(t)
 	// The longer override's replacement contains the shorter rule's match as
 	// literal content. One left-to-right longest-match-first pass must emit
@@ -184,13 +181,10 @@ func TestProtectedAGYProseCloakLeavesStructuralFieldsIntact(t *testing.T) {
 
 func TestOMPPromptSanitizationUnicodeRuleBounded(t *testing.T) {
 	isolateOMPMeasurement(t)
-	raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+	HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 omp_prompt_sanitizations:
   "règle spéciale": "X"
-`)), nil), 0
-	if code != 0 {
-		t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-	}
+`)), nil)
 	defer restoreDefaultFilterConfig(t)
 	rules := activeFilterConfig().ompSanitizationRules
 	if len(rules) == 0 {

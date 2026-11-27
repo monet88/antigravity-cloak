@@ -7,8 +7,13 @@ import (
 const protectedBrandSentinel = "\x00__ANTIGRAVITY_PROTECTED_OMP_BRAND__\x00"
 
 func isOMPAlias(match string) bool {
-	m := strings.ToLower(strings.TrimSpace(match))
-	return m == "omp" || m == "oh-my-pi" || m == "oh my pi"
+	trimmed := strings.TrimSpace(match)
+	for _, alias := range mandatoryProtectedOMPAliases {
+		if strings.EqualFold(trimmed, alias) {
+			return true
+		}
+	}
+	return false
 }
 
 func rewriteProtectedBrandText(text string, cfg *filterConfig, client string) (string, bool) {
@@ -20,7 +25,7 @@ func rewriteProtectedBrandText(text string, cfg *filterConfig, client string) (s
 	changed := false
 	// Whole-sentence first: the sentinel pass below swaps the "omp" inside
 	// these lines for the sentinel, after which the sentence cannot match.
-	if client == "oh_my_pi" {
+	if protectedRouteClients[client] {
 		for _, m := range ompIdentityLines {
 			if next, rep := replaceInsensitive(current, m.Match, m.Replacement); rep {
 				current = next

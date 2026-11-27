@@ -107,6 +107,47 @@ func TestHandlePluginCallRequestInterceptAfterAndCompleteRoutes(t *testing.T) {
 	}
 }
 
+func TestHandlePluginCallResponseAndStreamRoutes(t *testing.T) {
+	respReq, err := json.Marshal(map[string]any{
+		"SourceFormat": "openai",
+		"Body":         []byte(`{"choices":[{"message":{"content":"ok"}}]}`),
+	})
+	if err != nil {
+		t.Fatalf("marshal response request: %v", err)
+	}
+	rawResp, codeResp := handlePluginCall("response.intercept_after", respReq)
+	if codeResp != 0 {
+		t.Fatalf("response.intercept_after code = %d, want 0; body=%s", codeResp, rawResp)
+	}
+	var envResp struct {
+		OK bool `json:"ok"`
+	}
+	mustUnmarshalJSON(t, rawResp, &envResp)
+	if !envResp.OK {
+		t.Fatalf("response.intercept_after ok = false; body=%s", rawResp)
+	}
+
+	streamReq, err := json.Marshal(map[string]any{
+		"SourceFormat": "openai",
+		"ChunkIndex":   0,
+		"Chunk":        []byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"),
+	})
+	if err != nil {
+		t.Fatalf("marshal stream request: %v", err)
+	}
+	rawStream, codeStream := handlePluginCall("response.intercept_stream_chunk", streamReq)
+	if codeStream != 0 {
+		t.Fatalf("response.intercept_stream_chunk code = %d, want 0; body=%s", codeStream, rawStream)
+	}
+	var envStream struct {
+		OK bool `json:"ok"`
+	}
+	mustUnmarshalJSON(t, rawStream, &envStream)
+	if !envStream.OK {
+		t.Fatalf("response.intercept_stream_chunk ok = false; body=%s", rawStream)
+	}
+}
+
 func TestHandlePluginCallRequestInterceptBeforeRewritesCodingSignals(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
 	const reqID = "coding-signals-rewrite"
@@ -232,193 +273,6 @@ func TestHandlePluginCallRegisterVersionMatchesRegistry(t *testing.T) {
 	}
 }
 
-func TestResponseInterceptReversesCodexCloakForCorrelatedRequest(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-	const reqID = "codex-correlated-non-stream"
-	interceptRaw, err := json.Marshal(map[string]any{
-		"RequestID":      reqID,
-		"SourceFormat":   "openai",
-		"Model":          "antigravity/test",
-		"RequestedModel": "antigravity/test",
-		"Body":           []byte(`{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"collaboration__list_agents"}}],"messages":[]}`),
-	})
-	if err != nil {
-		t.Fatalf("marshal request intercept request: %v", err)
-	}
-	if raw, code := handlePluginCall("request.intercept_before", interceptRaw); code != 0 {
-		t.Fatalf("request intercept code = %d; body=%s", code, raw)
-	}
-
-	cloakedReq := `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"wp_list_workers"}}],"messages":[]}`
-	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"wp_list_workers","arguments":"{}"}}]}}]}`
-	request, err := json.Marshal(map[string]any{
-		"RequestID":       reqID,
-		"SourceFormat":    "openai",
-		"OriginalRequest": []byte(cloakedReq),
-		"RequestBody":     []byte(cloakedReq),
-		"Body":            []byte(respBody),
-	})
-	if err != nil {
-		t.Fatalf("marshal response intercept request: %v", err)
-	}
-
-	raw, code := handlePluginCall("response.intercept_after", request)
-	if code != 0 {
-		t.Fatalf("code = %d; body=%s", code, raw)
-	}
-
-	var envelope struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			Body string `json:"Body"`
-		} `json:"result"`
-	}
-	mustUnmarshalJSON(t, raw, &envelope)
-	if !envelope.OK {
-		t.Fatalf("envelope not OK")
-	}
-	if envelope.Result.Body == "" {
-		t.Fatalf("correlated codex response was not reversed: %s", raw)
-	}
-	decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
-	if err != nil {
-		t.Fatalf("decode base64: %v", err)
-	}
-	body := string(decoded)
-	if !strings.Contains(body, `"name":"exec"`) || !strings.Contains(body, `"name":"collaboration__list_agents"`) {
-		t.Fatalf("declared codex sources were not restored: %s", body)
-	}
-	if strings.Contains(body, "run_command") || strings.Contains(body, "wp_list_workers") {
-		t.Fatalf("cloaked target leaked downstream: %s", body)
-	}
-}
-
-func TestResponseInterceptLeavesNativeTargetAloneForCorrelatedRequest(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-	const reqID = "codex-native-target-correlated"
-	interceptRaw, err := json.Marshal(map[string]any{
-		"RequestID":      reqID,
-		"SourceFormat":   "openai",
-		"Model":          "antigravity/test",
-		"RequestedModel": "antigravity/test",
-		"Body":           []byte(`{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"request_user_input"}},{"type":"function","function":{"name":"search_web"}}],"messages":[]}`),
-	})
-	if err != nil {
-		t.Fatalf("marshal request intercept request: %v", err)
-	}
-	if raw, code := handlePluginCall("request.intercept_before", interceptRaw); code != 0 {
-		t.Fatalf("request intercept code = %d; body=%s", code, raw)
-	}
-
-	cloakedReq := `{"tools":[{"type":"function","function":{"name":"run_command"}},{"type":"function","function":{"name":"ask_question"}},{"type":"function","function":{"name":"search_web"}}],"messages":[]}`
-	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"search_web","arguments":"{}"}}]}}]}`
-	request, err := json.Marshal(map[string]any{
-		"RequestID":       reqID,
-		"SourceFormat":    "openai",
-		"OriginalRequest": []byte(cloakedReq),
-		"RequestBody":     []byte(cloakedReq),
-		"Body":            []byte(respBody),
-	})
-	if err != nil {
-		t.Fatalf("marshal response intercept request: %v", err)
-	}
-
-	raw, code := handlePluginCall("response.intercept_after", request)
-	if code != 0 {
-		t.Fatalf("code = %d; body=%s", code, raw)
-	}
-	var envelope struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			Body string `json:"Body"`
-		} `json:"result"`
-	}
-	mustUnmarshalJSON(t, raw, &envelope)
-	if !envelope.OK {
-		t.Fatalf("envelope not OK")
-	}
-	body := respBody
-	if envelope.Result.Body != "" {
-		decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
-		if err != nil {
-			t.Fatalf("decode base64: %v", err)
-		}
-		body = string(decoded)
-	}
-
-	var resp map[string]any
-	mustUnmarshalJSON(t, []byte(body), &resp)
-	choices := resp["choices"].([]any)
-	message := choices[0].(map[string]any)["message"].(map[string]any)
-	names := map[string]bool{}
-	for _, tcRaw := range message["tool_calls"].([]any) {
-		fn := tcRaw.(map[string]any)["function"].(map[string]any)
-		names[fn["name"].(string)] = true
-	}
-	if !names["exec"] {
-		t.Fatalf("declared codex source was not restored: %s", body)
-	}
-	if !names["search_web"] || len(names) != 2 {
-		t.Fatalf("native AGY target was rewritten to a name the client never declared: %s", body)
-	}
-}
-
-func TestResponseInterceptDoesNotCorruptProse(t *testing.T) {
-	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
-	respBody := `{"choices":[{"message":{"content":"You can use run_command to execute..."}}]}`
-
-	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
-	raw, code := handlePluginCall("response.intercept_after", request)
-	if code != 0 {
-		t.Fatalf("code = %d; body=%s", code, raw)
-	}
-
-	var envelope struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			Body string `json:"Body"`
-		} `json:"result"`
-	}
-	mustUnmarshalJSON(t, raw, &envelope)
-	if !envelope.OK {
-		t.Fatalf("envelope not OK")
-	}
-
-	if envelope.Result.Body != "" {
-		decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
-		if err != nil {
-			t.Fatalf("decode base64: %v", err)
-		}
-		t.Fatalf("expected no changes (empty Body), but got: %s", string(decoded))
-	}
-}
-
-func TestResponseInterceptPassesThroughAntigravity(t *testing.T) {
-	reqBody := `{"tools":[{"type":"function","function":{"name":"ask_permission"}}],"messages":[]}`
-	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
-
-	request := responseInterceptRequestJSON(t, reqBody, respBody, "openai")
-	raw, code := handlePluginCall("response.intercept_after", request)
-	if code != 0 {
-		t.Fatalf("code = %d; body=%s", code, raw)
-	}
-
-	var envelope struct {
-		OK     bool `json:"ok"`
-		Result struct {
-			Body string `json:"Body"`
-		} `json:"result"`
-	}
-	mustUnmarshalJSON(t, raw, &envelope)
-	if !envelope.OK {
-		t.Fatalf("envelope not OK")
-	}
-
-	if envelope.Result.Body != "" {
-		t.Fatalf("expected empty Body for passthrough (Antigravity tools present in request), got: %s", envelope.Result.Body)
-	}
-}
-
 func requestInterceptRequestJSON(t *testing.T, body string) []byte {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{
@@ -472,17 +326,4 @@ func mustUnmarshalJSON(t *testing.T, raw []byte, out any) {
 	if err := json.Unmarshal(raw, out); err != nil {
 		t.Fatalf("unmarshal %s: %v", raw, err)
 	}
-}
-
-func responseInterceptRequestJSON(t *testing.T, reqBody, respBody, sourceFormat string) []byte {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"SourceFormat": sourceFormat,
-		"RequestBody":  []byte(reqBody),
-		"Body":         []byte(respBody),
-	})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	return raw
 }

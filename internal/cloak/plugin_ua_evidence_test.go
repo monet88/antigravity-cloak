@@ -98,10 +98,7 @@ func TestIntegration_UserAgent_ThinOhMyPi_Roundtrip(t *testing.T) {
 		"stream": false,
 	}
 	b, _ := json.Marshal(clientReq)
-	rawResp, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, b, headers)), 0
-	if code != 0 {
-		t.Fatalf("request.intercept_before code=%d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, b, headers))
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	if !strings.Contains(string(body), `"name":"read_file"`) {
 		t.Fatalf("UA omp thin request not cloaked to read_file: %s", body)
@@ -518,10 +515,7 @@ func TestIntegration_UserAgent_StreamHeaderInitFallbackUsesUA(t *testing.T) {
 		ChunkIndex:     pluginapi.StreamChunkHeaderInitIndex,
 		RequestHeaders: headers,
 	})
-	rawInit, code := HandleStreamChunkIntercept(initPayload), 0
-	if code != 0 {
-		t.Fatalf("header-init failed code=%d", code)
-	}
+	rawInit := HandleStreamChunkIntercept(initPayload)
 	// Must return empty body (no uncloak on header-init)
 	if out := decodeEnvelopeBody(t, rawInit); len(out) != 0 {
 		t.Fatalf("header-init should return empty body, got: %s", out)
@@ -599,10 +593,7 @@ func TestIntegration_NonClientRequestWithBrandWords_PreservesBodyWithoutMutation
 	}
 
 	// Case 1: No User-Agent header
-	rawResp, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue23-no-client-no-ua", "openai", model, b, nil)), 0
-	if code != 0 {
-		t.Fatalf("request.intercept_before code=%d, want 0", code)
-	}
+	rawResp := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue23-no-client-no-ua", "openai", model, b, nil))
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	if len(body) != 0 {
 		t.Fatalf("normal API request without client must not be mutated, got: %s", body)
@@ -611,10 +602,7 @@ func TestIntegration_NonClientRequestWithBrandWords_PreservesBodyWithoutMutation
 	// Case 2: Generic User-Agent (curl/8.0.0)
 	h := http.Header{}
 	h.Set("User-Agent", "curl/8.0.0")
-	rawResp2, code2 := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue23-no-client-curl-ua", "openai", model, b, h)), 0
-	if code2 != 0 {
-		t.Fatalf("request.intercept_before code=%d, want 0", code2)
-	}
+	rawResp2 := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue23-no-client-curl-ua", "openai", model, b, h))
 	body2, _, _ := decodeEnvelopeRequestIntercept(t, rawResp2)
 	if len(body2) != 0 {
 		t.Fatalf("normal API request with generic UA must not be mutated, got: %s", body2)
@@ -632,10 +620,7 @@ func TestIntegration_NonClientRequestWithBrandWords_PreservesBodyWithoutMutation
 	if err != nil {
 		t.Fatalf("marshal anthropicReq: %v", err)
 	}
-	rawRespAnth, codeAnth := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue23-no-client-anthropic", "anthropic", model, bAnth, h)), 0
-	if codeAnth != 0 {
-		t.Fatalf("request.intercept_before code=%d, want 0", codeAnth)
-	}
+	rawRespAnth := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue23-no-client-anthropic", "anthropic", model, bAnth, h))
 	bodyAnth, _, _ := decodeEnvelopeRequestIntercept(t, rawRespAnth)
 	if len(bodyAnth) != 0 {
 		t.Fatalf("normal Anthropic API request must not be mutated, got: %s", bodyAnth)
@@ -671,10 +656,7 @@ func TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks(t *testing.T) {
 		t.Fatalf("marshal clientReq: %v", err)
 	}
 
-	rawResp, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, b, headers)), 0
-	if code != 0 {
-		t.Fatalf("request.intercept_before code=%d, want 0", code)
-	}
+	rawResp := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, b, headers))
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	if len(body) == 0 {
 		t.Fatalf("recognized OMP request must be rewritten, got empty body")
@@ -698,10 +680,7 @@ func TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks(t *testing.T) {
 
 	// Non-streaming response path uncloaks read_file to read
 	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
-	rawResp2, code2 := HandleResponseIntercept(makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, respBody)), 0
-	if code2 != 0 {
-		t.Fatalf("response.intercept_after code=%d", code2)
-	}
+	rawResp2 := HandleResponseIntercept(makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, respBody))
 	out := decodeEnvelopeBody(t, rawResp2)
 	if !strings.Contains(string(out), `"name":"read"`) {
 		t.Fatalf("response did not uncloak read_file to read: %s", out)
@@ -709,10 +688,7 @@ func TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks(t *testing.T) {
 
 	// Streaming response path uncloaks read_file to read
 	chunkBody := []byte(`{"choices":[{"delta":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
-	rawChunk, codeChunk := HandleStreamChunkIntercept(makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, chunkBody, nil)), 0
-	if codeChunk != 0 {
-		t.Fatalf("stream chunk code=%d", codeChunk)
-	}
+	rawChunk := HandleStreamChunkIntercept(makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, chunkBody, nil))
 	chunkOut := decodeEnvelopeBody(t, rawChunk)
 	if !strings.Contains(string(chunkOut), `"name":"read"`) {
 		t.Fatalf("stream chunk did not uncloak read_file to read: %s", chunkOut)
@@ -734,10 +710,7 @@ func TestIntegration_RecognizedOhMyPi_BrandRewritesAndToolCloaks(t *testing.T) {
 		},
 	}
 	bBody, _ := json.Marshal(bodyOnlyReq)
-	rawRespBody, codeBody := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "omp-body-detected-002", "openai", model, bBody, nil)), 0
-	if codeBody != 0 {
-		t.Fatalf("request.intercept_before code=%d, want 0", codeBody)
-	}
+	rawRespBody := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "omp-body-detected-002", "openai", model, bBody, nil))
 	bodyRes, _, _ := decodeEnvelopeRequestIntercept(t, rawRespBody)
 	if len(bodyRes) == 0 {
 		t.Fatalf("body-detected OMP request must be rewritten, got empty body")

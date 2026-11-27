@@ -14,7 +14,7 @@ func HandleRequestComplete(request []byte) []byte {
 	var comp pluginapi.RequestCompletion
 	if err := json.Unmarshal(request, &comp); err != nil {
 		debugLog("handleRequestComplete: decode error %v", err)
-		return mustErrorEnvelope("invalid_request", err.Error())
+		return MustErrorEnvelope("invalid_request", err.Error())
 	}
 	debugLog("handleRequestComplete: RequestID=%q Outcome=%s", comp.RequestID, comp.Outcome)
 	if comp.RequestID != "" {
@@ -22,7 +22,7 @@ func HandleRequestComplete(request []byte) []byte {
 		globalAliasPlanManager.delete(comp.RequestID)
 		globalStreamManager.deleteSession("req:" + comp.RequestID)
 	}
-	return mustEnvelope(struct{}{})
+	return MustEnvelope(struct{}{})
 }
 
 func HandlePluginLifecycle(request []byte, registration any) []byte {
@@ -43,7 +43,7 @@ func protected503Response(resp pluginapi.RequestInterceptResponse) []byte {
 		"Content-Type": []string{"application/json"},
 	}
 	resp.ResponseBody = []byte(`{"error":{"code":"omp_cloak_required","message":"Protected OMP request could not be safely cloaked."}}`)
-	return mustEnvelope(resp)
+	return MustEnvelope(resp)
 }
 
 func toolCloak503Response(resp pluginapi.RequestInterceptResponse) []byte {
@@ -53,7 +53,7 @@ func toolCloak503Response(resp pluginapi.RequestInterceptResponse) []byte {
 		"Content-Type": []string{"application/json"},
 	}
 	resp.ResponseBody = []byte("{\"error\":{\"code\":\"tool_cloak_required\",\"message\":\"Request could not be safely cloaked.\"}}")
-	return mustEnvelope(resp)
+	return MustEnvelope(resp)
 }
 
 type protectedDeclInfo struct {
@@ -588,13 +588,13 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		expected:                expectedChoiceCount,
 	})
 	globalStreamManager.resetSession("req:"+req.RequestID, "oh_my_pi", protectedCachedUncloak, expectedChoiceCount)
-	return mustEnvelope(resp)
+	return MustEnvelope(resp)
 }
 
 func HandleRequestInterceptBefore(request []byte) []byte {
 	var req pluginapi.RequestInterceptRequest
 	if err := json.Unmarshal(request, &req); err != nil {
-		return mustErrorEnvelope("invalid_request", fmt.Sprintf("decode request.intercept_before request: %v", err))
+		return MustErrorEnvelope("invalid_request", fmt.Sprintf("decode request.intercept_before request: %v", err))
 	}
 
 	resp := pluginapi.RequestInterceptResponse{}
@@ -621,7 +621,7 @@ func HandleRequestInterceptBefore(request []byte) []byte {
 				client:    "oh_my_pi",
 			})
 		}
-		return mustEnvelope(resp)
+		return MustEnvelope(resp)
 	}
 
 	if !marker.isConflict && marker.isOMP {
@@ -636,12 +636,12 @@ func HandleRequestInterceptBefore(request []byte) []byte {
 				client:    "oh_my_pi",
 			})
 		}
-		return mustEnvelope(resp)
+		return MustEnvelope(resp)
 	}
 
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleRequestInterceptBefore: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
-		return mustEnvelope(resp)
+		return MustEnvelope(resp)
 	}
 
 	forcedClient := ""
@@ -770,7 +770,7 @@ func HandleRequestInterceptBefore(request []byte) []byte {
 
 			debugLog("handleRequestInterceptBefore: alias plan rewritten=%t client=%s", changed, effectiveClient)
 			if !changed {
-				return mustEnvelope(resp)
+				return MustEnvelope(resp)
 			}
 			raw, err := safeMarshal(rootMap)
 			if err != nil {
@@ -778,7 +778,7 @@ func HandleRequestInterceptBefore(request []byte) []byte {
 				return toolCloak503Response(resp)
 			}
 			resp.Body = raw
-			return mustEnvelope(resp)
+			return MustEnvelope(resp)
 		}
 	}
 
@@ -800,16 +800,16 @@ func HandleRequestInterceptBefore(request []byte) []byte {
 		}
 	}
 	if !rewritten {
-		return mustEnvelope(resp)
+		return MustEnvelope(resp)
 	}
 	resp.Body = body
-	return mustEnvelope(resp)
+	return MustEnvelope(resp)
 }
 
 func HandleResponseIntercept(request []byte) []byte {
 	var req pluginapi.ResponseInterceptRequest
 	if err := json.Unmarshal(request, &req); err != nil {
-		return mustErrorEnvelope("invalid_request", err.Error())
+		return MustErrorEnvelope("invalid_request", err.Error())
 	}
 
 	format := normalizeSourceFormat(req.SourceFormat)
@@ -820,12 +820,12 @@ func HandleResponseIntercept(request []byte) []byte {
 		if route := globalLifecycleManager.getRoute(req.RequestID); route != nil {
 			if route.routeKind == routeKindExplicitOMPNonAGYBypass {
 				debugLog("handleResponseIntercept: correlated ExplicitOMPNonAGYBypass -> zero mutation")
-				return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+				return MustEnvelope(pluginapi.ResponseInterceptResponse{})
 			}
 			if route.routeKind == routeKindProtectedAGY {
 				if route.malformed || route.client != "oh_my_pi" {
 					debugLog("invariant violation: malformed ProtectedAGY route state for RequestID=%s", req.RequestID)
-					return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+					return MustEnvelope(pluginapi.ResponseInterceptResponse{})
 				}
 				modified := req.Body
 				changed := false
@@ -842,9 +842,9 @@ func HandleResponseIntercept(request []byte) []byte {
 					}
 				}
 				if !changed {
-					return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+					return MustEnvelope(pluginapi.ResponseInterceptResponse{})
 				}
-				return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
+				return MustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
 			}
 		}
 		if plan := globalAliasPlanManager.get(req.RequestID); plan != nil {
@@ -869,12 +869,12 @@ func HandleResponseIntercept(request []byte) []byte {
 			// independently of the tool-name plan: none of those tokens can
 			// appear in plan.reverse, so the two authorities never collide.
 			if rev, c := reverseCloakedBrandBody(modified, plan.client); c {
-				return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: rev})
+				return MustEnvelope(pluginapi.ResponseInterceptResponse{Body: rev})
 			}
 			if uncloaked {
-				return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
+				return MustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
 			}
-			return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+			return MustEnvelope(pluginapi.ResponseInterceptResponse{})
 		}
 		// RequestID is present, but neither route nor alias plan exists.
 		// For alias-plan clients (Claude Code, Codex), full-declaration restoration
@@ -883,18 +883,18 @@ func HandleResponseIntercept(request []byte) []byte {
 		// than guess or reverse static AGY targets (Issue #39).
 		if sess := globalStreamManager.getSession("req:" + req.RequestID); sess != nil && clientUsesAliasPlan(sess.client) {
 			debugLog("handleResponseIntercept: alias-plan client=%q with missing authority RequestID=%s -> pass-through", sess.client, req.RequestID)
-			return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+			return MustEnvelope(pluginapi.ResponseInterceptResponse{})
 		}
 	}
 
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleResponseIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
-		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+		return MustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
 
 	if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
 		debugLog("handleResponseIntercept: alias-plan explicit marker=%q without pinned authority -> pass-through", marker.client)
-		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+		return MustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
 	var client string
 	var uncloakTable map[string]string
@@ -904,7 +904,7 @@ func HandleResponseIntercept(request []byte) []byte {
 			correlated = true
 			if sess.client == negativeClientResolution {
 				debugLog("handleResponseIntercept: negative client resolution authoritative for RequestID=%s", req.RequestID)
-				return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+				return MustEnvelope(pluginapi.ResponseInterceptResponse{})
 			}
 			client = sess.client
 			// Reuse the reverse the request interceptor derived from the RAW
@@ -936,7 +936,7 @@ func HandleResponseIntercept(request []byte) []byte {
 	}
 	debugLog("handleResponseIntercept: client=%s uncloakTable=%v", client, uncloakTable)
 	if uncloakTable == nil && client != "oh_my_pi" {
-		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+		return MustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
 
 	modified := req.Body
@@ -957,15 +957,15 @@ func HandleResponseIntercept(request []byte) []byte {
 	}
 	debugLog("handleResponseIntercept: changed=%t Body=%s", changed, string(modified))
 	if !changed {
-		return mustEnvelope(pluginapi.ResponseInterceptResponse{})
+		return MustEnvelope(pluginapi.ResponseInterceptResponse{})
 	}
-	return mustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
+	return MustEnvelope(pluginapi.ResponseInterceptResponse{Body: modified})
 }
 
 func HandleStreamChunkIntercept(request []byte) []byte {
 	var req pluginapi.StreamChunkInterceptRequest
 	if err := json.Unmarshal(request, &req); err != nil {
-		return mustErrorEnvelope("invalid_request", err.Error())
+		return MustErrorEnvelope("invalid_request", err.Error())
 	}
 
 	format := normalizeSourceFormat(req.SourceFormat)
@@ -976,20 +976,20 @@ func HandleStreamChunkIntercept(request []byte) []byte {
 		if route := globalLifecycleManager.getRoute(req.RequestID); route != nil {
 			if route.routeKind == routeKindExplicitOMPNonAGYBypass {
 				debugLog("handleStreamChunkIntercept: correlated ExplicitOMPNonAGYBypass -> zero mutation")
-				return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+				return MustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 			}
 			if route.routeKind == routeKindProtectedAGY {
 				if route.malformed || route.client != "oh_my_pi" {
 					debugLog("invariant violation: malformed ProtectedAGY route state for RequestID=%s", req.RequestID)
-					return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+					return MustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 				}
 				resp := globalStreamManager.processChunk(&req, format)
-				return mustEnvelope(resp)
+				return MustEnvelope(resp)
 			}
 		}
 		if plan := globalAliasPlanManager.get(req.RequestID); plan != nil {
 			resp := globalStreamManager.processChunk(&req, plan.sourceFormat)
-			return mustEnvelope(resp)
+			return MustEnvelope(resp)
 		}
 		// RequestID is present, but neither route nor alias plan exists.
 		// For alias-plan clients (Claude Code, Codex), full-declaration restoration
@@ -998,19 +998,19 @@ func HandleStreamChunkIntercept(request []byte) []byte {
 		// than guess or reverse static AGY targets (Issue #39).
 		if sess := globalStreamManager.getSession("req:" + req.RequestID); sess != nil && clientUsesAliasPlan(sess.client) {
 			debugLog("handleStreamChunkIntercept: alias-plan client=%q with missing authority RequestID=%s -> pass-through", sess.client, req.RequestID)
-			return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+			return MustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 		}
 	}
 
 	if !modelAllowsCloak(req.Model, req.RequestedModel) {
 		debugLog("handleStreamChunkIntercept: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+		return MustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 	}
 
 	if marker := parseExplicitClientMarker(req.RequestHeaders); marker.present && clientUsesAliasPlan(marker.client) {
 		debugLog("handleStreamChunkIntercept: alias-plan explicit marker=%q without pinned authority -> pass-through", marker.client)
-		return mustEnvelope(pluginapi.StreamChunkInterceptResponse{})
+		return MustEnvelope(pluginapi.StreamChunkInterceptResponse{})
 	}
 	resp := globalStreamManager.processChunk(&req, format)
-	return mustEnvelope(resp)
+	return MustEnvelope(resp)
 }

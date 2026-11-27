@@ -113,10 +113,7 @@ func TestIssue51_NestedSchemaProseUsesRequestScopedAliasesAcrossCarriers(t *test
 
 	for _, format := range []string{"openai", "anthropic"} {
 		h := http.Header{"X-Cloak-Client": {"claude_code"}}
-		raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue51-schema-"+format, format, "agy/probe", nestedProseToolsBody(format), h)), 0
-		if code != 0 {
-			t.Fatalf("%s: code=%d envelope=%s", format, code, raw)
-		}
+		raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue51-schema-"+format, format, "agy/probe", nestedProseToolsBody(format), h))
 		forward := decodeEnvelopeBody(t, raw)
 		aliases := declaredToolNames(forward, format)
 		if len(aliases) != 3 {
@@ -211,10 +208,7 @@ func TestIssue51_OMPNestedSchemaProseUsesSharedToolAliases(t *testing.T) {
 	}
 
 	h := http.Header{"X-Cloak-Client": {"oh_my_pi"}}
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue51-omp-schema", "anthropic", "agy/omp-schema", body, h)), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue51-omp-schema", "anthropic", "agy/omp-schema", body, h))
 	forward := decodeEnvelopeBody(t, raw)
 	aliases := declaredToolNames(forward, "anthropic")
 
@@ -320,10 +314,7 @@ func TestIssue51_AliasesInsideCollidingSchemaEntries(t *testing.T) {
 			t.Fatal(err)
 		}
 		h := http.Header{"X-Cloak-Client": {"claude_code"}}
-		raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue51-collide-"+format, format, "agy/probe", body, h)), 0
-		if code != 0 {
-			t.Fatalf("%s: code=%d envelope=%s", format, code, raw)
-		}
+		raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "issue51-collide-"+format, format, "agy/probe", body, h))
 		forward := decodeEnvelopeBody(t, raw)
 		aliases := declaredToolNames(forward, format)
 		if len(aliases) != 3 {

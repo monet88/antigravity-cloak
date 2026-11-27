@@ -240,14 +240,11 @@ func TestSystemConventionsBuiltInRFC2119PresetsOnProtectedAGY(t *testing.T) {
 	for _, format := range []string{"anthropic", "openai"} {
 		t.Run(format, func(t *testing.T) {
 			isolateOMPMeasurement(t)
-			rawCfg, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+			HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 use_default_keywords: false
 model_prefixes:
   - unrelated/
-`)), nil), 0
-			if code != 0 {
-				t.Fatalf("reconfigure code = %d, body = %s", code, rawCfg)
-			}
+`)), nil)
 
 			fx := newFiveRoleCarrierFixture(format, promptOriginal, true)
 			reqID := "rfc2119-protected-" + format
@@ -374,12 +371,9 @@ func TestOMPPromptSanitizationsReconfigureAndPrecedence(t *testing.T) {
 
 	t.Run("null-uses-builtins", func(t *testing.T) {
 		isolateOMPMeasurement(t)
-		raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+		HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 omp_prompt_sanitizations: null
-`)), nil), 0
-		if code != 0 {
-			t.Fatalf("code = %d, body = %s", code, raw)
-		}
+`)), nil)
 		got := runProtectedPrompt(t, "null-builtins", "<system-conventions>RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. <SYSTEM-CONVENTIONS></system-conventions>")
 		want := "<conventions>Normative keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. <SYSTEM-CONVENTIONS></conventions>"
 		if got != want {
@@ -389,7 +383,7 @@ omp_prompt_sanitizations: null
 
 	t.Run("object-override-strip-custom-literal-and-nonrecursive", func(t *testing.T) {
 		isolateOMPMeasurement(t)
-		raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+		raw := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 use_default_keywords: false
 omp_prompt_sanitizations:
   "rfc 2119 keywords: must, required, should, recommended, may, optional.": "Modal directives ($1/$0/$$): MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL."
@@ -398,10 +392,7 @@ omp_prompt_sanitizations:
   "</system-conventions>": "</custom-rules>"
   "custom-directive-token": "custom-directive-token-v2"
   "規約ヘッダー": "共通ルール ($1)"
-`)), nil), 0
-		if code != 0 {
-			t.Fatalf("code = %d, body = %s", code, raw)
-		}
+`)), nil)
 		var env map[string]any
 		mustUnmarshalJSON(t, raw, &env)
 		if env["ok"] != true {
@@ -425,16 +416,13 @@ omp_prompt_sanitizations:
 
 	t.Run("longest-match-first-and-tie-break", func(t *testing.T) {
 		isolateOMPMeasurement(t)
-		raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+		raw := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 omp_prompt_sanitizations:
   "RFC 2119 keywords:": "Short prefix:"
   "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.": "Specific full override."
   "bc": "SECOND"
   "ab": "FIRST"
-`)), nil), 0
-		if code != 0 {
-			t.Fatalf("code = %d, body = %s", code, raw)
-		}
+`)), nil)
 		var env map[string]any
 		mustUnmarshalJSON(t, raw, &env)
 		if env["ok"] != true {
@@ -450,14 +438,11 @@ omp_prompt_sanitizations:
 
 	t.Run("string-and-array-forms", func(t *testing.T) {
 		isolateOMPMeasurement(t)
-		raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+		raw := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 omp_prompt_sanitizations: |
   strip-me:
   alpha-phrase: beta, second-phrase: gamma
-`)), nil), 0
-		if code != 0 {
-			t.Fatalf("code = %d, body = %s", code, raw)
-		}
+`)), nil)
 		var env map[string]any
 		mustUnmarshalJSON(t, raw, &env)
 		if env["ok"] != true {
@@ -469,14 +454,11 @@ omp_prompt_sanitizations: |
 			t.Fatalf("string form got %q, want %q", got, want)
 		}
 
-		raw, code = HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+		raw = HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 omp_prompt_sanitizations:
   - "strip-arr:"
   - "delta-phrase: epsilon"
-`)), nil), 0
-		if code != 0 {
-			t.Fatalf("code = %d, body = %s", code, raw)
-		}
+`)), nil)
 		mustUnmarshalJSON(t, raw, &env)
 		if env["ok"] != true {
 			t.Fatalf("array reconfigure failed: %s", raw)
@@ -507,10 +489,7 @@ func TestSystemConventionsUserAgentOMPRouteGate(t *testing.T) {
 			"omp_prompt_sanitizations:\n" +
 			"  \"custom-ua-fingerprint\": \"custom-ua-safe\"\n" +
 			extraYAML
-		raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(cfgYAML)), nil), 0
-		if code != 0 {
-			t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-		}
+		raw := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(cfgYAML)), nil)
 		var env map[string]any
 		mustUnmarshalJSON(t, raw, &env)
 		if env["ok"] != true {
@@ -583,14 +562,11 @@ func TestSystemConventionsUserAgentOMPRouteGate(t *testing.T) {
 
 	t.Run("ua-omp-combined-tools-brand-and-sanitization", func(t *testing.T) {
 		isolateOMPMeasurement(t)
-		raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+		HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 use_default_keywords: true
 omp_prompt_sanitizations:
   "custom-ua-fingerprint": "custom-ua-safe"
-`)), nil), 0
-		if code != 0 {
-			t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-		}
+`)), nil)
 		root := map[string]any{
 			"system": "<system-conventions>You use Oh My Pi. Use bash tool.\nRFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.\ncustom-ua-fingerprint</system-conventions>",
 			"messages": []any{
@@ -624,16 +600,13 @@ omp_prompt_sanitizations:
 			} {
 				t.Run(format+"/"+route.name, func(t *testing.T) {
 					isolateOMPMeasurement(t)
-					raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+					HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 use_default_keywords: true
 custom_mappings:
   sanitized-literal-token: WRONG
 omp_prompt_sanitizations:
   "Policy: use bash directly": "sanitized-literal-token: Always use bash for shell work."
-`)), nil), 0
-					if code != 0 {
-						t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-					}
+`)), nil)
 					root := map[string]any{
 						"system": "You use Oh My Pi. Policy: use bash directly",
 						"messages": []any{
@@ -836,10 +809,7 @@ func TestSystemConventionsRFC2119AllLineEndings(t *testing.T) {
 			subtest := tc.name + "-eol-" + endingName(ending)
 			t.Run("protected-agy-"+subtest, func(t *testing.T) {
 				isolateOMPMeasurement(t)
-				raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")), nil), 0
-				if code != 0 {
-					t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-				}
+				HandlePluginLifecycle(lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")), nil)
 				root := map[string]any{
 					"system": promptIn,
 					"messages": []any{
@@ -865,10 +835,7 @@ func TestSystemConventionsRFC2119AllLineEndings(t *testing.T) {
 			})
 			t.Run("ua-omp-"+subtest, func(t *testing.T) {
 				isolateOMPMeasurement(t)
-				raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")), nil), 0
-				if code != 0 {
-					t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-				}
+				HandlePluginLifecycle(lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")), nil)
 				root := map[string]any{
 					"system": promptIn,
 					"messages": []any{
@@ -910,10 +877,7 @@ func TestOMPInjectedClaudeCodeInstructionPreset(t *testing.T) {
 
 	t.Run("protected-agy-omp1820-shape", func(t *testing.T) {
 		isolateOMPMeasurement(t)
-		rawCfg, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")), nil), 0
-		if code != 0 {
-			t.Fatalf("reconfigure code = %d, body = %s", code, rawCfg)
-		}
+		HandlePluginLifecycle(lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")), nil)
 
 		root := map[string]any{
 			"system": []any{
@@ -1007,10 +971,7 @@ func TestOMPInjectedClaudeCodeInstructionPreset(t *testing.T) {
 
 	t.Run("ua-omp-agy-mixed-case", func(t *testing.T) {
 		isolateOMPMeasurement(t)
-		rawCfg, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")), nil), 0
-		if code != 0 {
-			t.Fatalf("reconfigure code = %d, body = %s", code, rawCfg)
-		}
+		HandlePluginLifecycle(lifecycleRequestJSON(t, []byte("use_default_keywords: false\n")), nil)
 
 		mixed := "you are claude code, anthropic's official cli for claude."
 		root := map[string]any{
@@ -1081,14 +1042,11 @@ func TestOMPInjectedClaudeCodeInstructionPreset(t *testing.T) {
 	t.Run("operator-override", func(t *testing.T) {
 		isolateOMPMeasurement(t)
 		const customReplacement = "Custom OMP operator instruction."
-		rawCfg, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+		HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 use_default_keywords: false
 omp_prompt_sanitizations:
   "You are Claude Code, Anthropic's official CLI for Claude.": "Custom OMP operator instruction."
-`)), nil), 0
-		if code != 0 {
-			t.Fatalf("reconfigure code = %d, body = %s", code, rawCfg)
-		}
+`)), nil)
 		root := map[string]any{
 			"system": []any{
 				map[string]any{

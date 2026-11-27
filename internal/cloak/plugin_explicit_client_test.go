@@ -120,10 +120,7 @@ func TestIntegration_ExplicitClient_ThinOhMyPi_Roundtrip(t *testing.T) {
 
 	// Request intercept: thin body + valid explicit client must cloak.
 	payload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, clientReqBytes, headers)
-	rawResp, code := HandleRequestInterceptBefore(payload), 0
-	if code != 0 {
-		t.Fatalf("request.intercept_before code=%d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payload)
 	body, respHeaders, clearHeaders := decodeEnvelopeRequestIntercept(t, rawResp)
 	if !containsStr(clearHeaders, explicitClientHeader) {
 		t.Fatalf("ClearHeaders=%v, want to include %q", clearHeaders, explicitClientHeader)
@@ -140,10 +137,7 @@ func TestIntegration_ExplicitClient_ThinOhMyPi_Roundtrip(t *testing.T) {
 
 	// Non-streaming response path must uncloak using req-time session truth.
 	respBody := []byte(`{"choices":[{"message":{"tool_calls":[{"function":{"name":"read_file","arguments":"{}"}}]}}]}`)
-	rawResp2, code := HandleResponseIntercept(makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, respBody)), 0
-	if code != 0 {
-		t.Fatalf("response.intercept_after code=%d", code)
-	}
+	rawResp2 := HandleResponseIntercept(makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, respBody))
 	respOut := decodeEnvelopeBody(t, rawResp2)
 	if !strings.Contains(string(respOut), `"name":"read"`) {
 		t.Fatalf("response did not uncloak read_file to read: %s", respOut)

@@ -17,10 +17,7 @@ func forwardCloakedBody(t *testing.T, reqID, reqBody string) string {
 	t.Helper()
 	h := http.Header{}
 	h.Set("X-Cloak-Client", "claude_code")
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", []byte(reqBody), h)), 0
-	if code != 0 {
-		t.Fatalf("code=%d, envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", []byte(reqBody), h))
 	out := string(decodeEnvelopeBody(t, raw))
 	if out == "" {
 		t.Fatalf("forward rewrite produced an empty body, envelope=%s", raw)
@@ -290,10 +287,7 @@ func TestVendorAndSchemaAndPluralGapsAreClosed(t *testing.T) {
 	}`
 	h := http.Header{}
 	h.Set("X-Cloak-Client", "claude_code")
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", []byte(req), h)), 0
-	if code != 0 {
-		t.Fatalf("code=%d, envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", []byte(req), h))
 	forward := string(decodeEnvelopeBody(t, raw))
 	// A plain .claude directory in a parameter description is an operational
 	// identifier and is left alone now; only the home instruction file is
@@ -348,10 +342,7 @@ func TestTypedUserTextIsNeverCloaked(t *testing.T) {
 	// mutation at all: the interceptor returns an empty body.
 	h := http.Header{}
 	h.Set("X-Cloak-Client", "claude_code")
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", []byte(req), h)), 0
-	if code != 0 {
-		t.Fatalf("code=%d, envelope=%s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", []byte(req), h))
 	if got := string(decodeEnvelopeBody(t, raw)); got != "" {
 		t.Fatalf("typed user text must pass through unmutated; got %s", got)
 	}
@@ -396,10 +387,7 @@ func TestStreamBrandReverseRunsForClaudeCodeThroughProcessChunk(t *testing.T) {
 		"tools":[{"name":"Bash","description":""},{"name":"Read","description":""},{"name":"Write","description":""},{"name":"Edit","description":""},{"name":"Grep","description":""},{"name":"Glob","description":""},{"name":"Agent","description":""},{"name":"AskUserQuestion","description":""},{"name":"WebSearch","description":""},{"name":"WebFetch","description":""}]}`)
 	h := http.Header{}
 	h.Set("X-Cloak-Client", "claude_code")
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", reqBody, h)), 0
-	if code != 0 {
-		t.Fatalf("code=%d, envelope=%s", code, raw)
-	}
+	HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", reqBody, h))
 
 	m := globalStreamManager
 	key := m.sessionKey(&pluginapi.StreamChunkInterceptRequest{RequestID: reqID})

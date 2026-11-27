@@ -38,10 +38,7 @@ func TestCC_ProvenToolsCloakViaAliasPlan(t *testing.T) {
 	}`)
 
 	reqPayload := makeIntegrationRequestInterceptPayload(t, reqID, "anthropic", "agy/claude-test", reqBody)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d, body=%s", code, rawEnvelope)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 	bodyDecoded := decodeEnvelopeBody(t, rawEnvelope)
 
 	// Tier-1: proven AGY role targets (from static table).
@@ -77,10 +74,7 @@ func TestCC_ProvenToolsCloakViaAliasPlan(t *testing.T) {
 
 	// Verify WebFetch round-trips cleanly via wp_fetch_url -> WebFetch.
 	respBody := []byte(`{"id":"msg_wf","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tu_wf","name":"wp_fetch_url","input":{"url":"https://example.com"}}]}`)
-	respRaw, respCode := HandleResponseIntercept(makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-test", respBody)), 0
-	if respCode != 0 {
-		t.Fatalf("response intercept code=%d, body=%s", respCode, respRaw)
-	}
+	respRaw := HandleResponseIntercept(makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-test", respBody))
 	respDecoded := decodeEnvelopeBody(t, respRaw)
 	if !strings.Contains(string(respDecoded), `"name":"WebFetch"`) || strings.Contains(string(respDecoded), `"wp_fetch_url"`) {
 		t.Fatalf("expected wp_fetch_url to uncloak to WebFetch, got: %s", respDecoded)
@@ -103,10 +97,7 @@ func TestCC_SharedAliasesCloakViaAliasPlan(t *testing.T) {
 
 	headers := http.Header{"X-Cloak-Client": []string{"claude_code"}}
 	reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", reqBody, headers)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 	bodyDecoded := decodeEnvelopeBody(t, rawEnvelope)
 
 	targets := []string{
@@ -137,10 +128,7 @@ func TestCC_UnknownMcpDeclarationGetsFallback(t *testing.T) {
 	}`)
 
 	reqPayload := makeIntegrationRequestInterceptPayload(t, reqID, "anthropic", "agy/claude-test", reqBody)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 	bodyDecoded := decodeEnvelopeBody(t, rawEnvelope)
 
 	if !strings.Contains(string(bodyDecoded), `"wp_ext_`) {
@@ -166,10 +154,7 @@ func TestCC_ThinMarkerRequest(t *testing.T) {
 	headers.Set("X-Cloak-Client", "claude_code")
 
 	reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", reqBody, headers)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 	bodyDecoded := decodeEnvelopeBody(t, rawEnvelope)
 
 	if !strings.Contains(string(bodyDecoded), `"run_command"`) {
@@ -210,10 +195,7 @@ func TestCC_ResponseReversalViaAliasPlan(t *testing.T) {
 	}`)
 
 	respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-test", respBody)
-	rawEnvelope, code := HandleResponseIntercept(respPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawEnvelope := HandleResponseIntercept(respPayload)
 	bodyDecoded := decodeEnvelopeBody(t, rawEnvelope)
 
 	if !strings.Contains(string(bodyDecoded), `"Bash"`) {
@@ -243,10 +225,7 @@ func TestCC_StreamReversalViaAliasPlan(t *testing.T) {
 	chunkBody := []byte(`data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"run_command","input":{}}}` + "\n\n")
 
 	chunkPayload := makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/claude-test", 0, chunkBody, nil)
-	rawEnvelope, code := HandleStreamChunkIntercept(chunkPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawEnvelope := HandleStreamChunkIntercept(chunkPayload)
 	bodyDecoded := decodeEnvelopeBody(t, rawEnvelope)
 
 	if !strings.Contains(string(bodyDecoded), `"name":"Bash"`) {
@@ -282,10 +261,7 @@ func TestCC_HistoryConsistency(t *testing.T) {
 	}`)
 
 	reqPayload := makeIntegrationRequestInterceptPayload(t, reqID, "anthropic", "agy/claude-test", reqBody)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 	bodyDecoded := decodeEnvelopeBody(t, rawEnvelope)
 
 	if !strings.Contains(string(bodyDecoded), `"name":"run_command"`) {
@@ -310,10 +286,7 @@ func TestCC_ToolChoiceConsistency(t *testing.T) {
 	}`)
 
 	reqPayload := makeIntegrationRequestInterceptPayload(t, reqID, "anthropic", "agy/claude-test", reqBody)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 	bodyDecoded := decodeEnvelopeBody(t, rawEnvelope)
 
 	if !strings.Contains(string(bodyDecoded), `"name":"run_command"`) {
@@ -355,10 +328,7 @@ func TestCC_AllTier2Vocabulary(t *testing.T) {
 
 	headers := http.Header{"X-Cloak-Client": []string{"claude_code"}}
 	reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", reqBody, headers)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 	bodyDecoded := decodeEnvelopeBody(t, rawEnvelope)
 	got := string(bodyDecoded)
 
@@ -411,10 +381,7 @@ func TestCC_MissingCorrelation503(t *testing.T) {
 
 	// Missing RequestID ("") on eligible Claude Code request -> must fail closed with 503 tool_cloak_required
 	reqPayload := makeIntegrationRequestInterceptPayload(t, "", "anthropic", "agy/claude-test", reqBody)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d, raw=%s", code, rawEnvelope)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 
 	var envelope struct {
 		OK     bool `json:"ok"`
@@ -462,10 +429,7 @@ func TestCC_NamespaceVariantCollisionFailsClosed(t *testing.T) {
 			headers := make(http.Header)
 			headers.Set("X-Cloak-Client", "claude_code")
 			reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, "cc-collision-"+tc.name, "anthropic", "agy/claude-test", reqBody, headers)
-			rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-			if code != 0 {
-				t.Fatalf("code=%d, raw=%s", code, rawEnvelope)
-			}
+			rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 			var envelope struct {
 				OK     bool `json:"ok"`
 				Result struct {
@@ -522,10 +486,7 @@ func TestCC_DeferredToolPlaceholderProtocolPositions(t *testing.T) {
 
 	headers := http.Header{"X-Cloak-Client": []string{"claude_code"}}
 	reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", reqBody, headers)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 	bodyDecoded := string(decodeEnvelopeBody(t, rawEnvelope))
 
 	// All protocol positions must be cloaked to wp_resolve_tool
@@ -548,10 +509,7 @@ func TestCC_DeferredToolPlaceholderProtocolPositions(t *testing.T) {
 		]
 	}`)
 	respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-test", respBody)
-	rawRespEnvelope, code := HandleResponseIntercept(respPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawRespEnvelope := HandleResponseIntercept(respPayload)
 	respDecoded := string(decodeEnvelopeBody(t, rawRespEnvelope))
 	if !strings.Contains(respDecoded, `"DeferredToolPlaceholder"`) {
 		t.Fatalf("response uncloak failed to restore DeferredToolPlaceholder: %s", respDecoded)
@@ -585,10 +543,7 @@ func TestCC_ArbitraryDataFieldsUntouched(t *testing.T) {
 	}`)
 
 	reqPayload := makeIntegrationRequestInterceptPayload(t, reqID, "anthropic", "agy/claude-test", reqBody)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("code=%d", code)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 	bodyDecoded := string(decodeEnvelopeBody(t, rawEnvelope))
 
 	// Protocol tool declarations must be cloaked
@@ -656,10 +611,7 @@ func TestCC_AlreadyCloakedBody_WithoutAuthority_PassesThrough(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	rawResp, code := HandleResponseIntercept(payload), 0
-	if code != 0 {
-		t.Fatalf("response.intercept_after code=%d", code)
-	}
+	rawResp := HandleResponseIntercept(payload)
 	decoded := decodeEnvelopeBody(t, rawResp)
 	if decoded != nil && !bytes.Equal(decoded, respBody) {
 		t.Fatalf("executed body without pinned authority must pass through unmutated: %s", string(decoded))
@@ -681,10 +633,7 @@ func TestCC_ResponseLeavesNativeTargetAlone(t *testing.T) {
 	}`)
 	headers := http.Header{"X-Cloak-Client": []string{"claude_code"}}
 	reqPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", reqBody, headers)
-	rawEnvelope, code := HandleRequestInterceptBefore(reqPayload), 0
-	if code != 0 {
-		t.Fatalf("request.intercept_before code=%d", code)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(reqPayload)
 	bodyDecoded := string(decodeEnvelopeBody(t, rawEnvelope))
 	if !strings.Contains(bodyDecoded, `"run_command"`) {
 		t.Fatalf("Bash was not cloaked to run_command: %s", bodyDecoded)
@@ -705,10 +654,7 @@ func TestCC_ResponseLeavesNativeTargetAlone(t *testing.T) {
 	// 1. Correlated response path:
 	// Plan must reverse run_command -> Bash, but MUST leave read_file untouched.
 	respPayload := makeIntegrationResponseInterceptPayload(t, reqID, "anthropic", "agy/claude-test", respBody)
-	rawRespEnvelope, codeResp := HandleResponseIntercept(respPayload), 0
-	if codeResp != 0 {
-		t.Fatalf("response.intercept_after code=%d", codeResp)
-	}
+	rawRespEnvelope := HandleResponseIntercept(respPayload)
 	respDecoded := string(decodeEnvelopeBody(t, rawRespEnvelope))
 	if !strings.Contains(respDecoded, `"Bash"`) {
 		t.Fatalf("run_command was not uncloaked to Bash: %s", respDecoded)
@@ -724,10 +670,7 @@ func TestCC_ResponseLeavesNativeTargetAlone(t *testing.T) {
 	// A stream chunk carrying read_file must NOT be rewritten to Read.
 	streamChunk := []byte(`data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_2","name":"read_file","input":{}}}` + "\n\n")
 	chunkPayload := makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/claude-test", 0, streamChunk, nil)
-	rawChunkEnvelope, codeChunk := HandleStreamChunkIntercept(chunkPayload), 0
-	if codeChunk != 0 {
-		t.Fatalf("response.intercept_stream_chunk code=%d", codeChunk)
-	}
+	rawChunkEnvelope := HandleStreamChunkIntercept(chunkPayload)
 	chunkDecoded := decodeEnvelopeBody(t, rawChunkEnvelope)
 	chunkStr := string(chunkDecoded)
 	if chunkDecoded != nil && strings.Contains(chunkStr, `"Read"`) {
@@ -741,10 +684,7 @@ func TestCC_ResponseLeavesNativeTargetAlone(t *testing.T) {
 	// An uncorrelated response with no matching request / without declared Read authority
 	// must leave read_file untouched and never invent Read.
 	uncorrelatedRespPayload := makeIntegrationResponseInterceptPayload(t, "req_cc_uncorrelated_neg", "anthropic", "agy/claude-test", respBody)
-	rawUncorrelatedEnvelope, codeUncorrelated := HandleResponseIntercept(uncorrelatedRespPayload), 0
-	if codeUncorrelated != 0 {
-		t.Fatalf("uncorrelated response.intercept_after code=%d", codeUncorrelated)
-	}
+	rawUncorrelatedEnvelope := HandleResponseIntercept(uncorrelatedRespPayload)
 	uncorrelatedBody := decodeEnvelopeBody(t, rawUncorrelatedEnvelope)
 	if uncorrelatedBody != nil {
 		uncorrelatedStr := string(uncorrelatedBody)

@@ -148,10 +148,7 @@ func TestIntegration_OhMyPi_DefaultTools_SSEStreamLifecycle(t *testing.T) {
 
 	// 2. Request Interceptor (request.intercept_before)
 	interceptReqPayload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, clientReqBytes)
-	rawResp, code := HandleRequestInterceptBefore(interceptReqPayload), 0
-	if code != 0 {
-		t.Fatalf("request.intercept_before code=%d, body=%s", code, rawResp)
-	}
+	rawResp := HandleRequestInterceptBefore(interceptReqPayload)
 
 	rewrittenReqBytes := decodeEnvelopeBody(t, rawResp)
 	if len(rewrittenReqBytes) == 0 {
@@ -217,10 +214,7 @@ func TestIntegration_OhMyPi_DefaultTools_SSEStreamLifecycle(t *testing.T) {
 	var clientReceivedChunks []string
 	for i, chunk := range sseChunks {
 		chunkReqPayload := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, i, []byte(chunk), nil)
-		chunkRawResp, chunkCode := HandleStreamChunkIntercept(chunkReqPayload), 0
-		if chunkCode != 0 {
-			t.Fatalf("stream chunk %d failed with code %d: %s", i, chunkCode, chunkRawResp)
-		}
+		chunkRawResp := HandleStreamChunkIntercept(chunkReqPayload)
 		decodedChunk := decodeEnvelopeBody(t, chunkRawResp)
 		if len(decodedChunk) > 0 {
 			clientReceivedChunks = append(clientReceivedChunks, string(decodedChunk))
@@ -592,10 +586,7 @@ func TestIntegration_OfflineMockServer_CloakToStreamRoundtrip(t *testing.T) {
 
 	// 2. Request intercept produces the cloaked body.
 	interceptPayload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, clientReqBytes)
-	rawResp, code := HandleRequestInterceptBefore(interceptPayload), 0
-	if code != 0 {
-		t.Fatalf("request.intercept_before code=%d, body=%s", code, rawResp)
-	}
+	rawResp := HandleRequestInterceptBefore(interceptPayload)
 	cloakedBody := decodeEnvelopeBody(t, rawResp)
 	if !strings.Contains(string(cloakedBody), "Antigravity") {
 		t.Fatalf("system identity not rewritten to Antigravity: %s", string(cloakedBody))
@@ -778,10 +769,7 @@ func TestIntegration_OfflineMockServer_VibeMode_Roundtrip(t *testing.T) {
 	}
 	clientReqBytes, _ := json.Marshal(clientReq)
 	interceptPayload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, clientReqBytes)
-	rawResp, code := HandleRequestInterceptBefore(interceptPayload), 0
-	if code != 0 {
-		t.Fatalf("request.intercept_before code=%d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(interceptPayload)
 	cloakedBody := decodeEnvelopeBody(t, rawResp)
 	// Vibe tools must pass through unchanged
 	if !strings.Contains(string(cloakedBody), `"name":"vibe_spawn"`) {

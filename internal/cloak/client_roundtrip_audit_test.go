@@ -147,10 +147,7 @@ func TestEveryClientReversesWhatItRewrites(t *testing.T) {
 			h := http.Header{}
 			h.Set("X-Cloak-Client", tc.client)
 
-			raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, tc.declared, "agy/audit-model", []byte(body), h)), 0
-			if code != 0 {
-				t.Fatalf("code=%d, envelope=%s", code, raw)
-			}
+			raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, tc.declared, "agy/audit-model", []byte(body), h))
 			forward := string(decodeEnvelopeBody(t, raw))
 			if forward == "" {
 				t.Fatalf("forward pass produced no body: %s", raw)
@@ -217,10 +214,7 @@ func TestEveryClientReversesWhatItRewritesWhileStreaming(t *testing.T) {
 			reqBody := []byte(`{"system":"` + tc.sent + `","messages":[{"role":"user","content":"go"}],"tools":[` + tc.tools + `]}`)
 			h := http.Header{}
 			h.Set("X-Cloak-Client", tc.client)
-			raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, tc.declared, "agy/audit-model", reqBody, h)), 0
-			if code != 0 {
-				t.Fatalf("code=%d, envelope=%s", code, raw)
-			}
+			raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, tc.declared, "agy/audit-model", reqBody, h))
 			// The stream test proves nothing about the forward pass either, for
 			// the same reason: the echo below is only meaningful if the model was
 			// really shown the cloaked spelling.

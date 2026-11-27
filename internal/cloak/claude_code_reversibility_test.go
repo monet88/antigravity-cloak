@@ -49,10 +49,7 @@ func TestClaudeCodeToolNamesAndBrandProseReverseButTheBareFilenameDoesNot(t *tes
 
 	headers := http.Header{}
 	headers.Set("X-Cloak-Client", "claude_code")
-	rawEnvelope, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", reqBody, headers)), 0
-	if code != 0 {
-		t.Fatalf("code=%d, envelope=%s", code, rawEnvelope)
-	}
+	rawEnvelope := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/claude-test", reqBody, headers))
 	forward := string(decodeEnvelopeBody(t, rawEnvelope))
 	if forward == "" {
 		t.Fatalf("forward rewrite produced an empty body, envelope=%s", rawEnvelope)

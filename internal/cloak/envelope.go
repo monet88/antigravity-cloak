@@ -63,7 +63,7 @@ func jsonIndexValue(v any) (int, bool) {
 func MustEnvelope(result any) []byte {
 	raw, err := json.Marshal(pluginabi.Envelope{OK: true, Result: mustRawMessage(result)})
 	if err != nil {
-		return mustErrorEnvelope("marshal_error", err.Error())
+		return MustErrorEnvelope("marshal_error", err.Error())
 	}
 	return raw
 }
@@ -108,5 +108,3 @@ func safeMarshal(v any) ([]byte, error) {
 	}
 	return b, nil
 }
-func mustEnvelope(result any) []byte                { return MustEnvelope(result) }
-func mustErrorEnvelope(code, message string) []byte { return MustErrorEnvelope(code, message) }

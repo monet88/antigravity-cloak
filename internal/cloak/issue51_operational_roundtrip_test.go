@@ -32,10 +32,10 @@ func TestIssue51_OMPStreamRestoresToolArguments(t *testing.T) {
 			h.Set("X-Cloak-Client", "oh_my_pi")
 			// The canonical OMP declaration shape: admission is strict on purpose.
 			orig := `{"messages":[],"tools":[{"type":"function","function":{"name":"bash"}}]}`
-			raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai",
-				"agy/model", []byte(orig), h)), 0
-			if code != 0 || strings.Contains(string(raw), `"StatusCode":503`) {
-				t.Fatalf("admission rejected: code=%d %s", code, raw)
+			raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai",
+				"agy/model", []byte(orig), h))
+			if strings.Contains(string(raw), `"StatusCode":503`) {
+				t.Fatalf("admission rejected: %s", raw)
 			}
 
 			// The upstream model echoed a cloaked operational path, split so a
@@ -105,10 +105,7 @@ func TestIssue51_ExactUncloakOwnsToolIdentity(t *testing.T) {
 	orig := `{"system":"x","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"Antigravity-api","description":"d","input_schema":{"type":"object"}}]}`
 	h := http.Header{}
 	h.Set("X-Cloak-Client", "claude_code")
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/model", []byte(orig), h)), 0
-	if code != 0 {
-		t.Fatalf("admission rejected: code=%d %s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/model", []byte(orig), h))
 	forward := string(decodeEnvelopeBody(t, raw))
 	if forward == "" {
 		t.Fatalf("empty forward envelope: %s", raw)
@@ -169,9 +166,9 @@ func TestIssue51_TypedUserProseIsUntouched(t *testing.T) {
 	         {"name":"Write","description":"d","input_schema":{"type":"object"}}]}`
 	h := http.Header{}
 	h.Set("X-Cloak-Client", "claude_code")
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/model", []byte(body), h)), 0
-	if code != 0 || strings.Contains(string(raw), `"StatusCode":503`) {
-		t.Fatalf("admission rejected: %d %s", code, raw)
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/model", []byte(body), h))
+	if strings.Contains(string(raw), `"StatusCode":503`) {
+		t.Fatalf("admission rejected: %s", raw)
 	}
 	forward := string(decodeEnvelopeBody(t, raw))
 	if forward == "" {
@@ -226,9 +223,9 @@ func TestIssue51_UserTypedToolNameSurvivesWriteRoundTrip(t *testing.T) {
 		`{"name":"Write","description":"d","input_schema":{"type":"object"}}]}`
 	h := http.Header{}
 	h.Set("X-Cloak-Client", "claude_code")
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/model", []byte(orig), h)), 0
-	if code != 0 || strings.Contains(string(raw), `"StatusCode":503`) {
-		t.Fatalf("admission rejected: %d %s", code, raw)
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/model", []byte(orig), h))
+	if strings.Contains(string(raw), `"StatusCode":503`) {
+		t.Fatalf("admission rejected: %s", raw)
 	}
 	forward := string(decodeEnvelopeBody(t, raw))
 	if !strings.Contains(forward, "Write the literal ToolSearch into out.txt") {

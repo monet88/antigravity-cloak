@@ -21,10 +21,7 @@ func TestCodex_CodeModeAliasPlan(t *testing.T) {
 	reqBody := `{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"web_search"}},{"type":"function","function":{"name":"request_user_input"}},{"type":"function","function":{"name":"collaboration__spawn_agent"}},{"type":"function","function":{"name":"wait"}},{"type":"function","function":{"name":"clock__sleep"}},{"type":"function","function":{"name":"collaboration__followup_task"}},{"type":"function","function":{"name":"collaboration__list_agents"}}],"messages":[]}`
 
 	payload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payload), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payload)
 
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	got := string(body)
@@ -52,10 +49,7 @@ func TestCodex_ShellModeAliasPlan(t *testing.T) {
 	reqBody := `{"tools":[{"type":"function","function":{"name":"exec_command"}},{"type":"function","function":{"name":"apply_patch"}},{"type":"function","function":{"name":"write_stdin"}},{"type":"function","function":{"name":"view_image"}},{"type":"function","function":{"name":"request_user_input"}},{"type":"function","function":{"name":"web_search"}}],"messages":[]}`
 
 	payload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payload), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payload)
 
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	got := string(body)
@@ -87,10 +81,7 @@ func TestCodex_ModeIsolation(t *testing.T) {
 
 	respBodyCode := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
 	payloadRespCode := makeIntegrationResponseInterceptPayload(t, reqIDCode, "openai", model, []byte(respBodyCode))
-	rawRespCode, codeCode := HandleResponseIntercept(payloadRespCode), 0
-	if codeCode != 0 {
-		t.Fatalf("code = %d", codeCode)
-	}
+	rawRespCode := HandleResponseIntercept(payloadRespCode)
 	gotCodeBody := string(decodeEnvelopeBody(t, rawRespCode))
 	if !strings.Contains(gotCodeBody, `"name":"exec"`) {
 		t.Errorf("code mode missing exec: %s", gotCodeBody)
@@ -107,10 +98,7 @@ func TestCodex_ModeIsolation(t *testing.T) {
 
 	respBodyShell := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}}]}}]}`
 	payloadRespShell := makeIntegrationResponseInterceptPayload(t, reqIDShell, "openai", model, []byte(respBodyShell))
-	rawRespShell, codeShell := HandleResponseIntercept(payloadRespShell), 0
-	if codeShell != 0 {
-		t.Fatalf("code = %d", codeShell)
-	}
+	rawRespShell := HandleResponseIntercept(payloadRespShell)
 	gotShellBody := string(decodeEnvelopeBody(t, rawRespShell))
 	if !strings.Contains(gotShellBody, `"name":"exec_command"`) {
 		t.Errorf("shell mode missing exec_command: %s", gotShellBody)
@@ -129,10 +117,7 @@ func TestCodex_DynamicMcpDeclarationGetsFallback(t *testing.T) {
 	reqBody := `{"tools":[{"type":"function","function":{"name":"exec"}},{"type":"function","function":{"name":"web_search"}},{"type":"function","function":{"name":"wait"}},{"type":"function","function":{"name":"mcp__exa__web_search","description":"Search"}},{"type":"function","function":{"name":"mcp__exa__web_search2","description":"Search2"}}],"messages":[]}`
 
 	payload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payload), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payload)
 
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	got := string(body)
@@ -157,10 +142,7 @@ func TestCodex_CodeModeResponseReversal(t *testing.T) {
 
 	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"wp_wait","arguments":"{}"}}]}}]}`
 	payloadResp := makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, []byte(respBody))
-	rawResp, code := HandleResponseIntercept(payloadResp), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleResponseIntercept(payloadResp)
 
 	got := string(decodeEnvelopeBody(t, rawResp))
 	if !strings.Contains(got, `"name":"exec"`) || !strings.Contains(got, `"name":"wait"`) {
@@ -185,10 +167,7 @@ func TestCodex_ShellModeStreamReversal(t *testing.T) {
 	chunkBody := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"name\":\"run_command\"}}]}}]}\n\n"
 
 	payloadChunk := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, []byte(chunkBody), []byte(cloakedReq))
-	rawChunk, code := HandleStreamChunkIntercept(payloadChunk), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawChunk := HandleStreamChunkIntercept(payloadChunk)
 
 	gotChunk := string(decodeEnvelopeBody(t, rawChunk))
 	if !strings.Contains(gotChunk, `"name":"exec_command"`) {
@@ -218,10 +197,7 @@ func TestCodex_MarkerBasedThinRequest(t *testing.T) {
 	}
 	interceptRaw, _ := json.Marshal(interceptReq)
 
-	rawResp, code := HandleRequestInterceptBefore(interceptRaw), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(interceptRaw)
 
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	got := string(body)
@@ -244,10 +220,7 @@ func TestCodex_HistoryToolCallsConsistency(t *testing.T) {
 	}`
 
 	payload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payload), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payload)
 
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	got := string(body)
@@ -268,10 +241,7 @@ func TestCodex_MissingCorrelation503(t *testing.T) {
 
 	// Missing RequestID ("") on eligible Codex request -> must fail closed with 503 tool_cloak_required
 	payload := makeIntegrationRequestInterceptPayload(t, "", "openai", "agy/codex-test", []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payload), 0
-	if code != 0 {
-		t.Fatalf("code = %d, raw=%s", code, rawResp)
-	}
+	rawResp := HandleRequestInterceptBefore(payload)
 
 	var envelope struct {
 		OK     bool `json:"ok"`
@@ -304,10 +274,7 @@ func TestCodex_ModelGateCoverage(t *testing.T) {
 
 	// 1. Non-matching model ("other/codex-test"): model gate skips, body untouched
 	payloadNonMatch := makeIntegrationRequestInterceptPayload(t, "codex-gate-skip", "openai", "other/codex-test", []byte(reqBody))
-	rawRespNonMatch, codeNonMatch := HandleRequestInterceptBefore(payloadNonMatch), 0
-	if codeNonMatch != 0 {
-		t.Fatalf("code = %d", codeNonMatch)
-	}
+	rawRespNonMatch := HandleRequestInterceptBefore(payloadNonMatch)
 	bodyNonMatch, _, _ := decodeEnvelopeRequestIntercept(t, rawRespNonMatch)
 	if len(bodyNonMatch) != 0 && string(bodyNonMatch) != reqBody {
 		t.Fatalf("model gate non-matching model mutated body: %s", bodyNonMatch)
@@ -315,10 +282,7 @@ func TestCodex_ModelGateCoverage(t *testing.T) {
 
 	// 2. Matching model ("agy/codex-test"): cloaking runs
 	payloadMatch := makeIntegrationRequestInterceptPayload(t, "codex-gate-pass", "openai", "agy/codex-test", []byte(reqBody))
-	rawRespMatch, codeMatch := HandleRequestInterceptBefore(payloadMatch), 0
-	if codeMatch != 0 {
-		t.Fatalf("code = %d", codeMatch)
-	}
+	rawRespMatch := HandleRequestInterceptBefore(payloadMatch)
 	bodyMatch, _, _ := decodeEnvelopeRequestIntercept(t, rawRespMatch)
 	if !strings.Contains(string(bodyMatch), "run_command") {
 		t.Fatalf("matching model was not cloaked: %s", bodyMatch)
@@ -335,10 +299,7 @@ func TestCodex_RequestIDDuplicateRetryContract(t *testing.T) {
 
 	// 1. First request -> admitted successfully
 	payload1 := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp1, code1 := HandleRequestInterceptBefore(payload1), 0
-	if code1 != 0 {
-		t.Fatalf("code = %d", code1)
-	}
+	rawResp1 := HandleRequestInterceptBefore(payload1)
 	body1, _, _ := decodeEnvelopeRequestIntercept(t, rawResp1)
 	if !strings.Contains(string(body1), "run_command") {
 		t.Fatalf("expected run_command, got: %s", body1)
@@ -346,10 +307,7 @@ func TestCodex_RequestIDDuplicateRetryContract(t *testing.T) {
 
 	// 2. Duplicate request with SAME RequestID before completion -> rejected with 503 tool_cloak_required
 	payload2 := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp2, code2 := HandleRequestInterceptBefore(payload2), 0
-	if code2 != 0 {
-		t.Fatalf("code = %d", code2)
-	}
+	rawResp2 := HandleRequestInterceptBefore(payload2)
 	var env2 struct {
 		OK     bool `json:"ok"`
 		Result struct {
@@ -369,10 +327,7 @@ func TestCodex_RequestIDDuplicateRetryContract(t *testing.T) {
 
 	// 4. Retry request with SAME RequestID after completion -> admitted successfully
 	payload3 := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp3, code3 := HandleRequestInterceptBefore(payload3), 0
-	if code3 != 0 {
-		t.Fatalf("code = %d", code3)
-	}
+	rawResp3 := HandleRequestInterceptBefore(payload3)
 	body3, _, _ := decodeEnvelopeRequestIntercept(t, rawResp3)
 	if !strings.Contains(string(body3), "run_command") {
 		t.Fatalf("retry request after completion failed to cloak: %s", body3)
@@ -387,10 +342,7 @@ func TestCodex_GenericSharedNamesDoNotDetectCodex(t *testing.T) {
 	// Must NOT be detected as Codex; body remains uncloaked.
 	reqBody := `{"tools":[{"type":"function","function":{"name":"wait"}},{"type":"function","function":{"name":"clock__sleep"}}],"messages":[]}`
 	payload := makeIntegrationRequestInterceptPayload(t, "generic-tools-no-codex", "openai", "agy/test", []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payload), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payload)
 
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	// Body should not be cloaked because client detection is independent of cloakability
@@ -418,10 +370,7 @@ func TestCodex_UndeclaredHistoryAndToolChoiceCloaked(t *testing.T) {
 	}`
 
 	payload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payload), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payload)
 
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	got := string(body)
@@ -471,10 +420,7 @@ func TestCodex_NamespaceVariantCollisionFailsClosed(t *testing.T) {
 			headers := make(http.Header)
 			headers.Set("X-Cloak-Client", "codex")
 			payload := makeIntegrationRequestInterceptPayloadWithHeaders(t, "codex-col-"+tc.name, "openai", "agy/codex-test", []byte(reqBody), headers)
-			rawResp, code := HandleRequestInterceptBefore(payload), 0
-			if code != 0 {
-				t.Fatalf("code = %d", code)
-			}
+			rawResp := HandleRequestInterceptBefore(payload)
 			var envelope struct {
 				OK     bool `json:"ok"`
 				Result struct {
@@ -527,10 +473,7 @@ func TestCodex_ExecDescriptionHelpersPreserved(t *testing.T) {
 	}`
 
 	payload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payload), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payload)
 
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	got := string(body)
@@ -616,10 +559,7 @@ func TestCodex_MixedMode_ExecDescriptionHelpersWithHistoricalShellCalls(t *testi
 	}`
 
 	payload := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBodyValid))
-	rawResp, code := HandleRequestInterceptBefore(payload), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payload)
 
 	body, _, _ := decodeEnvelopeRequestIntercept(t, rawResp)
 	got := string(body)
@@ -660,10 +600,7 @@ func TestCodex_MixedMode_ExecDescriptionHelpersWithHistoricalShellCalls(t *testi
 	// Reverse path: response run_command must reverse to declared exec, and wp_apply_patch to apply_patch
 	respBody := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"run_command","arguments":"{}"}},{"function":{"name":"wp_apply_patch","arguments":"{}"}}]}}]}`
 	payloadResp := makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, []byte(respBody))
-	rawRespAfter, codeAfter := HandleResponseIntercept(payloadResp), 0
-	if codeAfter != 0 {
-		t.Fatalf("response code = %d", codeAfter)
-	}
+	rawRespAfter := HandleResponseIntercept(payloadResp)
 	gotResp := string(decodeEnvelopeBody(t, rawRespAfter))
 	if !strings.Contains(gotResp, `"name":"exec"`) {
 		t.Errorf("run_command did not reverse to declared exec: %s", gotResp)
@@ -687,10 +624,7 @@ func TestCodex_MixedMode_ExecDescriptionHelpersWithHistoricalShellCalls(t *testi
 		]
 	}`
 	payloadColl := makeIntegrationRequestInterceptPayload(t, reqIDCollision, "openai", model, []byte(reqBodyCollision))
-	rawRespColl, codeColl := HandleRequestInterceptBefore(payloadColl), 0
-	if codeColl != 0 {
-		t.Fatalf("codeColl = %d", codeColl)
-	}
+	rawRespColl := HandleRequestInterceptBefore(payloadColl)
 	var envColl struct {
 		OK     bool `json:"ok"`
 		Result struct {
@@ -728,10 +662,7 @@ func TestCodex_ModeSwitch_ShellDecl_HistoricalExec(t *testing.T) {
 	}`
 
 	payloadReq := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payloadReq), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payloadReq)
 
 	var env struct {
 		OK     bool `json:"ok"`
@@ -777,10 +708,7 @@ func TestCodex_ModeSwitch_CodeDecl_HistoricalExecCommand(t *testing.T) {
 	}`
 
 	payloadReq := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payloadReq), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payloadReq)
 
 	var env struct {
 		OK     bool `json:"ok"`
@@ -823,10 +751,7 @@ func TestCodex_ModeSwitch_BothDeclaredInTools_FailsClosed(t *testing.T) {
 	}`
 
 	payloadReq := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawResp, code := HandleRequestInterceptBefore(payloadReq), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandleRequestInterceptBefore(payloadReq)
 
 	var env struct {
 		OK     bool `json:"ok"`
@@ -866,10 +791,7 @@ func TestCrossClient_SameRoleSharedVocabulary(t *testing.T) {
 		"messages": []
 	}`
 	payloadCodex := makeIntegrationRequestInterceptPayload(t, reqIDCodex, "openai", model, []byte(reqBodyCodex))
-	rawRespCodex, codeCodex := HandleRequestInterceptBefore(payloadCodex), 0
-	if codeCodex != 0 {
-		t.Fatalf("codeCodex = %d", codeCodex)
-	}
+	rawRespCodex := HandleRequestInterceptBefore(payloadCodex)
 	bodyCodex, _, _ := decodeEnvelopeRequestIntercept(t, rawRespCodex)
 	gotCodex := string(bodyCodex)
 
@@ -884,10 +806,7 @@ func TestCrossClient_SameRoleSharedVocabulary(t *testing.T) {
 	// Codex response reversal restores exact Codex source names
 	respBodyCodex := `{"choices":[{"message":{"tool_calls":[{"function":{"name":"wp_send_message","arguments":"{}"}},{"function":{"name":"wp_list_workers","arguments":"{}"}}]}}]}`
 	payloadRespCodex := makeIntegrationResponseInterceptPayload(t, reqIDCodex, "openai", model, []byte(respBodyCodex))
-	rawRespInterCodex, codeRespCodex := HandleResponseIntercept(payloadRespCodex), 0
-	if codeRespCodex != 0 {
-		t.Fatalf("codeRespCodex = %d", codeRespCodex)
-	}
+	rawRespInterCodex := HandleResponseIntercept(payloadRespCodex)
 	respGotCodex := string(decodeEnvelopeBody(t, rawRespInterCodex))
 	if !strings.Contains(respGotCodex, `"collaboration__send_message"`) || !strings.Contains(respGotCodex, `"collaboration__list_agents"`) {
 		t.Fatalf("expected exact Codex source names restored, got: %s", respGotCodex)
@@ -911,10 +830,7 @@ func TestCrossClient_SameRoleSharedVocabulary(t *testing.T) {
 	headersCC := make(http.Header)
 	headersCC.Set("X-Cloak-Client", "claude_code")
 	payloadCC := makeIntegrationRequestInterceptPayloadWithHeaders(t, reqIDCC, "anthropic", model, reqBodyCC, headersCC)
-	rawRespCC, codeCC := HandleRequestInterceptBefore(payloadCC), 0
-	if codeCC != 0 {
-		t.Fatalf("codeCC = %d", codeCC)
-	}
+	rawRespCC := HandleRequestInterceptBefore(payloadCC)
 	gotCC := string(decodeEnvelopeBody(t, rawRespCC))
 
 	// Upstream receives exact same shared vocabulary
@@ -930,10 +846,7 @@ func TestCrossClient_SameRoleSharedVocabulary(t *testing.T) {
 		]
 	}`)
 	payloadRespCC := makeIntegrationResponseInterceptPayload(t, reqIDCC, "anthropic", model, respBodyCC)
-	rawRespInterCC, codeRespCC := HandleResponseIntercept(payloadRespCC), 0
-	if codeRespCC != 0 {
-		t.Fatalf("codeRespCC = %d", codeRespCC)
-	}
+	rawRespInterCC := HandleResponseIntercept(payloadRespCC)
 	respGotCC := string(decodeEnvelopeBody(t, rawRespInterCC))
 	if !strings.Contains(respGotCC, `"SendMessage"`) || !strings.Contains(respGotCC, `"ListAgents"`) {
 		t.Fatalf("expected exact CC source names restored, got: %s", respGotCC)
@@ -951,20 +864,14 @@ func TestCodex_StreamReversal_FalseDoneInPayloadDoesNotKillSession(t *testing.T)
 	model := "agy/codex-test"
 	reqBody := `{"tools":[{"type":"function","function":{"name":"exec_command"}},{"type":"function","function":{"name":"apply_patch"}}],"messages":[]}`
 	payloadReq := makeIntegrationRequestInterceptPayload(t, reqID, "openai", model, []byte(reqBody))
-	rawReq, code := HandleRequestInterceptBefore(payloadReq), 0
-	if code != 0 {
-		t.Fatalf("request.intercept_before code = %d", code)
-	}
+	rawReq := HandleRequestInterceptBefore(payloadReq)
 	cloakedReq := string(decodeEnvelopeBody(t, rawReq))
 
 	// Chunk 1: Content contains literal string "data: [DONE]" inside arguments/text.
 	// This must NOT trigger terminal stream cleanup or set disposition CleanTerminal.
 	chunk1Body := "data: {\"choices\":[{\"delta\":{\"content\":\"Notice: the data: [DONE] string should not terminate stream\"}}]}\n\n"
 	payloadChunk1 := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 0, []byte(chunk1Body), []byte(cloakedReq))
-	rawChunk1, code1 := HandleStreamChunkIntercept(payloadChunk1), 0
-	if code1 != 0 {
-		t.Fatalf("chunk1 code = %d", code1)
-	}
+	rawChunk1 := HandleStreamChunkIntercept(payloadChunk1)
 	_ = rawChunk1
 
 	// Verify session remains active in globalStreamManager
@@ -979,10 +886,7 @@ func TestCodex_StreamReversal_FalseDoneInPayloadDoesNotKillSession(t *testing.T)
 	// Since session is still alive, both must be reversed to declared exec_command and apply_patch.
 	chunk2Body := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"run_command\"}},{\"index\":1,\"function\":{\"name\":\"wp_apply_patch\"}}]}}]}\n\n"
 	payloadChunk2 := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 1, []byte(chunk2Body), []byte(cloakedReq))
-	rawChunk2, code2 := HandleStreamChunkIntercept(payloadChunk2), 0
-	if code2 != 0 {
-		t.Fatalf("chunk2 code = %d", code2)
-	}
+	rawChunk2 := HandleStreamChunkIntercept(payloadChunk2)
 	gotChunk2 := string(decodeEnvelopeBody(t, rawChunk2))
 	if !strings.Contains(gotChunk2, `"name":"exec_command"`) {
 		t.Errorf("expected run_command to reverse to exec_command in stream, got: %s", gotChunk2)
@@ -998,10 +902,7 @@ func TestCodex_StreamReversal_FalseDoneInPayloadDoesNotKillSession(t *testing.T)
 	// This must perform terminal cleanup and set CleanTerminal.
 	chunk3Body := "data: [DONE]\n\n"
 	payloadChunk3 := makeIntegrationStreamChunkPayload(t, reqID, "openai", model, 2, []byte(chunk3Body), []byte(cloakedReq))
-	_, code3 := HandleStreamChunkIntercept(payloadChunk3), 0
-	if code3 != 0 {
-		t.Fatalf("chunk3 code = %d", code3)
-	}
+	HandleStreamChunkIntercept(payloadChunk3)
 
 	globalStreamManager.mu.Lock()
 	sessAfter := globalStreamManager.sessions["req:"+reqID]

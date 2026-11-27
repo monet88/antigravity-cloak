@@ -44,8 +44,11 @@ Add or extend a domain file inside `internal/cloak/` when a subsystem has a cohe
 
 ## Naming Conventions
 
-- **Exported symbols**: Only those required by the C ABI exports
-  (`ClipxPluginInit`, `cliproxy_plugin_call`, etc.). Everything else is
+- **Exported symbols**: Root `package main` exports only the C ABI entrypoints
+  (`cliproxy_plugin_init`, `cliproxy_plugin_call`, `cliproxy_plugin_free`,
+  `cliproxy_plugin_shutdown`). Internal packages (`internal/spec`,
+  `internal/clients/*`, and `internal/cloak`'s 8 production functions) export
+  only symbols consumed by real production callers; everything else stays
   unexported.
 - **Client identifiers**: Snake-case string constants matching the wire
   protocol (`claude_code`, `codex`, `oh_my_pi`).

@@ -346,12 +346,10 @@ func parseModelPrefixes(value any) ([]string, error) {
 // aliases folded onto their canonical table key.
 func normalizeClientKey(client string) string {
 	key := strings.ToLower(strings.TrimSpace(client))
-	switch key {
-	case "omp", "oh-my-pi":
-		return "oh_my_pi"
-	default:
-		return key
+	if canonical, ok := explicitClientAliasMap[key]; ok {
+		return canonical
 	}
+	return key
 }
 
 // validateOMPConfigMappings validates Oh My Pi tool mappings at configuration time.
@@ -429,15 +427,12 @@ func validateAliasPlanConfigMappings(client string, mappings map[string]string) 
 		}
 	}
 	var shared map[string]string
-	switch client {
-	case "claude_code":
-		shared = claudeCodeSharedAliases
-	case "codex":
-		shared = codexSharedAliases
+	if aliasPlanClients[client] {
+		shared = sharedAliasesByClient[client]
 	}
 	if shared != nil {
 		for orig, target := range shared {
-			if client == "codex" && orig == "exec_command" && target == "run_command" {
+			if client == clientIDCodex && orig == "exec_command" && target == "run_command" {
 				continue
 			}
 			baseline[orig] = target

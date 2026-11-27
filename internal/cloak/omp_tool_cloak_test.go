@@ -41,10 +41,7 @@ func TestOMPToolSurfaceIsFullyCloaked(t *testing.T) {
 
 	h := http.Header{}
 	h.Set("X-Cloak-Client", "oh_my_pi")
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "req_omp_tools", "openai", "agy/m", body, h)), 0
-	if code != 0 {
-		t.Fatalf("code=%d %s", code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "req_omp_tools", "openai", "agy/m", body, h))
 	upstream := string(decodeEnvelopeBody(t, raw))
 
 	for _, n := range names {

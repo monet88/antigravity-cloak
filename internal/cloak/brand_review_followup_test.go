@@ -549,10 +549,7 @@ func forwardCloakedBodyFor(t *testing.T, client, reqID, format string, body []by
 	t.Helper()
 	h := http.Header{}
 	h.Set("X-Cloak-Client", client)
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, format, "agy/claude-test", body, h)), 0
-	if code != 0 {
-		t.Fatalf("client=%s code=%d envelope=%s", client, code, raw)
-	}
+	raw := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, format, "agy/claude-test", body, h))
 	return string(decodeEnvelopeBody(t, raw))
 }
 
@@ -712,10 +709,7 @@ func TestToolArgumentsKeepProseRulesOutOMP(t *testing.T) {
 	pay := `{"command":"` + typedCommand + `","path":"~/.gemini/agent/AGENTS.md"}`
 	resp := `{"content":[{"type":"text","text":"Antigravity ships it"},{"type":"tool_use","name":"read_file","input":` + pay + `}]}`
 
-	raw, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayload(t, reqID, "anthropic", "agy/model", []byte(req))), 0
-	if code != 0 {
-		t.Fatalf("code=%d envelope=%s", code, raw)
-	}
+	HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayload(t, reqID, "anthropic", "agy/model", []byte(req)))
 	back := reverseBrandPass(t, reqID, req, resp, "anthropic", "agy/model")
 	if !strings.Contains(back, "omp ships it") {
 		t.Fatalf("protected prose lost its reverse: %s", back)
@@ -1697,9 +1691,7 @@ func TestStreamChunkABILaneIndexFallbackKeepsBlocksDistinct(t *testing.T) {
 	headers := http.Header{}
 	headers.Set("X-Cloak-Client", "oh_my_pi")
 	reqBody := `{"system":"hi","messages":[{"role":"user","content":"hi"}],"tools":[{"name":"read","description":"Read a file"}]}`
-	if _, code := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/lane-model", []byte(reqBody), headers)), 0; code != 0 {
-		t.Fatalf("request intercept code=%d", code)
-	}
+	HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "anthropic", "agy/lane-model", []byte(reqBody), headers))
 
 	delta := func(index, text string) string {
 		return "event: content_block_delta\ndata: " + mustJSON(t, map[string]any{
@@ -1721,10 +1713,7 @@ func TestStreamChunkABILaneIndexFallbackKeepsBlocksDistinct(t *testing.T) {
 	}
 	var out []byte
 	for i, chunk := range chunks {
-		raw, code := HandleStreamChunkIntercept(makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/lane-model", i, []byte(chunk), nil)), 0
-		if code != 0 {
-			t.Fatalf("chunk %d: code=%d", i, code)
-		}
+		raw := HandleStreamChunkIntercept(makeIntegrationStreamChunkPayload(t, reqID, "anthropic", "agy/lane-model", i, []byte(chunk), nil))
 		body, drop := decodeStreamBody(t, raw)
 		switch {
 		case drop:

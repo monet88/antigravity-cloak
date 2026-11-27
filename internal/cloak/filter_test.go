@@ -500,15 +500,12 @@ func TestDetectClient(t *testing.T) {
 
 func TestDetectClientCountsConfiguredCodexSourceKeys(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
-	raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+	HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 tool_mappings:
   codex:
     custom_wire_a: wp_custom_wire_a
     custom_wire_b: wp_custom_wire_b
-`)), nil), 0
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; body=%s", code, raw)
-	}
+`)), nil)
 	// Codex counts against its static inventory, which cannot know an
 	// operator-added source name, so the configured rename table has to be
 	// counted as well or the custom mapping is undetectable.
@@ -1653,10 +1650,7 @@ tool_mappings:
 			t.Fatalf("expected error mentioning whitespace for %s, got: %v", tc.name, err)
 		}
 
-		rawResp, code := HandlePluginLifecycle(lifecycleRequestJSON(t, yaml), nil), 0
-		if code != 0 {
-			t.Fatalf("reconfigure code = %d for %s", code, tc.name)
-		}
+		rawResp := HandlePluginLifecycle(lifecycleRequestJSON(t, yaml), nil)
 		var env struct {
 			OK    bool `json:"ok"`
 			Error struct {
@@ -1681,10 +1675,7 @@ tool_mappings:
 	}
 
 	// 8. Reconfigure lifecycle rejects invalid config visibly
-	rawResp, code := HandlePluginLifecycle(lifecycleRequestJSON(t, mutatingYAML), nil), 0
-	if code != 0 {
-		t.Fatalf("code = %d", code)
-	}
+	rawResp := HandlePluginLifecycle(lifecycleRequestJSON(t, mutatingYAML), nil)
 	var env struct {
 		OK    bool `json:"ok"`
 		Error struct {
@@ -2894,10 +2885,7 @@ func TestModelGateBeforeAlias503_EmptyRequestID(t *testing.T) {
 			headers := http.Header{"X-Cloak-Client": {tc.client}}
 			rawPayload := makeIntegrationRequestInterceptPayloadWithHeaders(t, "", tc.sourceFormat, "other/model", []byte(tc.reqBody), headers)
 
-			rawResp, code := HandleRequestInterceptBefore(rawPayload), 0
-			if code != 0 {
-				t.Fatalf("code = %d", code)
-			}
+			rawResp := HandleRequestInterceptBefore(rawPayload)
 
 			var envelope struct {
 				OK     bool `json:"ok"`
@@ -2922,10 +2910,7 @@ func TestModelGateBeforeAlias503_EmptyRequestID(t *testing.T) {
 
 			// 2. Control check: on an eligible model ("agy/model"), the same empty RequestID MUST fail closed with 503 tool_cloak_required
 			rawEligible := makeIntegrationRequestInterceptPayloadWithHeaders(t, "", tc.sourceFormat, "agy/model", []byte(tc.reqBody), headers)
-			rawRespEligible, codeEligible := HandleRequestInterceptBefore(rawEligible), 0
-			if codeEligible != 0 {
-				t.Fatalf("code = %d", codeEligible)
-			}
+			rawRespEligible := HandleRequestInterceptBefore(rawEligible)
 			var envelopeEligible struct {
 				OK     bool `json:"ok"`
 				Result struct {
@@ -3074,10 +3059,7 @@ func TestAliasPlan_ConfigValidation(t *testing.T) {
 						if err != nil {
 							t.Fatalf("unexpected error: %v", err)
 						}
-						rawResp, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(tc.yaml)), nil), 0
-						if code != 0 {
-							t.Fatalf("reconfigure failed with code %d", code)
-						}
+						rawResp := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(tc.yaml)), nil)
 						var env struct {
 							OK bool `json:"ok"`
 						}

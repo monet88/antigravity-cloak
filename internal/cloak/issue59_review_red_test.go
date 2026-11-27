@@ -32,12 +32,9 @@ func uaOMPRequest(tb testing.TB, id, format string, root map[string]any) plugina
 // can echo back.
 func TestUAOMPToolRoleMessageKeepsBrandProse(t *testing.T) {
 	isolateOMPMeasurement(t)
-	raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+	HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 use_default_keywords: true
-`)), nil), 0
-	if code != 0 {
-		t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-	}
+`)), nil)
 	defer restoreDefaultFilterConfig(t)
 
 	root := map[string]any{
@@ -89,12 +86,9 @@ use_default_keywords: true
 // role:"user" tool_result blocks; the sanitize lane must brand it there too.
 func TestUAOMPToolResultProseBrandedAnthropic(t *testing.T) {
 	isolateOMPMeasurement(t)
-	raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+	HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 use_default_keywords: true
-`)), nil), 0
-	if code != 0 {
-		t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-	}
+`)), nil)
 	defer restoreDefaultFilterConfig(t)
 
 	root := map[string]any{
@@ -149,14 +143,11 @@ use_default_keywords: true
 // main before this branch).
 func TestProtectedAGYCustomMappingsReachProse(t *testing.T) {
 	isolateOMPMeasurement(t)
-	raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+	HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 use_default_keywords: false
 custom_mappings:
   "operator-call": "operator-brand"
-`)), nil), 0
-	if code != 0 {
-		t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-	}
+`)), nil)
 	defer restoreDefaultFilterConfig(t)
 
 	root := map[string]any{
@@ -240,12 +231,9 @@ custom_mappings:
 // only; a nested image source URL or signature must survive byte-for-byte.
 func TestUAOMPToolResultNestedMetadataStaysIntact(t *testing.T) {
 	isolateOMPMeasurement(t)
-	raw, code := HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
+	HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 use_default_keywords: true
-`)), nil), 0
-	if code != 0 {
-		t.Fatalf("reconfigure code = %d, body = %s", code, raw)
-	}
+`)), nil)
 	defer restoreDefaultFilterConfig(t)
 
 	root := map[string]any{
