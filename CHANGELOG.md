@@ -4,6 +4,14 @@ All notable changes to `antigravity-cloak` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Current releases use semantic version tags; the one-off `v.26.09.06` CalVer release is retained below as historical release metadata.
 
+## [0.7.6] - 2026-11-27
+
+### Changed
+- **Modular repository layout and ADR 0005 package organization (Issue #67).** Extracted pure client types into `internal/spec`, declarative data-only client modules into `internal/clients/{omp,claudecode,codex}`, and the shared domain-split cloaking engine into `internal/cloak` while keeping root `main.go` as a thin C-ABI entrypoint and dispatcher. Categorized documentation under `docs/{guides,verification,debugging}` and split archived acceptance records into `docs/verification/history.md`. Zero ABI or runtime behavior changes; live-verified against `agy/gemini-4-hydrogen` across real OMP (`bash`, `read`/`grep` brand-path) and the 12-case live acceptance matrix.
+
+### Added
+- **Mechanical architecture guardrails, versioned hooks, and local test discovery.** Added `architecture_test.go` (enforcing package import boundaries, `internal/cloak`'s 8-symbol exported surface, zero unused unexported production declarations, and internal Markdown link/anchor validity), tracked `.githooks/pre-commit`, `scripts/check.ps1`, CI `gofmt`/`-race` gates, and gitignored `.env.local` + `/v1/models` auto-discovery for `tests/*.py`.
+
 ## [0.7.5] - 2026-11-26
 
 ### Changed
