@@ -123,8 +123,8 @@ missing traversal for a different declaration/history format.
 
 Verify the actual format at CPA, tool-name transformation, and client execution
 before calling a new direct route compatible. See the
-[Codex surface reference](research/codex-tool-surface-2026-09-12.md) and
-[ADR 0004](adr/0004-cloak-codex-tool-names-by-wire-position.md).
+[Codex surface reference](../research/codex-tool-surface-2026-09-12.md) and
+[ADR 0004](../adr/0004-cloak-codex-tool-names-by-wire-position.md).
 
 ## Codex through opencodex
 
@@ -155,7 +155,7 @@ header automatically survives the proxy hop. A provider shared by Claude Code an
 Codex must not unconditionally attach `codex` to both: use separate correctly
 marked provider routes or verified per-request identity forwarding.
 
-Evidence: [dated local acceptance](research/codex-tool-surface-2026-09-12.md),
+Evidence: [dated local acceptance](../research/codex-tool-surface-2026-09-12.md),
 plus the local opencodex source snapshot `c155cc7923dbc0102e27d79185505a85d4357b2c`,
 `src/adapters/openai-chat.ts`, `openAIChatTransport` (provider header merge).
 This source check is not a new live validation of the installed proxy.
@@ -174,6 +174,6 @@ This source check is not a new live validation of the installed proxy.
    transformation and response restoration.
 
 For controlled capture/debugging, follow the ordered
-[verification runbook](verification-checklist.md); do not enable full-body debug
+[verification runbook](../verification/verification-checklist.md); do not enable full-body debug
 logging for ordinary use. Retain only redacted evidence, never credentials or
 full request-body logs in the repository.

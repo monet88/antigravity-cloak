@@ -4,7 +4,7 @@
 Accepted
 
 ## Context
-When integrating Oh My Pi (`oh_my_pi`) and handling streaming responses across various upstream model providers (such as Gemini 2.5/3.7 via CLIProxyAPI), two critical failure modes were diagnosed (see [NOTE-DEBUGS.md](../../NOTE-DEBUGS.md#bug-001-oh-my-pi-stream-chunk-uncloak-failure-assistant-returned-empty-stop-after-retry-cap)):
+When integrating Oh My Pi (`oh_my_pi`) and handling streaming responses across various upstream model providers (such as Gemini 2.5/3.7 via CLIProxyAPI), two critical failure modes were diagnosed (see [NOTE-DEBUGS.md](../debugging/NOTE-DEBUGS.md#bug-001-oh-my-pi-stream-chunk-uncloak-failure-assistant-returned-empty-stop-after-retry-cap)):
 
 1. **Static Table-Length Threshold Failure**:
    The previous `detectCloakedClient` algorithm calculated the match ratio against the total tool count in the client's static mapping table:
@@ -42,6 +42,6 @@ When integrating Oh My Pi (`oh_my_pi`) and handling streaming responses across v
 - Trade-off: Stream requests without correlation keys (`RequestID` or matching headers) must fall back to header-init parsing or pass through without uncloaking to maintain session isolation.
 
 ## References
-- [NOTE-DEBUGS.md](../../NOTE-DEBUGS.md): Bug 001 root cause and verification.
+- [NOTE-DEBUGS.md](../debugging/NOTE-DEBUGS.md): Bug 001 root cause and verification.
 - [docs/specs/oh-my-pi-cloaking-spec.md](../specs/oh-my-pi-cloaking-spec.md): Complete specification for Oh My Pi cloaking and keyword synchronization.
 - [ADR 0001](0001-stream-session-manager-and-atomic-config.md): Stream session manager and atomic configuration lifecycle.

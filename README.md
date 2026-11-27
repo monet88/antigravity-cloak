@@ -28,7 +28,7 @@ CLIProxyAPI v7 dynamic plugin (`buildmode=c-shared`, ABI v1) for disguising codi
 
 ## Configuration
 
-Send `X-Cloak-Client` with `claude_code`, `codex`, or `oh_my_pi` on requests to CLIProxyAPI for deterministic client identity. See [client header setup](docs/client-identity-headers.md) for Claude Code settings, Codex provider headers, and the opencodex proxy hop.
+Send `X-Cloak-Client` with `claude_code`, `codex`, or `oh_my_pi` on requests to CLIProxyAPI for deterministic client identity. See [client header setup](docs/guides/client-identity-headers.md) for Claude Code settings, Codex provider headers, and the opencodex proxy hop.
 
 In CLIProxyAPI `config.yaml`:
 
@@ -76,10 +76,10 @@ Remove-Item plugins/windows/amd64/antigravity-cloak.h
 
 ## Verification & Docs
 
-- **[Live acceptance record (2026-09-27)](docs/verification-checklist.md#live-acceptance-record---2026-09-27)**: pinned source revision, candidate artifact SHA256 and per-client results. Oh My Pi passed every criterion its installed client exposes (7/9 canonical tools bare; `ask`, `web_search` and the transport/alias variants over the escaped wire); Claude Code and OpenAI Codex are recorded as manual verification pending/deferred, so this is not a release claim.
-- **[Deployment and live verification runbook](docs/verification-checklist.md)**: clean build, install, controlled debug capture, correlation and cleanup.
-- **[OMP full tool-cloak checklist](docs/verification-checklist-omp.md)**: nine canonical mappings, transport variants and extended alias tools, with the current per-case verdicts.
-- **[Client identity headers](docs/client-identity-headers.md)**: configuring `X-Cloak-Client` for Claude Code, Codex (direct and via opencodex) and Oh My Pi.
+- **[Live acceptance record (2026-09-27)](docs/verification/verification-checklist.md#live-acceptance-record---2026-09-27)**: pinned source revision, candidate artifact SHA256 and per-client results. Oh My Pi passed every criterion its installed client exposes (7/9 canonical tools bare; `ask`, `web_search` and the transport/alias variants over the escaped wire); Claude Code and OpenAI Codex are recorded as manual verification pending/deferred, so this is not a release claim.
+- **[Deployment and live verification runbook](docs/verification/verification-checklist.md)**: clean build, install, controlled debug capture, correlation and cleanup.
+- **[OMP full tool-cloak checklist](docs/verification/verification-checklist-omp.md)**: nine canonical mappings, transport variants and extended alias tools, with the current per-case verdicts.
+- **[Client identity headers](docs/guides/client-identity-headers.md)**: configuring `X-Cloak-Client` for Claude Code, Codex (direct and via opencodex) and Oh My Pi.
 - **[Domain context](CONTEXT.md)**: glossary, per-client mapping tables and the activation/lifecycle contract.
 - **[Architecture decisions](docs/adr/)**: stream sessions, client classification, upstream sanitization, and Codex wire-position cloaking.
 - **[Client surface references](docs/research/)**: dated Antigravity, Codex and Claude Code tool surfaces.

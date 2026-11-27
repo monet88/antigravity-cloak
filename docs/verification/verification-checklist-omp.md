@@ -1,7 +1,7 @@
 # OMP Full Tool-Cloak Verification Checklist
 
 Use this checklist to verify the installed plugin through the **real OMP client**.
-The canonical mapping contract is [CONTEXT.md](../CONTEXT.md). Build, install,
+The canonical mapping contract is [CONTEXT.md](../../CONTEXT.md). Build, install,
 profile setup, debug capture, cleanup, and rollback follow the
 [local deployment runbook](verification-checklist.md). Complete its preparation
 before running this matrix, and its cleanup after every controlled debug batch.
@@ -262,7 +262,7 @@ to manufacture coverage.
 
 Record these separately from real-client tool acceptance. Use the linked specs
 and existing harnesses for cases the OMP UI cannot construct. The
-[supplemental HTTP matrix](../tests/test_issue28_live_matrix.py) uses simulated
+[supplemental HTTP matrix](../../tests/test_issue28_live_matrix.py) uses simulated
 tool results and therefore cannot replace section 3. The root Go suite is an
 offline contract/lifecycle harness, not proof of a live upstream execution.
 
@@ -274,14 +274,14 @@ offline contract/lifecycle harness, not proof of a live upstream execution.
 - [ ] Invalid protected admission (including declaration final-base collisions)
   returns the specified exact 503 `omp_cloak_required` response with **zero
   upstream attempts**. Cover namespace collisions using the admission contract
-  in [CONTEXT.md](../CONTEXT.md).
+  in [CONTEXT.md](../../CONTEXT.md).
 - [ ] Request-scoped reverse mapping restores only declared/transformed pairs,
   including namespace-exact restoration. Native AGY target-only and inactive
   targets are not incorrectly reversed; tool choice and correlated history
   remain coherent. Run concurrent/disjoint tool inventories for isolation.
 - [ ] Protected brand rewrite and assistant-text restoration work; literal
   `.omp` paths, tool argument values, and control metadata retain their contract.
-- [ ] Follow the [sanitization spec](specs/system-conventions-sanitization.md):
+- [ ] Follow the [sanitization spec](../specs/system-conventions-sanitization.md):
   exact opening/closing tags become `<conventions>` in supported system text;
   other roles, tool payloads, metadata, and bypass routes remain unchanged.
   Decode JSON first: upstream tags may appear as `\u003c...\u003e` in raw logs.

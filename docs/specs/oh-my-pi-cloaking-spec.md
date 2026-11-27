@@ -79,4 +79,4 @@ Provide seamless, bidirectional cloaking and brand rewriting in the `antigravity
 ## Further Notes
 
 - Verified against CLIProxyAPI v7.2.143 and Oh My Pi coding harness.
-- Verification checklist documented under `docs/verification-checklist.md`.
+- Verification checklist documented under `docs/verification/verification-checklist.md`.

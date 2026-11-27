@@ -3,7 +3,7 @@
 > **Document Status**: Accepted Roadmap / Backlog
 > **Source Target**: `main.go` (symbol names only; LOC and line ranges are deliberately not pinned, they rot on every edit)
 > **Vocabulary Standard**: `codebase-design` (`Module`, `Interface`, `Depth`, `Seam`, `Adapter`, `Leverage`, `Locality`)
-> **Domain Alignment**: [CONTEXT.md](../CONTEXT.md), [ADR 0001](adr/0001-stream-session-manager-and-atomic-config.md)
+> **Domain Alignment**: [CONTEXT.md](../../CONTEXT.md), [ADR 0001](../adr/0001-stream-session-manager-and-atomic-config.md)
 
 ---
 

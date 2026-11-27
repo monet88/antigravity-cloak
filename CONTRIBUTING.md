@@ -42,9 +42,9 @@ docker run --rm -v ${PWD}:/src -w /src golang:1.26 sh -c \
 | `docs/` | Specs, ADRs, checklists, research, deployment |
 | `CONTEXT.md` | Canonical domain reference |
 | `AGENTS.md` | Agent-oriented operational guide |
-| `CODING_STANDARDS.md` | Code conventions and patterns |
+| `docs/guides/CODING_STANDARDS.md` | Code conventions and patterns |
 
-See [CODING_STANDARDS.md](CODING_STANDARDS.md) for naming conventions, test
+See [docs/guides/CODING_STANDARDS.md](docs/guides/CODING_STANDARDS.md) for naming conventions, test
 patterns, and rules for brand/tool mapping changes.
 
 ## Development Workflow
@@ -59,9 +59,9 @@ mapping tables, activation model, and architectural contracts. Read
 
 - All production source is `package main` at the repository root.
 - Brand mapping changes: follow the reversibility rules in
-  [CODING_STANDARDS.md](CODING_STANDARDS.md#brand-rewriting-rules).
+  [docs/guides/CODING_STANDARDS.md](docs/guides/CODING_STANDARDS.md#brand-rewriting-rules).
 - Tool mapping changes: follow the alias plan rules in
-  [CODING_STANDARDS.md](CODING_STANDARDS.md#tool-cloaking-rules).
+  [docs/guides/CODING_STANDARDS.md](docs/guides/CODING_STANDARDS.md#tool-cloaking-rules).
 - Adding a new client: one forward brand table + one reverse table + one
   registry line + detection inventory entries + tests.
 
@@ -109,7 +109,7 @@ Keep subject ≤ 72 chars. Body explains *why*.
 The plugin runs as a Linux/amd64 C-shared library inside the CLIProxyAPI
 Docker container. For the full clean-build and provenance-verification
 procedure, see
-[docs/verification-checklist.md](docs/verification-checklist.md#2-build-a-clean-linuxamd64-shared-library).
+[docs/verification/verification-checklist.md](docs/verification/verification-checklist.md#2-build-a-clean-linuxamd64-shared-library).
 
 > [!WARNING]
 > Read the [silent build/deploy traps](AGENTS.md#build--deploy-silent-traps)
@@ -120,8 +120,8 @@ procedure, see
 The primary acceptance gate is Oh My Pi (`omp`) against local CLIProxyAPI.
 For the full procedure:
 
-- [Deployment and live verification runbook](docs/verification-checklist.md)
-- [OMP full tool-cloak checklist](docs/verification-checklist-omp.md)
+- [Deployment and live verification runbook](docs/verification/verification-checklist.md)
+- [OMP full tool-cloak checklist](docs/verification/verification-checklist-omp.md)
 - [VPS deployment guide](docs/deployment/vps.md)
 
 ## CI

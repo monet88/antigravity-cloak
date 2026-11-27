@@ -107,7 +107,7 @@ source `4e946ac` (SHA256
   recorded as **escaped-wire** coverage: those cases ran as `_ask` /
   `_web_search` over `anthropic-messages` and are not counted as bare
   acceptance. Per-case evidence:
-  [OMP checklist](docs/verification-checklist-omp.md#verified-results---2026-09-27-plugin-v060).
+  [OMP checklist](docs/verification/verification-checklist-omp.md#verified-results---2026-09-27-plugin-v060).
 - Live rejection checks: a conflicting marker and a declaration collision on
   `agy/` both return HTTP 503 `omp_cloak_required` with no upstream attempt,
   and an explicit OMP marker on a non-`agy/` route mutates nothing.

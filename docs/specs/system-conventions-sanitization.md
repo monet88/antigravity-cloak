@@ -111,4 +111,4 @@ go vet ./...
 ```
 
 Offline tests establish transformation contracts; live deployment acceptance
-follows [the local verification runbook](../verification-checklist.md).
+follows [the local verification runbook](../verification/verification-checklist.md).

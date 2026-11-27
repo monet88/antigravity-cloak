@@ -150,7 +150,7 @@ When adding or modifying a tool mapping:
 - **docs/adr/**: Architecture Decision Records for non-trivial design
   choices. Status: `proposed` → `accepted`.
 - **docs/specs/**: Technical specifications for complex subsystems.
-- **NOTE-DEBUGS.md**: Diagnosed, fixed, and verified bugs. Record root
+- **docs/debugging/NOTE-DEBUGS.md**: Diagnosed, fixed, and verified bugs. Record root
   cause, not symptoms.
 
 ## Commit Messages

@@ -8,7 +8,7 @@ result continuation at the wire HTTP layer.
 
 Real client execution (OMP TUI/CLI executing native tools, rendering interactive UI,
 and spawning subagents) is separately validated through the real OMP CLI baseline
-in docs/verification-checklist.md.
+in docs/verification/verification-checklist.md.
 """
 
 import json
