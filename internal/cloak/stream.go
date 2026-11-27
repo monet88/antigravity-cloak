@@ -869,12 +869,6 @@ func laneArrivalSeq(sess *streamSession, key string) int {
 	return seq
 }
 
-// orderedBrandFlushes resolves the final text of every held carry in
-// deterministic lane order (sortedCarryKeys).
-func orderedBrandFlushes(sess *streamSession) []brandFlush {
-	return orderedBrandFlushesFor(sess, nil)
-}
-
 // orderedBrandFlushesFor resolves only the lanes keep admits. Resolution is NOT
 // state-free: releasing a tier lane's withheld scalar clears its hold, so a
 // lane resolved here and then dropped by a caller's filter would lose those

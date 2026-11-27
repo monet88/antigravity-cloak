@@ -1,0 +1,48 @@
+#!/usr/bin/env sh
+set -eu
+
+staged_all="$(git diff --cached --name-only --diff-filter=ACM)"
+[ -n "$staged_all" ] || exit 0
+
+staged_go="$(git diff --cached --name-only --diff-filter=ACM -- '*.go')"
+if [ -n "$staged_go" ]; then
+  unformatted=""
+  tmp_orig="$(mktemp)"
+  tmp_fmt="$(mktemp)"
+  trap 'rm -f "$tmp_orig" "$tmp_fmt"' EXIT
+
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    git show ":$f" > "$tmp_orig"
+    gofmt < "$tmp_orig" > "$tmp_fmt"
+    if ! cmp -s "$tmp_orig" "$tmp_fmt"; then
+      unformatted="${unformatted}  ${f}
+"
+    fi
+  done <<EOF
+$staged_go
+EOF
+
+  if [ -n "$unformatted" ]; then
+    printf 'pre-commit: unformatted Go files (run gofmt -w):\n%s' "$unformatted" >&2
+    exit 1
+  fi
+
+  go vet ./...
+  go test -race ./...
+  go test ./.github/scripts
+fi
+
+staged_py="$(git diff --cached --name-only --diff-filter=ACM -- 'tests/*.py')"
+if [ -n "$staged_py" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -m compileall -q tests
+  else
+    python -m compileall -q tests
+  fi
+fi
+
+staged_md="$(git diff --cached --name-only --diff-filter=ACM -- '*.md')"
+if [ -n "$staged_md" ] && [ -z "$staged_go" ]; then
+  go test -run TestArchitectureMarkdownLinksAndDocsLayout .
+fi

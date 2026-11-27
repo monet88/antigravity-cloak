@@ -29,3 +29,4 @@ test/
 __pycache__/
 *.pyc
 .commandcode/
+.env.local

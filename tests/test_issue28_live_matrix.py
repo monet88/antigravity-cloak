@@ -18,10 +18,13 @@ import sys
 import time
 import urllib.request
 import urllib.error
-ENDPOINT = os.environ.get("CPA_ENDPOINT", "http://127.0.0.1:8317/v1/chat/completions")
-API_KEY = os.environ.get("CPA_API_KEY", "sk-k3skgrBK1nw8fExaR")
-PROTECTED_MODEL = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
-BYPASS_MODEL = os.environ.get("CPA_BYPASS_MODEL", "gemini-3.8-flash")
+from _local_env import get_api_key, get_base_url, get_env, resolve_bypass_model, resolve_protected_model
+
+_BASE_URL = get_base_url()
+ENDPOINT = get_env("CPA_ENDPOINT", f"{_BASE_URL}/v1/chat/completions")
+API_KEY = get_api_key()
+PROTECTED_MODEL = resolve_protected_model(_BASE_URL, API_KEY)
+BYPASS_MODEL = resolve_bypass_model(_BASE_URL, API_KEY, PROTECTED_MODEL)
 
 CANONICAL_MAPPINGS = [
     {
@@ -441,7 +444,7 @@ def main():
 
     # Test Non-AGY Bypass
     ok_bypass, msg_bypass = test_non_agy_bypass()
-    results["Explicit OMP Non-AGY Bypass (gemini-3.8-flash)"] = {"pass": ok_bypass, "msg": msg_bypass}
+    results[f"Explicit OMP Non-AGY Bypass ({BYPASS_MODEL})"] = {"pass": ok_bypass, "msg": msg_bypass}
 
     # Test Brand Restoration
     ok_brand, msg_brand = test_brand_restoration()

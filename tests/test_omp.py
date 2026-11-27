@@ -3,11 +3,14 @@ import urllib.request
 import json
 import traceback
 
+from _local_env import get_api_key, get_base_url, get_env, resolve_protected_model
+
 def test_omp_chat_completions():
     # Oh My Pi sending tools to /v1/chat/completions with canonical Safe Mapping Set
-    endpoint = os.environ.get("CPA_ENDPOINT", "http://127.0.0.1:8317/v1/chat/completions")
-    api_key = os.environ.get("CPA_API_KEY", "sk-k3skgrBK1nw8fExaR")
-    model = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
+    base_url = get_base_url()
+    endpoint = get_env("CPA_ENDPOINT", f"{base_url}/v1/chat/completions")
+    api_key = get_api_key()
+    model = resolve_protected_model(base_url, api_key)
 
     payload = {
         "model": model,

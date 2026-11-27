@@ -9,9 +9,8 @@ import (
 type rewriteMapping = spec.RewriteMapping
 
 const (
-	clientIDClaudeCode = "claude_code"
-	clientIDCodex      = "codex"
-	clientIDOMP        = "oh_my_pi"
+	clientIDCodex = "codex"
+	clientIDOMP   = "oh_my_pi"
 )
 
 // userAgentEvidence lists conservative User-Agent prefixes that may resolve a

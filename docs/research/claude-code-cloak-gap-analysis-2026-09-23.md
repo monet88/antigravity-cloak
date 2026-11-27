@@ -202,7 +202,7 @@ the request side and remains open for execution:
   logged `alias plan rewritten=true client=claude_code`.
 - All 20 declared tools were rewritten upstream with no source name surviving;
   the per-name source → alias mapping is in the
-  [live acceptance record](../verification/verification-checklist.md#live-acceptance-record---2026-09-27).
+  [live acceptance record](../verification/history.md#live-acceptance-record---2026-09-27).
 - Downstream restoration, tool execution and continuation are still unattested
   for Claude Code: every attempt in this pass returned HTTP 429
   `RESOURCE_EXHAUSTED` upstream. Isolated probes against the same model with

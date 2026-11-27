@@ -3,10 +3,12 @@ import urllib.request
 import json
 import traceback
 
+from _local_env import get_api_key, get_base_url, resolve_protected_model
+
 def test_messages():
-    base_url = os.environ.get("CPA_BASE_URL", "http://127.0.0.1:8317")
-    api_key = os.environ.get("CPA_API_KEY", "sk-k3skgrBK1nw8fExaR")
-    model = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
+    base_url = get_base_url()
+    api_key = get_api_key()
+    model = resolve_protected_model(base_url, api_key)
 
     payload = {
         "model": model,
@@ -43,9 +45,9 @@ def test_messages():
         traceback.print_exc()
 
 def test_chat_completions():
-    base_url = os.environ.get("CPA_BASE_URL", "http://127.0.0.1:8317")
-    api_key = os.environ.get("CPA_API_KEY", "sk-k3skgrBK1nw8fExaR")
-    model = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
+    base_url = get_base_url()
+    api_key = get_api_key()
+    model = resolve_protected_model(base_url, api_key)
 
     payload = {
         "model": model,

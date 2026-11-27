@@ -15,7 +15,7 @@ import (
 type explicitOMPRouteKind int
 
 const (
-	routeKindNone explicitOMPRouteKind = iota
+	_ explicitOMPRouteKind = iota
 	routeKindProtectedAGY
 	routeKindExplicitOMPNonAGYBypass
 )

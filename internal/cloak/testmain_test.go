@@ -74,3 +74,9 @@ func responseInterceptRequestJSON(t *testing.T, reqBody, respBody, sourceFormat 
 	}
 	return raw
 }
+
+// orderedBrandFlushes resolves the final text of every held carry in
+// deterministic lane order (sortedCarryKeys).
+func orderedBrandFlushes(sess *streamSession) []brandFlush {
+	return orderedBrandFlushesFor(sess, nil)
+}

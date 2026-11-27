@@ -15,7 +15,7 @@ CLIProxyAPI v7 dynamic Go C-shared plugin (`buildmode=c-shared`, Go 1.26.0, ABI 
 
 - **Brand tables, tool mappings, activation gates, OMP ProtectedAGY/bypass lifecycle, alias plans, or Issue #55:** read **[CONTEXT.md](CONTEXT.md)** (canonical contract; `internal/clients/*` specs are source of truth for behaviour).
 - **Code style, new `.go` / `*_test.go` placement, concurrency/error rules, commit format:** read **[docs/guides/CODING_STANDARDS.md](docs/guides/CODING_STANDARDS.md)**.
-- **Clean Linux/amd64 `.so` build, local Docker Compose deploy, controlled debug, or OMP live acceptance:** read **[docs/verification/verification-checklist.md](docs/verification/verification-checklist.md)** (and **[docs/verification/verification-checklist-omp.md](docs/verification/verification-checklist-omp.md)** for the 9-tool OMP matrix).
+- **Clean Linux/amd64 `.so` build, local Docker Compose deploy, controlled debug, or OMP live acceptance:** read **[docs/verification/verification-checklist.md](docs/verification/verification-checklist.md)** (and **[docs/verification/verification-checklist-omp.md](docs/verification/verification-checklist-omp.md)** for the 9-tool OMP matrix; archived runs live in **[docs/verification/history.md](docs/verification/history.md)**).
 - **Remote VPS deploy or in-place `.so` upgrade:** read **[docs/deployment/vps.md](docs/deployment/vps.md)**.
 - **Extending OMP Google Cloud Code 429 prompt sanitization:** read **[the sanitization spec](docs/specs/system-conventions-sanitization.md)**.
 - **Historical root causes & client surface audits:** **[docs/debugging/NOTE-DEBUGS.md](docs/debugging/NOTE-DEBUGS.md)**, **[Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**, **[Claude Code gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md)**.
@@ -43,7 +43,7 @@ CLIProxyAPI v7 dynamic Go C-shared plugin (`buildmode=c-shared`, Go 1.26.0, ABI 
 
 ## Local checks & post-merge docs
 
-- Validation: `go test -race ./...`, `go test ./.github/scripts`, `go vet ./...`.
+- Validation: `./scripts/check.ps1` (runs `gofmt` on tracked Go files only, `go vet`, `go test -race` including `architecture_test.go`, `.github/scripts` tests, and `compileall` on `tests`). Enable versioned hooks once per clone: `git config core.hooksPath .githooks`.
 - After merging client, mapping, activation, or deploy changes, update `CONTEXT.md`, `docs/guides/CODING_STANDARDS.md`, and `CONTRIBUTING.md` as needed.
 
 <!-- gitnexus:start -->

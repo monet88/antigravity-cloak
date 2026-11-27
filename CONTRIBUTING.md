@@ -21,8 +21,8 @@ go test ./...
 go test ./.github/scripts
 go vet ./...
 
-# Build Linux amd64 plugin (via Docker)
-docker run --rm -v ${PWD}:/src -w /src golang:1.26 sh -c \
+# Build Linux amd64 plugin (via Docker; match gateway glibc with bookworm)
+docker run --rm -v ${PWD}:/src -w /src golang:1.26.0-bookworm sh -c \
   "mkdir -p dist && CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
    go build -trimpath -buildmode=c-shared \
    -ldflags '-s -w' -o dist/antigravity-cloak.so . && \
@@ -78,13 +78,14 @@ mapping tables, activation model, and architectural contracts. Read
 
 ### 4. Validate locally
 
+Enable the versioned pre-commit hook once per clone:
+
 ```powershell
-go test ./...
-go test ./.github/scripts
-go vet ./...
+git config core.hooksPath .githooks
+./scripts/check.ps1
 ```
 
-All three must pass before opening a PR.
+All checks (`gofmt`, `go vet`, `go test -race ./...`, `go test ./.github/scripts`, and `compileall`) must pass before opening a PR.
 
 ### 5. Update documentation
 

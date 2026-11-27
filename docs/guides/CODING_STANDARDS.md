@@ -94,12 +94,10 @@ Add or extend a domain file inside `internal/cloak/` when a subsystem has a cohe
   structural contracts and block regressions.
 - **Round-trip tests**: Every cloak mapping asserts request→upstream→response
   round trip, not just one direction.
-- **Run before commit** (enforced by CI; local `.git/hooks/pre-commit` runs `gofmt`, `go vet`, and `go test`):
+- **Mechanical architecture & doc checks**: `architecture_test.go` enforces package import boundaries, `internal/cloak`'s 8-symbol exported surface, zero unused unexported production declarations, and valid internal Markdown links/anchors.
+- **Run before commit** (enforced by CI and tracked `.githooks/pre-commit`; enable with `git config core.hooksPath .githooks`):
   ```powershell
-  gofmt -l (git ls-files '*.go')
-  go test -race ./...
-  go test ./.github/scripts
-  go vet ./...
+  ./scripts/check.ps1
   ```
 
 ## Brand Rewriting Rules
