@@ -16,21 +16,19 @@ patterns in the existing code, not from aspirational rules.
 
 | Path | Purpose |
 | :--- | :--- |
-| `main.go` | Plugin core: lifecycle, interceptors, brand rewriter, stream manager, configuration. |
-| `issue55_agent_tier.go` | Issue #55 Claude Code fingerprint machinery (news-URL sanitation, reversible Agent model tiers). |
-| `omp_prompt_sanitization.go` | Oh My Pi `agy/*` prompt sanitization (system-conventions tags, RFC 2119 presets, injected OAuth instruction preset, live config). |
-| `*_test.go` (root) | Unit/lifecycle tests. `package main` — full internal access. |
+| `main.go` | Thin root entrypoint (`package main`): C-ABI exports, method dispatcher, registration metadata, config fields, and `init()` wiring `cloak.Initialize(...)`. |
+| `plugin_test.go` | Root black-box dispatcher, registration, metadata, and `registry.json` version-parity tests. |
+| `internal/spec/` | Pure declarative client data types, `PathRules`, and shared constants (no internal repo imports). |
+| `internal/clients/{omp,claudecode,codex}/` | Data-only client specs, brand/tool/alias tables, and static presets (zero runtime hooks). |
+| `internal/cloak/` | Shared cloaking engine split by domain (`registry.go`, `config.go`, `detect.go`, `handlers.go`, `brand.go`, `tool_cloak.go`, `alias_plan.go`, `stream.go`, `envelope.go`, `omp_prompt_sanitization.go`, `issue55_agent_tier.go`) + owning `*_test.go` suites. |
 | `tests/` | Integration/e2e scripts (`.py`, `.sh`). Never invoked by `go test`. |
 | `.github/scripts/` | CI helper Go scripts with their own tests (`package-release_test.go`). |
-| `docs/` | Specs, ADRs, checklists, research notes, deployment guides. |
+| `docs/` | Categorized documentation (`adr/`, `agents/`, `benchmarks/`, `debugging/`, `deployment/`, `guides/`, `research/`, `specs/`, `verification/`). |
 | `.ref/` | Gitignored upstream reference clones. Not part of the module. |
 
 ### When to add a new `.go` file
 
-A new source file at root is justified when the code has a distinct domain (like
-`issue55_agent_tier.go` or `omp_prompt_sanitization.go`) and would otherwise
-bloat `main.go` with a logically separable subsystem. Routine helpers, mapping
-tables, and small features belong in `main.go`.
+Add or extend a domain file inside `internal/cloak/` when a subsystem has a cohesive domain responsibility (like `omp_prompt_sanitization.go` or `issue55_agent_tier.go`). Keep client tables and presets declarative inside `internal/clients/<client>/`, and keep root `main.go` strictly limited to C-ABI exports, dispatch, and registration metadata.
 
 ### Test file naming
 

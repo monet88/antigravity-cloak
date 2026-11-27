@@ -4,7 +4,12 @@ CLIProxyAPI v7 dynamic Go C-shared plugin (`buildmode=c-shared`, Go 1.26.0, ABI 
 
 - **Primary active focus:** **Oh My Pi (`oh_my_pi` / `omp`)** over **`openai-completions`** (OpenAI Chat Completions).
 - **Maintenance-only / non-expanding:** `claude_code`, `codex`, Anthropic Messages, and deferred OpenAI Responses stay documented to match existing code, but should not be expanded unless requested.
-- **Source layout:** `main.go` (core plugin), `issue55_agent_tier.go` (Issue #55 news-URL sanitation & reversible Agent model tiers), `omp_prompt_sanitization.go` (`<system-conventions>`, RFC 2119 presets, OAuth prompt sanitization, live `omp_prompt_sanitizations`), root `*_test.go` (`httptest`-backed offline round-trip suite), `tests/` (live e2e `.py`/`.sh` scripts, never run by `go test`), `.ref/` (gitignored upstream clones).
+- **Source layout:**
+  - Root (`package main`): `main.go` (thin CGO/C-ABI exports, `handlePluginCall`, registration/config metadata, `init()` calling `cloak.Initialize(...)`) and `plugin_test.go` (dispatcher/metadata/`registry.json` tests).
+  - `internal/spec/`: pure declarative client spec types, `PathRules`, and `AntigravityIdentity` (no internal imports).
+  - `internal/clients/{omp,claudecode,codex}/`: data-only client definitions and presets (zero runtime hooks).
+  - `internal/cloak/`: shared cloaking engine split by domain (`registry.go`, `config.go`, `detect.go`, `handlers.go`, `brand.go`, `tool_cloak.go`, `alias_plan.go`, `stream.go`, `envelope.go`, `omp_prompt_sanitization.go`, `issue55_agent_tier.go`) plus unit/integration tests (`*_test.go`).
+  - `tests/`: live e2e `.py` scripts (never run by `go test`); `.ref/`: gitignored upstream clones.
 
 ## Navigation pointers
 

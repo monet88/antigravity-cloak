@@ -166,9 +166,9 @@ Two Claude Code identity words are handled by dedicated machinery (`issue55_agen
 - **Request Type Envelope Context**: OMP upstream omitted `requestType: "agent"` to prevent requests from being routed into Google's constrained agent quota bucket on consumer/free-tier accounts. CPA injects `requestType: "agent"` at the executor layer; on Antigravity Pro/paid tier accounts, this agent bucket is unconstrained and behaves normally without patching.
 ## Key Files & Directories
 
-- `main.go`: Core plugin implementation (lifecycle hooks, interceptors, brand rewriter, stream manager, configuration store).
-- `issue55_agent_tier.go`: Issue #55 Claude Code fingerprint machinery (news-URL sanitation, reversible Agent model tiers and the JSON-aware argument scanner).
-- `omp_prompt_sanitization.go`: Oh My Pi `agy/*` prompt sanitization (`<system-conventions>`, RFC 2119 normative header presets, and live `omp_prompt_sanitizations` config/matcher).
+- `main.go` & `plugin_test.go`: Thin root C-ABI entrypoint, method dispatcher, registration metadata, and root ABI/registry tests.
+- `internal/spec/` & `internal/clients/{omp,claudecode,codex}/`: Pure declarative client spec types and data-only client definitions.
+- `internal/cloak/`: Shared cloaking engine (`registry.go`, `config.go`, `detect.go`, `handlers.go`, `brand.go`, `tool_cloak.go`, `alias_plan.go`, `stream.go`, `envelope.go`, `omp_prompt_sanitization.go`, `issue55_agent_tier.go`) and owning unit/integration test suites.
 - `AGENTS.md`: Operational guide for building, testing, deploying, and debugging the plugin.
 - `docs/guides/CODING_STANDARDS.md`: Code conventions, naming patterns, testing standards, and rules for brand/tool mapping changes.
 - `CONTRIBUTING.md`: Getting started, development workflow, and documentation update guide.

@@ -7,10 +7,6 @@ import (
 	"regexp"
 	"strings"
 	"testing"
-
-	"github.com/monet88/antigravity-cloak/internal/clients/claudecode"
-	"github.com/monet88/antigravity-cloak/internal/clients/codex"
-	"github.com/monet88/antigravity-cloak/internal/clients/omp"
 )
 
 func TestHandlePluginCallRegisterDeclaresRequestInterceptor(t *testing.T) {
@@ -60,218 +56,54 @@ func TestHandlePluginCallRegisterDeclaresRequestInterceptor(t *testing.T) {
 	}
 }
 
-func TestReconfigureWithToolMappingsOverride(t *testing.T) {
+func TestHandlePluginCallLifecycleInvalidConfigReturnsErrorEnvelope(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
-	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
-tool_mappings:
-  claude_code:
-    Bash: run_command
-    my_custom_tool: ask_permission
-  codex:
-    exec: run_command
-  Claude_Code:
-    Grep: grep_search
-`)))
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; body=%s", code, raw)
-	}
-	cfg := activeFilterConfig()
-	// Verify ToolMappings parsed correctly
-	if cfg.ToolMappings["claude_code"]["my_custom_tool"] != "ask_permission" {
-		t.Fatalf("expected custom tool mapping")
-	}
-	// Client keys are normalized to lowercase, so "Claude_Code" merges into
-	// "claude_code" rather than creating a separate, unreachable entry.
-	if cfg.ToolMappings["claude_code"]["Grep"] != "grep_search" {
-		t.Fatalf("expected mixed-case client key to normalize into claude_code; got %#v", cfg.ToolMappings["claude_code"])
-	}
-	if _, exists := cfg.ToolMappings["Claude_Code"]; exists {
-		t.Fatalf("expected no mixed-case client key after normalization")
+
+	for _, method := range []string{"plugin.register", "plugin.reconfigure"} {
+		raw, code := handlePluginCall(method, lifecycleRequestJSON(t, []byte("custom_mappings:\n  - nested: invalid\n")))
+		if code != 0 {
+			t.Fatalf("%s code = %d, want 0; body=%s", method, code, raw)
+		}
+		var envelope struct {
+			OK    bool `json:"ok"`
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		mustUnmarshalJSON(t, raw, &envelope)
+		if envelope.OK || envelope.Error.Code != "invalid_config" {
+			t.Fatalf("%s got ok=%v code=%q, want ok=false code=invalid_config", method, envelope.OK, envelope.Error.Code)
+		}
 	}
 }
 
-func TestHandlePluginCallReconfigureAppliesCustomMappingsAndDefaultToggle(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-
-	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
-enabled: true
-priority: 1
-use_default_keywords: false
-custom_mappings:
-  Cursor: Antigravity
-  Windsurf: Antigravity
-`)))
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; body=%s", code, raw)
+func TestHandlePluginCallRequestInterceptAfterAndCompleteRoutes(t *testing.T) {
+	rawAfter, codeAfter := handlePluginCall("request.intercept_after", nil)
+	if codeAfter != 0 {
+		t.Fatalf("request.intercept_after code = %d, want 0; body=%s", codeAfter, rawAfter)
+	}
+	var envAfter struct {
+		OK bool `json:"ok"`
+	}
+	mustUnmarshalJSON(t, rawAfter, &envAfter)
+	if !envAfter.OK {
+		t.Fatalf("request.intercept_after ok = false; body=%s", rawAfter)
 	}
 
-	if got, rewritten, _ := rewriteRequestBodyForClient([]byte(`{"system":"You are Codex."}`), "openai", "claude_code", false); rewritten {
-		t.Fatalf("Codex rewritten after disabling defaults; body=%s", got)
+	compReq, err := json.Marshal(map[string]any{"RequestID": "root-complete-check", "Outcome": "succeeded"})
+	if err != nil {
+		t.Fatalf("marshal completion: %v", err)
 	}
-	got, rewritten, _ := rewriteRequestBodyForClient([]byte(`{"system":"route this Cursor session"}`), "openai", "claude_code", false)
-	if !rewritten {
-		t.Fatalf("Cursor rewritten = false, want true")
+	rawComp, codeComp := handlePluginCall("request.complete", compReq)
+	if codeComp != 0 {
+		t.Fatalf("request.complete code = %d, want 0; body=%s", codeComp, rawComp)
 	}
-	if !strings.Contains(string(got), "route this Antigravity session") {
-		t.Fatalf("body = %s, want Cursor replaced with Antigravity", got)
+	var envComp struct {
+		OK bool `json:"ok"`
 	}
-}
-
-func TestHandlePluginCallReconfigureAcceptsDelimitedCustomMappings(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-
-	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
-custom_mappings: |
-  Cursor: Antigravity
-  Windsurf: Antigravity
-  JetBrains AI: Antigravity
-`)))
-	if code != 0 {
-		t.Fatalf("code = %d, want 0; body=%s", code, raw)
-	}
-
-	tests := []string{"Cursor", "Windsurf", "JetBrains AI"}
-	for _, keyword := range tests {
-		t.Run(keyword, func(t *testing.T) {
-			got, rewritten, _ := rewriteRequestBodyForClient([]byte(`{"system":"route this `+keyword+` session"}`), "openai", "claude_code", false)
-			if !rewritten {
-				t.Fatalf("%s rewritten = false, want true", keyword)
-			}
-			if !strings.Contains(string(got), "Antigravity") {
-				t.Fatalf("body = %s, want replacement", got)
-			}
-		})
-	}
-}
-
-func TestHandlePluginCallReconfigureKeepsPreviousConfigOnInvalidInput(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-
-	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
-use_default_keywords: false
-custom_mappings:
-  Cursor: Antigravity
-`)))
-	if code != 0 {
-		t.Fatalf("initial reconfigure code = %d, want 0; body=%s", code, raw)
-	}
-
-	raw, code = handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
-custom_mappings:
-  - nested: invalid
-`)))
-	if code != 0 {
-		t.Fatalf("invalid reconfigure code = %d, want 0 handled error envelope; body=%s", code, raw)
-	}
-
-	var envelope struct {
-		OK    bool `json:"ok"`
-		Error struct {
-			Code string `json:"code"`
-		} `json:"error"`
-	}
-	mustUnmarshalJSON(t, raw, &envelope)
-	if envelope.OK {
-		t.Fatalf("ok = true, want false")
-	}
-	if envelope.Error.Code != "invalid_config" {
-		t.Fatalf("error code = %q, want invalid_config", envelope.Error.Code)
-	}
-
-	if _, rewritten, _ := rewriteRequestBodyForClient([]byte(`{"system":"route this Cursor session"}`), "openai", "claude_code", false); !rewritten {
-		t.Fatalf("Cursor rewritten = false after invalid config, want previous config retained")
-	}
-	if got, rewritten, _ := rewriteRequestBodyForClient([]byte(`{"system":"You are Codex."}`), "openai", "claude_code", false); rewritten {
-		t.Fatalf("Codex rewritten after invalid config, want previous disabled-default state retained; body=%s", got)
-	}
-}
-
-func TestHandlePluginCallReconfigureOMPPromptSanitizationsPreservesConfigOnInvalidInput(t *testing.T) {
-	isolateOMPMeasurement(t)
-
-	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, []byte(`
-use_default_keywords: false
-omp_prompt_sanitizations:
-  "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.": "Active custom header."
-  "active-sentinel": "preserved-sentinel"
-`)))
-	if code != 0 {
-		t.Fatalf("initial reconfigure code = %d, want 0; body=%s", code, raw)
-	}
-
-	invalidConfigs := []struct {
-		name string
-		yaml string
-	}{
-		{name: "int-map-value", yaml: "omp_prompt_sanitizations:\n  foo: 123\n"},
-		{name: "bool-map-value", yaml: "omp_prompt_sanitizations:\n  foo: true\n"},
-		{name: "null-map-value", yaml: "omp_prompt_sanitizations:\n  foo: null\n"},
-		{name: "nested-map-value", yaml: "omp_prompt_sanitizations:\n  foo:\n    bar: baz\n"},
-		{name: "array-map-value", yaml: "omp_prompt_sanitizations:\n  foo:\n    - bar\n"},
-		{name: "top-level-bool", yaml: "omp_prompt_sanitizations: true\n"},
-		{name: "top-level-int", yaml: "omp_prompt_sanitizations: 42\n"},
-		{name: "empty-object-key", yaml: "omp_prompt_sanitizations:\n  \"\": \"bar\"\n"},
-		{name: "whitespace-object-key", yaml: "omp_prompt_sanitizations:\n  \"   \": \"bar\"\n"},
-		{name: "empty-string-key", yaml: "omp_prompt_sanitizations: \": bar\"\n"},
-		{name: "whitespace-string-key", yaml: "omp_prompt_sanitizations: \"   : bar\"\n"},
-		{name: "missing-colon-string", yaml: "omp_prompt_sanitizations: \"no-colon-here\"\n"},
-		{name: "malformed-comma-missing-colon", yaml: "omp_prompt_sanitizations: \"foo: bar, bad\"\n"},
-		{name: "malformed-comma-empty-key", yaml: "omp_prompt_sanitizations: \"foo: bar, : baz\"\n"},
-		{name: "non-string-array-item", yaml: "omp_prompt_sanitizations:\n  - 99\n"},
-		{name: "empty-array-item", yaml: "omp_prompt_sanitizations:\n  - \"\"\n"},
-		{name: "whitespace-array-item", yaml: "omp_prompt_sanitizations:\n  - \"   \"\n"},
-		{name: "empty-key-array-item", yaml: "omp_prompt_sanitizations:\n  - \": bar\"\n"},
-		{name: "invalid-utf8-binary-key", yaml: "omp_prompt_sanitizations:\n  ? !!binary \"/w==\"\n  : \"bar\"\n"},
-		{name: "invalid-utf8-binary-array-item", yaml: "omp_prompt_sanitizations:\n  - !!binary \"/zpiYXI=\"\n"},
-	}
-
-	for _, tc := range invalidConfigs {
-		t.Run(tc.name, func(t *testing.T) {
-			for _, method := range []string{"plugin.reconfigure", "plugin.register"} {
-				rawErr, errCode := handlePluginCall(method, lifecycleRequestJSON(t, []byte(tc.yaml)))
-				if errCode != 0 {
-					t.Fatalf("%s code = %d, want 0 handled error envelope; body=%s", method, errCode, rawErr)
-				}
-				var envelope struct {
-					OK    bool `json:"ok"`
-					Error struct {
-						Code string `json:"code"`
-					} `json:"error"`
-				}
-				mustUnmarshalJSON(t, rawErr, &envelope)
-				if envelope.OK {
-					t.Fatalf("%s unexpectedly accepted %s: %s", method, tc.name, rawErr)
-				}
-				if envelope.Error.Code != "invalid_config" {
-					t.Fatalf("%s error code = %q, want invalid_config", method, envelope.Error.Code)
-				}
-
-				reqBody := ompMeasurementJSON(t, map[string]any{
-					"system":   "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL. active-sentinel",
-					"messages": []any{},
-					"tools":    []any{},
-				})
-				req := ompMeasurementRequest("preserve-"+tc.name+"-"+method, "anthropic", reqBody)
-				rawIntercept, icCode := handlePluginCall("request.intercept_before", ompMeasurementJSON(t, req))
-				if icCode != 0 {
-					t.Fatalf("intercept code = %d", icCode)
-				}
-				var icEnv struct {
-					OK     bool `json:"ok"`
-					Result struct {
-						Body string `json:"Body"`
-					} `json:"result"`
-				}
-				mustUnmarshalJSON(t, rawIntercept, &icEnv)
-				decoded, decErr := base64.StdEncoding.DecodeString(icEnv.Result.Body)
-				if decErr != nil {
-					t.Fatalf("decode body: %v", decErr)
-				}
-				if !strings.Contains(string(decoded), "Active custom header. preserved-sentinel") {
-					t.Fatalf("active config was clobbered after %s (%s): got %s", tc.name, method, decoded)
-				}
-			}
-		})
+	mustUnmarshalJSON(t, rawComp, &envComp)
+	if !envComp.OK {
+		t.Fatalf("request.complete ok = false; body=%s", rawComp)
 	}
 }
 
@@ -400,64 +232,8 @@ func TestHandlePluginCallRegisterVersionMatchesRegistry(t *testing.T) {
 	}
 }
 
-func requestInterceptRequestJSON(t *testing.T, body string) []byte {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"SourceFormat":   "openai",
-		"ToFormat":       "",
-		"Model":          "antigravity/test",
-		"RequestedModel": "antigravity/test",
-		"Body":           []byte(body),
-	})
-	if err != nil {
-		t.Fatalf("marshal request intercept request: %v", err)
-	}
-	return raw
-}
-
-func lifecycleRequestJSON(t *testing.T, configYAML []byte) []byte {
-	t.Helper()
-	raw, err := json.Marshal(map[string]any{
-		"schema_version": 1,
-		"config_yaml":    configYAML,
-	})
-	if err != nil {
-		t.Fatalf("marshal lifecycle request: %v", err)
-	}
-	return raw
-}
-
-func hasConfigField(fields []any, name, fieldType string) bool {
-	for _, field := range fields {
-		object, ok := field.(map[string]any)
-		if !ok {
-			continue
-		}
-		if object["Name"] == name && object["Type"] == fieldType {
-			return true
-		}
-	}
-	return false
-}
-
-func restoreDefaultFilterConfig(t *testing.T) {
-	t.Helper()
-	applyFilterConfig(defaultFilterConfig())
-}
-
-func mustUnmarshalJSON(t *testing.T, raw []byte, out any) {
-	t.Helper()
-	if err := json.Unmarshal(raw, out); err != nil {
-		t.Fatalf("unmarshal %s: %v", raw, err)
-	}
-}
-
 func TestResponseInterceptReversesCodexCloakForCorrelatedRequest(t *testing.T) {
 	defer restoreDefaultFilterConfig(t)
-	// A correlated response is the ordinary path: request.intercept_before caches
-	// the reverse resolution under RequestID, and the response interceptor reads
-	// it back. What the host republishes downstream is the EXECUTED request body,
-	// so both request snapshots carry cloak targets rather than source names.
 	const reqID = "codex-correlated-non-stream"
 	interceptRaw, err := json.Marshal(map[string]any{
 		"RequestID":      reqID,
@@ -518,11 +294,6 @@ func TestResponseInterceptReversesCodexCloakForCorrelatedRequest(t *testing.T) {
 }
 
 func TestResponseInterceptLeavesNativeTargetAloneForCorrelatedRequest(t *testing.T) {
-	// The same mix on the correlated path, where what the response interceptor
-	// receives is the executed body: {run_command, ask_question, search_web}. That
-	// body carries no source name, so re-deriving the scope from it would read the
-	// targets and reverse the native search_web. The reverse the request
-	// interceptor derived from the raw body has to be reused instead.
 	defer restoreDefaultFilterConfig(t)
 	const reqID = "codex-native-target-correlated"
 	interceptRaw, err := json.Marshal(map[string]any{
@@ -593,7 +364,6 @@ func TestResponseInterceptLeavesNativeTargetAloneForCorrelatedRequest(t *testing
 }
 
 func TestResponseInterceptDoesNotCorruptProse(t *testing.T) {
-	// Verify that "run_command" appearing in assistant text is NOT replaced
 	reqBody := `{"tools":[{"type":"function","function":{"name":"Bash"}},{"type":"function","function":{"name":"Read"}},{"type":"function","function":{"name":"Edit"}}],"messages":[]}`
 	respBody := `{"choices":[{"message":{"content":"You can use run_command to execute..."}}]}`
 
@@ -614,7 +384,6 @@ func TestResponseInterceptDoesNotCorruptProse(t *testing.T) {
 		t.Fatalf("envelope not OK")
 	}
 
-	// Should be no-op because it didn't change anything, so Body should be empty
 	if envelope.Result.Body != "" {
 		decoded, err := base64.StdEncoding.DecodeString(envelope.Result.Body)
 		if err != nil {
@@ -650,6 +419,61 @@ func TestResponseInterceptPassesThroughAntigravity(t *testing.T) {
 	}
 }
 
+func requestInterceptRequestJSON(t *testing.T, body string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"SourceFormat":   "openai",
+		"ToFormat":       "",
+		"Model":          "antigravity/test",
+		"RequestedModel": "antigravity/test",
+		"Body":           []byte(body),
+	})
+	if err != nil {
+		t.Fatalf("marshal request intercept request: %v", err)
+	}
+	return raw
+}
+
+func lifecycleRequestJSON(t *testing.T, configYAML []byte) []byte {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"schema_version": 1,
+		"config_yaml":    configYAML,
+	})
+	if err != nil {
+		t.Fatalf("marshal lifecycle request: %v", err)
+	}
+	return raw
+}
+
+func hasConfigField(fields []any, name, fieldType string) bool {
+	for _, field := range fields {
+		object, ok := field.(map[string]any)
+		if !ok {
+			continue
+		}
+		if object["Name"] == name && object["Type"] == fieldType {
+			return true
+		}
+	}
+	return false
+}
+
+func restoreDefaultFilterConfig(t *testing.T) {
+	t.Helper()
+	raw, code := handlePluginCall("plugin.reconfigure", lifecycleRequestJSON(t, nil))
+	if code != 0 {
+		t.Fatalf("restore default config code = %d; body=%s", code, raw)
+	}
+}
+
+func mustUnmarshalJSON(t *testing.T, raw []byte, out any) {
+	t.Helper()
+	if err := json.Unmarshal(raw, out); err != nil {
+		t.Fatalf("unmarshal %s: %v", raw, err)
+	}
+}
+
 func responseInterceptRequestJSON(t *testing.T, reqBody, respBody, sourceFormat string) []byte {
 	t.Helper()
 	raw, err := json.Marshal(map[string]any{
@@ -661,28 +485,4 @@ func responseInterceptRequestJSON(t *testing.T, reqBody, respBody, sourceFormat 
 		t.Fatalf("marshal: %v", err)
 	}
 	return raw
-}
-
-func TestInitializeClientsRepeatedIsIdempotent(t *testing.T) {
-	defer restoreDefaultFilterConfig(t)
-
-	uaCountBefore := len(userAgentEvidence)
-	presetCountBefore := len(defaultOMPSanitizationPresets)
-	cloakTableCountBefore := len(defaultCloakTables)
-
-	initializeClients(claudecode.Spec(), codex.Spec(), omp.Spec())
-	initializeClients(claudecode.Spec(), codex.Spec(), omp.Spec())
-
-	if len(userAgentEvidence) != uaCountBefore {
-		t.Fatalf("userAgentEvidence len = %d, want %d (must not accumulate)", len(userAgentEvidence), uaCountBefore)
-	}
-	if len(defaultOMPSanitizationPresets) != presetCountBefore {
-		t.Fatalf("defaultOMPSanitizationPresets len = %d, want %d (must not accumulate)", len(defaultOMPSanitizationPresets), presetCountBefore)
-	}
-	if len(defaultCloakTables) != cloakTableCountBefore {
-		t.Fatalf("defaultCloakTables len = %d, want %d (must not accumulate)", len(defaultCloakTables), cloakTableCountBefore)
-	}
-	if got := len(activeFilterConfig().ompSanitizationRules); got != presetCountBefore {
-		t.Fatalf("activeFilterConfig().ompSanitizationRules len = %d, want %d", got, presetCountBefore)
-	}
 }

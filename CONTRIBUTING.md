@@ -33,13 +33,14 @@ docker run --rm -v ${PWD}:/src -w /src golang:1.26 sh -c \
 
 | Path | What's there |
 | :--- | :--- |
-| `main.go` | Plugin core (~7.5k lines) |
-| `issue55_agent_tier.go` | Claude Code fingerprint machinery |
-| `omp_prompt_sanitization.go` | OMP prompt sanitization |
-| `*_test.go` | Unit and lifecycle tests (`package main`) |
+| `main.go` | Thin root C-ABI entrypoint, method dispatcher, and registration metadata |
+| `plugin_test.go` | Root black-box dispatcher and `registry.json` parity tests |
+| `internal/spec/` | Zero-dependency client specification types |
+| `internal/clients/` | Data-only client definitions (`omp`, `claudecode`, `codex`) |
+| `internal/cloak/` | Shared cloaking engine (domain-split `.go` files) and owning `*_test.go` suites |
 | `tests/` | Integration/e2e scripts (not run by `go test`) |
 | `.github/` | CI workflows and release packaging scripts |
-| `docs/` | Specs, ADRs, checklists, research, deployment |
+| `docs/` | Categorized specs, ADRs, checklists, guides, research, deployment, debugging |
 | `CONTEXT.md` | Canonical domain reference |
 | `AGENTS.md` | Agent-oriented operational guide |
 | `docs/guides/CODING_STANDARDS.md` | Code conventions and patterns |
@@ -57,7 +58,7 @@ mapping tables, activation model, and architectural contracts. Read
 
 ### 2. Make changes
 
-- All production source is `package main` at the repository root.
+- Engine mechanics live in `internal/cloak/` and declarative client specs live in `internal/clients/<client>/`; root `main.go` is a thin C-ABI/dispatcher shell.
 - Brand mapping changes: follow the reversibility rules in
   [docs/guides/CODING_STANDARDS.md](docs/guides/CODING_STANDARDS.md#brand-rewriting-rules).
 - Tool mapping changes: follow the alias plan rules in
@@ -139,7 +140,7 @@ Non-trivial design choices are recorded in `docs/adr/`. Current ADRs:
 | [0002](docs/adr/0002-ratio-ranked-client-classification-and-session-pre-registration.md) | Ratio-ranked client classification and session pre-registration |
 | [0003](docs/adr/0003-sanitize-system-prompt-conventions-tag-for-google-upstream.md) | Sanitize system-prompt conventions tag for Google upstream |
 | [0004](docs/adr/0004-cloak-codex-tool-names-by-wire-position.md) | Cloak Codex tool names by wire position |
-| [0005](docs/adr/0005-client-modules-and-shared-cloak-engine.md) | Client modules with shared cloaking mechanics (accepted, not yet implemented) |
+| [0005](docs/adr/0005-client-modules-and-shared-cloak-engine.md) | Client modules with shared cloaking mechanics (accepted, implemented in #67) |
 
 ## License
 
