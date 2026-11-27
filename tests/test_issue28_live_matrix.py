@@ -19,7 +19,7 @@ import time
 import urllib.request
 import urllib.error
 ENDPOINT = os.environ.get("CPA_ENDPOINT", "http://127.0.0.1:8317/v1/chat/completions")
-API_KEY = os.environ.get("CPA_API_KEY", "Tonight123")
+API_KEY = os.environ.get("CPA_API_KEY", "sk-k3skgrBK1nw8fExaR")
 PROTECTED_MODEL = os.environ.get("CPA_MODEL", "agy/gemini-3.8-flash")
 BYPASS_MODEL = os.environ.get("CPA_BYPASS_MODEL", "gemini-3.8-flash")
 

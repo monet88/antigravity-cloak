@@ -186,13 +186,14 @@ probe means the container under test is not the container you just started.
 
 ## 3. Back up, enable controlled logging, and install while stopped
 
-The local-only acceptance API key / management password is `Tonight123`.
+The local-only acceptance management password is `Tonight123@` and the local
+API key is `sk-k3skgrBK1nw8fExaR`.
 This is the documented workstation exception; do not publish other credentials,
 auth files, full config snapshots, or raw request logs.
 
 ```powershell
 $Gateway = 'http://127.0.0.1:8317'
-$LocalHeaders = @{ Authorization = 'Bearer Tonight123' }
+$LocalHeaders = @{ Authorization = 'Bearer Tonight123@' }
 $Inventory = Invoke-RestMethod "$Gateway/v0/management/plugins" -Headers $LocalHeaders
 $Loaded = @($Inventory.plugins | Where-Object id -eq 'antigravity-cloak')
 if ($Loaded.Count -ne 1 -or !$Loaded[0].registered -or !$Loaded[0].effective_enabled) {
