@@ -76,10 +76,10 @@ def resolve_protected_model(base_url: str, api_key: str) -> str:
         return explicit
     models = discover_models(base_url, api_key)
     for m in models:
-        if m.startswith("agy/gemini-"):
+        if m.startswith("agy/gemini-") and not m.endswith("-image"):
             return m
     for m in models:
-        if m.startswith("agy/"):
+        if m.startswith("agy/") and not m.endswith("-image"):
             return m
     return "agy/gemini-4-hydrogen"
 
@@ -93,6 +93,6 @@ def resolve_bypass_model(base_url: str, api_key: str, protected_model: str) -> s
     if candidate in models:
         return candidate
     for m in models:
-        if not m.startswith("agy/"):
+        if not m.startswith("agy/") and not m.endswith("-image"):
             return m
     return "gemini-4-hydrogen"

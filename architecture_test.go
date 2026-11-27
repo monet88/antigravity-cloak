@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -272,7 +273,7 @@ func markdownHeadingSlugs(path string) (map[string]bool, error) {
 			slugs[base] = true
 			counts[base] = 1
 		} else {
-			slugs[base+"-"+string(rune('0'+n))] = true
+			slugs[base+"-"+strconv.Itoa(n)] = true
 			counts[base] = n + 1
 		}
 	}
