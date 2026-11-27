@@ -4,6 +4,11 @@ All notable changes to `antigravity-cloak` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Current releases use semantic version tags; the one-off `v.26.09.06` CalVer release is retained below as historical release metadata.
 
+## [0.7.7] - 2026-11-27
+
+### Changed
+- **Gated `ProtectedAGY` and OMP prompt sanitization solely by `model_prefixes`.** Removed the hardcoded `"agy/"` route check (`isAGYRoute`) so `ProtectedAGY`, `ExplicitOMPNonAGYBypass`, and `User-Agent: omp/...` prompt sanitization follow configured `model_prefixes` uniformly (empty = match all models; non-empty = match only configured prefixes such as `["monet/"]` or `["monet"]`), allowing operators to rename provider prefixes freely without colliding with `cliproxy-antigravity`'s `agy/*` models.
+
 ## [0.7.6] - 2026-11-27
 
 ### Changed
