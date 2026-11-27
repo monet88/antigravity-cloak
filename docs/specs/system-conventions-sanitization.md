@@ -34,23 +34,23 @@ See [ADR 0003](../adr/0003-sanitize-system-prompt-conventions-tag-for-google-ups
 ## Scope and ordering
 
 - Hook: `request.intercept_before` via `sanitizeOMPPrompt(rootMap)`, running
-  after brand rewriting and before the prose tool-alias pass on both OMP `agy/*`
-  request paths (`handleProtectedAGY` and `rewriteRequestBodyForClient`). That
-  ordering ensures brand rules never clobber operator replacement text while
-  declared OMP tool references inside sanitized prompt text (e.g. `use bash`)
-  still cloak upstream (`use run_command`).
+  after brand rewriting and before the prose tool-alias pass on both OMP
+  request paths matching `model_prefixes` (`handleProtectedAGY` and
+  `rewriteRequestBodyForClient`). That ordering ensures brand rules never
+  clobber operator replacement text while declared OMP tool references inside
+  sanitized prompt text (e.g. `use bash`) still cloak upstream (`use run_command`).
 - Routes:
-  1. `ProtectedAGY`: explicit OMP `X-Cloak-Client` marker plus an `agy/` prefix
-     on `Model` or `RequestedModel` (retaining precedence over `model_prefixes`).
-  2. `User-Agent` OMP on `agy/*`: verified `User-Agent: omp/...` without
-     `X-Cloak-Client` when `isAGYRoute` and `modelAllowsCloak` hold on normalized
-     `anthropic` or `openai` Chat Completions / Messages carriers. Any
-     `X-Cloak-Client` header value — valid or invalid — suppresses this route:
-     the UA fallback requires an absent explicit marker.
-- Excluded routes and carriers: `ExplicitOMPNonAGYBypass` (non-`agy/*`),
-  non-`agy/*` `User-Agent: omp/...` traffic, unmarked no-UA requests, other
-  clients (`claude_code`, `codex`), and deferred `/v1/responses` (`openai-response`)
-  carriers do not run this step.
+  1. `ProtectedAGY`: explicit OMP `X-Cloak-Client` marker plus a model
+     matching `model_prefixes` (empty = all models).
+  2. `User-Agent` OMP: verified `User-Agent: omp/...` without `X-Cloak-Client`
+     when `modelAllowsCloak` holds on normalized `anthropic` or `openai`
+     Chat Completions / Messages carriers. Any `X-Cloak-Client` header value
+     — valid or invalid — suppresses this route: the UA fallback requires an
+     absent explicit marker.
+- Excluded routes and carriers: `ExplicitOMPNonAGYBypass` (models outside
+  `model_prefixes`), `User-Agent: omp/...` outside `model_prefixes`, unmarked
+  no-UA requests, other clients (`claude_code`, `codex`), and deferred
+  `/v1/responses` (`openai-response`) carriers do not run this step.
 - Visited fields: top-level `system` plus `messages[].content` for roles
   `system` and `developer`. Supported content is a `string` or an array of
   `text` / `input_text` blocks (visiting only each block's string `text` field).
@@ -98,7 +98,7 @@ See [ADR 0003](../adr/0003-sanitize-system-prompt-conventions-tag-for-google-ups
 RFC 2119 presets, idempotence, inbound-only response/stream non-mutation, live
 `omp_prompt_sanitizations` reconfigure/override/strip/precedence, `invalid_config`
 rejection with active-config preservation, `ProtectedAGY` and `User-Agent: omp/...`
-`agy/*` route gates, brand-before-sanitization-before-tool-prose ordering, and
+`model_prefixes` route gates, brand-before-sanitization-before-tool-prose ordering, and
 negative carrier/route boundaries through the plugin ABI entrypoint.
 
 Run:

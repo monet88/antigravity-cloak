@@ -28,7 +28,7 @@ CLIProxyAPI v7 dynamic Go C-shared plugin (`buildmode=c-shared`, Go 1.26.0, ABI 
 - **`normalizeSourceFormat`:** All three handlers normalize `claude`/`antigravity` -> `anthropic` and `codex`/`openai-response` -> `openai` before walking bodies; missing normalization yields empty `extractToolNames`.
 - **`isUnambiguousToolName`:** Single-word PascalCase names (`Bash`, `Read`, `Edit`) stay ambiguous (replaced only in tool-reference context), never bare in prose.
 - **OMP virtual-device MCP (`xd://mcp__*`):** Invoked via `read`/`write` (`read_file`/`write_file`). Never convert `xd://` calls into `call_mcp_tool`.
-- **Google Cloud Code 429 (`omp_prompt_sanitization.go`):** On `ProtectedAGY` and `User-Agent: omp/...` `agy/*` routes, `sanitizeOMPPrompt` runs after brand rewrite and before prose alias cloaking, rewriting `<system-conventions>`, both RFC 2119 headers, `omp/18.20.0+`'s injected Claude Code OAuth block (to `antigravityIdentity`, never `""`, preserving `cache_control`), and live `omp_prompt_sanitizations`.
+- **Google Cloud Code 429 (`omp_prompt_sanitization.go`):** On `ProtectedAGY` and `User-Agent: omp/...` routes matching `model_prefixes` (empty = all models), `sanitizeOMPPrompt` runs after brand rewrite and before prose alias cloaking, rewriting `<system-conventions>`, both RFC 2119 headers, `omp/18.20.0+`'s injected Claude Code OAuth block (to `antigravityIdentity`, never `""`, preserving `cache_control`), and live `omp_prompt_sanitizations`.
 
 ### Debug logging (`CPA_FILTER_DEBUG`)
 - Decided once via `sync.Once` on first `debugLog` call; changing it requires a container recreate. Keep OFF in production (dumping large Claude Code bodies to Windows bind-mounted `logs/` wedged WSL2/Docker).

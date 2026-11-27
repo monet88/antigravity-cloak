@@ -175,7 +175,7 @@ func TestSystemConventionsRequestScope(t *testing.T) {
 				isolateOMPMeasurement(t)
 				cfg := defaultFilterConfig()
 				cfg.UseDefaultKeywords = false
-				cfg.ModelPrefixes = []string{"unrelated/"}
+				cfg.ModelPrefixes = []string{"agy/"}
 				applyFilterConfig(cfg)
 				fx := newFiveRoleCarrierFixture(format, original, true)
 				body := ompMeasurementJSON(t, fx.root)
@@ -195,9 +195,15 @@ func TestSystemConventionsRequestScope(t *testing.T) {
 				if result.Terminate {
 					t.Fatalf("unexpected rejection: %s", result.ResponseBody)
 				}
-				if route == "bypass" || route == "unmarked" || route == "other-client" {
+				if route == "bypass" || route == "unmarked" {
 					if len(result.Body) != 0 && !bytes.Equal(result.Body, body) {
 						t.Fatalf("non-protected body changed: %s", result.Body)
+					}
+					return
+				}
+				if route == "other-client" {
+					if bytes.Contains(result.Body, []byte("<conventions>")) || !bytes.Contains(result.Body, []byte(original)) {
+						t.Fatalf("other-client must not run OMP prompt sanitization: %s", result.Body)
 					}
 					return
 				}
@@ -243,7 +249,7 @@ func TestSystemConventionsBuiltInRFC2119PresetsOnProtectedAGY(t *testing.T) {
 			HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
 use_default_keywords: false
 model_prefixes:
-  - unrelated/
+  - agy/
 `)), nil)
 
 			fx := newFiveRoleCarrierFixture(format, promptOriginal, true)
@@ -651,20 +657,21 @@ omp_prompt_sanitizations:
 		wantClearHeader bool
 	}{
 		{
-			name:    "non-agy-tool-free",
-			format:  "openai",
-			model:   "openai/gpt-5",
-			headers: map[string][]string{"User-Agent": {"omp/18.18.8"}},
-			msgRole: "developer",
+			name:     "non-agy-tool-free",
+			extraCfg: "model_prefixes:\n  - agy/\n",
+			format:   "openai",
+			model:    "openai/gpt-5",
+			headers:  map[string][]string{"User-Agent": {"omp/18.18.8"}},
+			msgRole:  "developer",
 		},
 		{
-			name:          "non-agy-with-omp-tool",
-			format:        "openai",
-			model:         "openai/gpt-5",
-			headers:       map[string][]string{"User-Agent": {"omp/18.18.8"}},
-			msgRole:       "developer",
-			tools:         []string{"read"},
-			wantFirstTool: "read_file",
+			name:     "non-agy-with-omp-tool",
+			extraCfg: "model_prefixes:\n  - agy/\n",
+			format:   "openai",
+			model:    "openai/gpt-5",
+			headers:  map[string][]string{"User-Agent": {"omp/18.18.8"}},
+			msgRole:  "developer",
+			tools:    []string{"read"},
 		},
 		{
 			name:     "agy-blocked-by-model-prefixes",
@@ -1006,6 +1013,7 @@ func TestOMPInjectedClaudeCodeInstructionPreset(t *testing.T) {
 
 	t.Run("explicit-omp-non-agy-bypass", func(t *testing.T) {
 		isolateOMPMeasurement(t)
+		HandlePluginLifecycle(lifecycleRequestJSON(t, []byte("use_default_keywords: true\nmodel_prefixes:\n  - agy/\n")), nil)
 		body := ompMeasurementJSON(t, map[string]any{
 			"system": []any{
 				map[string]any{

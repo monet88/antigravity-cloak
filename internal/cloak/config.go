@@ -77,8 +77,9 @@ func carriesOpenAIResponses(rawSourceFormat string) bool {
 // When ModelPrefixes is empty (the default), cloaking runs for every model so
 // behavior matches the upstream "cloak by client" design. When non-empty,
 // cloaking runs only if the upstream Model or the client RequestedModel starts
-// with one of the configured prefixes (e.g. "agy/"). Both handlers and the
-// stream path share this gate so request/response/stream stay consistent.
+// with one of the configured prefixes (e.g. "agy/", "monet/"). Handlers (including
+// ProtectedAGY and User-Agent OMP sanitization) and the stream path share this
+// gate so request/response/stream stay consistent.
 func modelAllowsCloak(model, requestedModel string) bool {
 	prefixes := activeFilterConfig().ModelPrefixes
 	if len(prefixes) == 0 {
@@ -97,11 +98,6 @@ func modelAllowsCloak(model, requestedModel string) bool {
 		}
 	}
 	return false
-}
-
-func isAGYRoute(model, requestedModel string) bool {
-	return strings.HasPrefix(strings.TrimSpace(model), "agy/") ||
-		strings.HasPrefix(strings.TrimSpace(requestedModel), "agy/")
 }
 
 func copyToolMappings(m map[string]map[string]string) map[string]map[string]string {

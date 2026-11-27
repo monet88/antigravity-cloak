@@ -206,7 +206,7 @@ func configFields() []pluginapi.ConfigField {
 		{
 			Name:        "omp_prompt_sanitizations",
 			Type:        pluginapi.ConfigFieldTypeObject,
-			Description: "Oh My Pi system/developer prompt sanitization mappings on agy/* routes (match → replacement). Merges with built-in <system-conventions> and RFC 2119 presets; matching keys override built-ins case-insensitively and empty string values strip matched text.",
+			Description: "Oh My Pi system/developer prompt sanitization mappings on routes matching model_prefixes (or all models when empty) (match → replacement). Merges with built-in <system-conventions> and RFC 2119 presets; matching keys override built-ins case-insensitively and empty string values strip matched text.",
 		},
 	}
 }

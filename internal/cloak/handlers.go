@@ -605,16 +605,16 @@ func HandleRequestInterceptBefore(request []byte) []byte {
 	}
 
 	format := normalizeSourceFormat(req.SourceFormat)
-	isAGY := isAGYRoute(req.Model, req.RequestedModel)
-	debugLog("handleRequestInterceptBefore: SourceFormat=%s (normalized=%s) ToFormat=%q Model=%q RequestedModel=%q isAGY=%t marker=%+v",
-		req.SourceFormat, format, req.ToFormat, req.Model, req.RequestedModel, isAGY, marker)
+	isAllowedModel := modelAllowsCloak(req.Model, req.RequestedModel)
+	debugLog("handleRequestInterceptBefore: SourceFormat=%s (normalized=%s) ToFormat=%q Model=%q RequestedModel=%q isAllowedModel=%t marker=%+v",
+		req.SourceFormat, format, req.ToFormat, req.Model, req.RequestedModel, isAllowedModel, marker)
 
 	if marker.isConflict && marker.conflictContainsOMP {
-		if isAGY {
-			debugLog("handleRequestInterceptBefore: conflicting marker containing OMP on AGY route -> exact 503")
+		if isAllowedModel {
+			debugLog("handleRequestInterceptBefore: conflicting marker containing OMP on allowed model route -> exact 503")
 			return protected503Response(resp)
 		}
-		debugLog("handleRequestInterceptBefore: conflicting marker containing OMP on non-AGY route -> durable bypass")
+		debugLog("handleRequestInterceptBefore: conflicting marker containing OMP outside model_prefixes -> durable bypass")
 		if req.RequestID != "" {
 			globalLifecycleManager.setRoute(req.RequestID, &explicitOMPRouteState{
 				routeKind: routeKindExplicitOMPNonAGYBypass,
@@ -625,11 +625,11 @@ func HandleRequestInterceptBefore(request []byte) []byte {
 	}
 
 	if !marker.isConflict && marker.isOMP {
-		if isAGY {
-			debugLog("handleRequestInterceptBefore: explicit OMP on AGY route -> ProtectedAGY admission")
+		if isAllowedModel {
+			debugLog("handleRequestInterceptBefore: explicit OMP on allowed model route -> ProtectedAGY admission")
 			return handleProtectedAGY(&req, resp, format)
 		}
-		debugLog("handleRequestInterceptBefore: explicit OMP on non-AGY route -> durable bypass")
+		debugLog("handleRequestInterceptBefore: explicit OMP outside model_prefixes -> durable bypass")
 		if req.RequestID != "" {
 			globalLifecycleManager.setRoute(req.RequestID, &explicitOMPRouteState{
 				routeKind: routeKindExplicitOMPNonAGYBypass,
@@ -639,7 +639,7 @@ func HandleRequestInterceptBefore(request []byte) []byte {
 		return MustEnvelope(resp)
 	}
 
-	if !modelAllowsCloak(req.Model, req.RequestedModel) {
+	if !isAllowedModel {
 		debugLog("handleRequestInterceptBefore: model gate skip Model=%q RequestedModel=%q", req.Model, req.RequestedModel)
 		return MustEnvelope(resp)
 	}
@@ -783,7 +783,7 @@ func HandleRequestInterceptBefore(request []byte) []byte {
 	}
 
 	// Legacy path: clients without alias-plan support.
-	runOMPPromptSanitization := uaResolvedOMP && isAGY &&
+	runOMPPromptSanitization := uaResolvedOMP &&
 		(format == "openai" || format == "anthropic") &&
 		!carriesOpenAIResponses(req.SourceFormat)
 	body, rewritten, client := rewriteRequestBodyForClient(req.Body, format, forcedClient, runOMPPromptSanitization)

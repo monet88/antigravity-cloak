@@ -427,8 +427,8 @@ func TestIntegration_ExplicitClient_AnthropicFormat(t *testing.T) {
 }
 
 // TestIntegration_ExplicitClient_EmptyPrefixesAllowsAllModels proves the
-// default empty model_prefixes preserves all-model eligibility with a valid
-// explicit override.
+// default empty model_prefixes allows all models on the ProtectedAGY route,
+// cloaking tools on request and uncloaking them on response.
 func TestIntegration_ExplicitClient_EmptyPrefixesAllowsAllModels(t *testing.T) {
 	defer restoreDefaultFilterConfig(t) // empty model_prefixes
 	reqID := "omp-explicit-empty-prefix-008"
@@ -446,8 +446,14 @@ func TestIntegration_ExplicitClient_EmptyPrefixesAllowsAllModels(t *testing.T) {
 	b, _ := json.Marshal(clientReq)
 	rawResp := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID, "openai", model, b, headers))
 	body, respHeaders, clearHeaders := decodeEnvelopeRequestIntercept(t, rawResp)
-	if len(body) != 0 {
-		t.Fatalf("explicit OMP on non-AGY model must not mutate request, got: %s", body)
+	if len(body) == 0 {
+		t.Fatal("empty model_prefixes must cloak explicit OMP request on any model")
+	}
+	var gotReq map[string]any
+	mustUnmarshalJSON(t, body, &gotReq)
+	toolFn := gotReq["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)["name"]
+	if toolFn != "read_file" {
+		t.Fatalf("cloaked tool = %v, want read_file", toolFn)
 	}
 	if !containsStr(clearHeaders, explicitClientHeader) {
 		t.Fatalf("ClearHeaders=%v, want to include %q", clearHeaders, explicitClientHeader)
@@ -456,12 +462,94 @@ func TestIntegration_ExplicitClient_EmptyPrefixesAllowsAllModels(t *testing.T) {
 		t.Fatalf("X-Cloak-Client still present in resp.Headers: %v", respHeaders)
 	}
 
-	// Correlated response must also be zero mutation
-	respBody := []byte(`{"choices":[{"message":{"content":"Hello Antigravity world"}}]}`)
+	respBody := []byte(`{"choices":[{"message":{"content":"Hello Antigravity world","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}}]}`)
 	rawResp2 := HandleResponseIntercept(makeIntegrationResponseInterceptPayload(t, reqID, "openai", model, respBody))
 	out := decodeEnvelopeBody(t, rawResp2)
-	if len(out) != 0 {
-		t.Fatalf("correlated response for non-AGY bypass must perform zero mutation, got: %s", out)
+	if !strings.Contains(string(out), `"name":"read"`) || !strings.Contains(string(out), "Hello omp world") {
+		t.Fatalf("correlated response did not restore read/omp, got: %s", out)
+	}
+}
+
+// TestIntegration_ExplicitClient_CustomModelPrefixGatesProtectedRoute proves
+// ProtectedAGY, User-Agent OMP sanitization, and ExplicitOMPNonAGYBypass follow
+// configured model_prefixes (e.g. ["monet/"] or ["monet"]) without any
+// hardcoded "agy/" assumption.
+func TestIntegration_ExplicitClient_CustomModelPrefixGatesProtectedRoute(t *testing.T) {
+	for _, prefix := range []string{"monet/", "monet"} {
+		t.Run("prefix="+prefix, func(t *testing.T) {
+			defer restoreDefaultFilterConfig(t)
+			HandlePluginLifecycle(lifecycleRequestJSON(t, []byte("use_default_keywords: true\nmodel_prefixes:\n  - "+prefix+"\n")), nil)
+
+			// 1. monet/* with explicit X-Cloak-Client: oh_my_pi -> ProtectedAGY + sanitization + reverse
+			reqID1 := "custom-prefix-protected-" + prefix
+			h1 := http.Header{}
+			h1.Set(explicitClientHeader, "oh_my_pi")
+			body1, _ := json.Marshal(map[string]any{
+				"model": "monet/gemini-4-hydrogen",
+				"messages": []any{
+					map[string]any{"role": "system", "content": "<system-conventions>You use Oh My Pi.</system-conventions>"},
+					map[string]any{"role": "user", "content": "read"},
+				},
+				"tools": []any{
+					map[string]any{"type": "function", "function": map[string]any{"name": "read"}},
+				},
+			})
+			raw1 := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID1, "openai", "monet/gemini-4-hydrogen", body1, h1))
+			out1, _, clear1 := decodeEnvelopeRequestIntercept(t, raw1)
+			if !containsStr(clear1, explicitClientHeader) {
+				t.Fatalf("expected %s cleared, got %v", explicitClientHeader, clear1)
+			}
+			s1 := string(out1)
+			if !strings.Contains(s1, "<conventions>") || strings.Contains(s1, "<system-conventions>") || !strings.Contains(s1, `"name":"read_file"`) {
+				t.Fatalf("monet/* protected request not cloaked/sanitized: %s", s1)
+			}
+			resp1 := []byte(`{"choices":[{"message":{"content":"Hello Antigravity","tool_calls":[{"id":"c1","type":"function","function":{"name":"read_file","arguments":"{}"}}]}}]}`)
+			rev1 := decodeEnvelopeBody(t, HandleResponseIntercept(makeIntegrationResponseInterceptPayload(t, reqID1, "openai", "monet/gemini-4-hydrogen", resp1)))
+			if !strings.Contains(string(rev1), `"name":"read"`) || !strings.Contains(string(rev1), "Hello omp") {
+				t.Fatalf("monet/* response not restored: %s", rev1)
+			}
+
+			// 2. monet/* with User-Agent: omp/... -> sanitized + cloaked
+			reqID2 := "custom-prefix-ua-" + prefix
+			h2 := http.Header{}
+			h2.Set("User-Agent", "omp/19.2.1")
+			raw2 := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID2, "openai", "monet/gemini-4-hydrogen", body1, h2))
+			out2, _, _ := decodeEnvelopeRequestIntercept(t, raw2)
+			s2 := string(out2)
+			if !strings.Contains(s2, "<conventions>") || strings.Contains(s2, "<system-conventions>") || !strings.Contains(s2, `"name":"read_file"`) {
+				t.Fatalf("monet/* UA request not cloaked/sanitized: %s", s2)
+			}
+
+			// 3. agy/* outside model_prefixes with X-Cloak-Client: oh_my_pi -> durable bypass (zero mutation)
+			reqID3 := "custom-prefix-agy-bypass-" + prefix
+			body3, _ := json.Marshal(map[string]any{
+				"model": "agy/gemini-4-hydrogen",
+				"messages": []any{
+					map[string]any{"role": "system", "content": "<system-conventions>You use Oh My Pi.</system-conventions>"},
+				},
+				"tools": []any{
+					map[string]any{"type": "function", "function": map[string]any{"name": "read"}},
+				},
+			})
+			raw3 := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqID3, "openai", "agy/gemini-4-hydrogen", body3, h1))
+			out3, _, clear3 := decodeEnvelopeRequestIntercept(t, raw3)
+			if len(out3) != 0 {
+				t.Fatalf("agy/* outside model_prefixes must bypass with zero mutation, got: %s", out3)
+			}
+			if !containsStr(clear3, explicitClientHeader) {
+				t.Fatalf("bypass must still clear %s, got %v", explicitClientHeader, clear3)
+			}
+			resp3 := []byte(`{"choices":[{"message":{"content":"Hello Antigravity"}}]}`)
+			if rev3 := decodeEnvelopeBody(t, HandleResponseIntercept(makeIntegrationResponseInterceptPayload(t, reqID3, "openai", "agy/gemini-4-hydrogen", resp3))); len(rev3) != 0 {
+				t.Fatalf("agy/* bypass response must not mutate, got: %s", rev3)
+			}
+
+			// 4. agy/* outside model_prefixes with User-Agent: omp/... -> gate skip (zero mutation)
+			raw4 := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "custom-prefix-agy-ua-"+prefix, "openai", "agy/gemini-4-hydrogen", body3, h2))
+			if out4, _, _ := decodeEnvelopeRequestIntercept(t, raw4); len(out4) != 0 {
+				t.Fatalf("agy/* UA outside model_prefixes must skip, got: %s", out4)
+			}
+		})
 	}
 }
 
