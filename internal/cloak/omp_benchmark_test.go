@@ -236,35 +236,17 @@ func BenchmarkOMPBrandDerivation(b *testing.B) {
 			b.Run("DeriveOnly", func(b *testing.B) {
 				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
-					// Attribution probe of main.go's rewriteProtectedBrandText
-					// mapping-derivation block. Keep this probe in sync if that
-					// production block changes: it now draws from the resolved
-					// client's own table and applies the same client scope.
-					inScope := func(m rewriteMapping) bool {
-						return (m.Client == "" || m.Client == client) && !isOMPAlias(m.Match)
-					}
-					var mappings []rewriteMapping
-					if cfg.UseDefaultKeywords {
-						for _, m := range brandMappingsFor(client) {
-							if inScope(m) {
-								mappings = append(mappings, m)
-							}
-						}
-					}
-					for _, m := range cfg.CustomMappings {
-						if inScope(m) {
-							mappings = append(mappings, m)
-						}
-					}
-					ompMeasurementMappings = normalizeMappings(mappings)
+					// Measures protectedNonOMPMappings once-per-request mapping derivation.
+					ompMeasurementMappings = protectedNonOMPMappings(&cfg, client)
 				}
 			})
+			nonOMPMappings := protectedNonOMPMappings(&cfg, client)
 			for _, size := range []int{64, 16 << 10} {
 				text := "Agent documentation " + strings.Repeat("x", size-20)
 				b.Run(fmt.Sprintf("RewriteNoMatch/%dB", size), func(b *testing.B) {
 					b.ReportAllocs()
 					for i := 0; i < b.N; i++ {
-						result, _ := rewriteProtectedBrandText(text, &cfg, client)
+						result, _ := rewriteProtectedBrandText(text, nonOMPMappings, client)
 						runtime.KeepAlive(result)
 					}
 				})

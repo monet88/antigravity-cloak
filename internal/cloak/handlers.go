@@ -523,7 +523,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 	}
 
 	cloakProtectedToolNames(rootMap, extendedCloak, format)
-	rewriteProtectedBrand(rootMap, format, "oh_my_pi")
+	rewriteProtectedBrand(rootMap, format, "oh_my_pi", cfg)
 	runOMPSanitization := !carriesOpenAIResponses(req.SourceFormat)
 	var sanitizationRules []ompSanitizationRule
 	if runOMPSanitization {

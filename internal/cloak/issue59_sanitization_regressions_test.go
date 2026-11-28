@@ -563,3 +563,70 @@ func TestOMPSanitizationPresetCompilesNonASCIICaseInsensitiveRegex(t *testing.T)
 		})
 	}
 }
+
+// PR #72 review remediation: rewriteProtectedBrand must honor the passed
+// request-scoped filterConfig snapshot rather than re-reading
+// activeFilterConfig(), keeping brand rewriting atomic with tool cloaking and
+// inbound sanitization under concurrent plugin.reconfigure (ADR 0001).
+func TestRewriteProtectedBrandUsesPassedSnapshotNotLiveConfig(t *testing.T) {
+	isolateOMPMeasurement(t)
+	defer restoreDefaultFilterConfig(t)
+
+	snapshotCfg := defaultFilterConfig()
+	snapshotCfg.CustomMappings = []rewriteMapping{
+		{Match: "custom-snap", Replacement: "snap-brand"},
+	}
+
+	// Mutate live global config with a conflicting mapping after snapshot capture.
+	liveCfg := defaultFilterConfig()
+	liveCfg.CustomMappings = []rewriteMapping{
+		{Match: "custom-snap", Replacement: "live-drift"},
+	}
+	applyFilterConfig(liveCfg)
+
+	root := map[string]any{
+		"system": "custom-snap",
+		"tools": []any{
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "read",
+					"description": "custom-snap",
+					"parameters": map[string]any{
+						"type":  "object",
+						"title": "custom-snap",
+					},
+				},
+			},
+		},
+		"messages": []any{
+			map[string]any{"role": "developer", "content": "custom-snap"},
+			map[string]any{"role": "assistant", "content": "custom-snap"},
+			map[string]any{"role": "tool", "content": "custom-snap"},
+			map[string]any{"role": "user", "content": "User typed custom-snap\n<system-reminder>custom-snap</system-reminder>"},
+		},
+	}
+
+	rewriteProtectedBrand(root, "openai", "oh_my_pi", &snapshotCfg)
+
+	if got := root["system"]; got != "snap-brand" {
+		t.Errorf("system = %q, want snap-brand", got)
+	}
+	fn := root["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if got := fn["description"]; got != "snap-brand" {
+		t.Errorf("tool description = %q, want snap-brand", got)
+	}
+	if got := fn["parameters"].(map[string]any)["title"]; got != "snap-brand" {
+		t.Errorf("tool schema title = %q, want snap-brand", got)
+	}
+	msgs := root["messages"].([]any)
+	for i, role := range []string{"developer", "assistant", "tool"} {
+		if got := msgs[i].(map[string]any)["content"]; got != "snap-brand" {
+			t.Errorf("%s content = %q, want snap-brand", role, got)
+		}
+	}
+	wantUser := "User typed custom-snap\n<system-reminder>snap-brand</system-reminder>"
+	if got := msgs[3].(map[string]any)["content"]; got != wantUser {
+		t.Errorf("user content = %q, want %q", got, wantUser)
+	}
+}

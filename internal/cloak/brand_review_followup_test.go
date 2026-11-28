@@ -363,7 +363,7 @@ func TestOMPIdentitySchemeAndGlobalMemory(t *testing.T) {
 
 	const uri = "omp://xd/mcp__exa_web_search_exa"
 	got, changed := rewriteProtectedBrandText(
-		"owner: "+uri+" and the omp binary", activeFilterConfig(), "oh_my_pi")
+		"owner: "+uri+" and the omp binary", protectedNonOMPMappings(activeFilterConfig(), "oh_my_pi"), "oh_my_pi")
 	if !changed {
 		t.Fatal("protected walker made no change")
 	}
@@ -385,7 +385,7 @@ func TestOMPIdentitySchemeAndGlobalMemory(t *testing.T) {
 	}
 
 	// The shipped identity sentence, whole.
-	if got, _ := rewriteProtectedBrandText("You are omp's trusted coding assistant.", activeFilterConfig(), "oh_my_pi"); got != antigravityIdentity {
+	if got, _ := rewriteProtectedBrandText("You are omp's trusted coding assistant.", protectedNonOMPMappings(activeFilterConfig(), "oh_my_pi"), "oh_my_pi"); got != antigravityIdentity {
 		t.Fatalf("identity sentence = %q, want %q", got, antigravityIdentity)
 	}
 
@@ -506,7 +506,7 @@ func TestBareGeminiReverseRequiresSegmentEnd(t *testing.T) {
 	// Forward symmetry, for the same two lookalikes: the forward pass leaves
 	// them alone, which is exactly why the reverse may not touch them.
 	for _, in := range []string{`C:\Users\u\.omp-backup\agent`, "~/.omp.foo/notes"} {
-		if got, _ := rewriteProtectedBrandText(in, activeFilterConfig(), "oh_my_pi"); got != in {
+		if got, _ := rewriteProtectedBrandText(in, protectedNonOMPMappings(activeFilterConfig(), "oh_my_pi"), "oh_my_pi"); got != in {
 			t.Errorf("forward remapped lookalike %q -> %q", in, got)
 		}
 	}
