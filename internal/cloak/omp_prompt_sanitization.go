@@ -7,10 +7,11 @@ package cloak
 // models).
 //
 // Rewrites exact `<system-conventions>` / `</system-conventions>` tags,
-// case-insensitive Oh My Pi RFC 2119 normative header signatures, and Oh My Pi's
-// injected Claude Code OAuth system instruction, merged with
-// live-reconfigurable `omp_prompt_sanitizations` entries precomputed on the
-// atomic `filterConfig` snapshot.
+// case-insensitive Oh My Pi RFC 2119 normative header signatures, Oh My Pi's
+// injected Claude Code OAuth system instruction, and the OMP v19.2.1 built-in
+// preset groups declared in `internal/clients/omp/spec.go` (Issue #71), merged
+// with live-reconfigurable `omp_prompt_sanitizations` entries precomputed on
+// the atomic `filterConfig` snapshot.
 
 import (
 	"fmt"
@@ -36,18 +37,28 @@ type ompSanitizationRule struct {
 	re            *regexp.Regexp
 }
 
-// ompSanitizationPreset builds a built-in preset, deriving lowerMatch and the
-// ASCII fast-scan flag from the match text instead of restating them by hand.
-// lowerMatch doubles as the case-insensitive override key in
-// buildOMPSanitizationRules even for case-sensitive presets.
+// ompSanitizationPreset builds a sanitization rule, deriving lowerMatch, the
+// ASCII fast-scan flag, and (for non-ASCII case-insensitive rules) the anchored
+// prefix regex from match instead of restating them by hand. lowerMatch doubles
+// as the case-insensitive override key in buildOMPSanitizationRules even for
+// case-sensitive presets.
 func ompSanitizationPreset(match, replacement string, caseSensitive bool) ompSanitizationRule {
 	lower := strings.ToLower(match)
+	ascii := isASCIIString(match) && isASCIIString(lower) && len(lower) == len(match)
+	var re *regexp.Regexp
+	if !caseSensitive && !ascii {
+		compiled, err := regexp.Compile("(?i)^" + regexp.QuoteMeta(match))
+		if err == nil {
+			re = compiled
+		}
+	}
 	return ompSanitizationRule{
 		match:         match,
 		lowerMatch:    lower,
 		replacement:   replacement,
 		caseSensitive: caseSensitive,
-		asciiOnly:     isASCIIString(match) && isASCIIString(lower) && len(lower) == len(match),
+		asciiOnly:     ascii,
+		re:            re,
 	}
 }
 
@@ -70,24 +81,11 @@ func buildOMPSanitizationRules(entries []ompSanitizationEntry) []ompSanitization
 		if strings.TrimSpace(entry.Match) == "" {
 			continue
 		}
-		lower := strings.ToLower(entry.Match)
-		ascii := isASCIIString(entry.Match) && isASCIIString(lower) && len(lower) == len(entry.Match)
-		var re *regexp.Regexp
-		if !ascii {
-			compiled, err := regexp.Compile("(?i)^" + regexp.QuoteMeta(entry.Match))
-			if err != nil {
-				continue
-			}
-			re = compiled
+		rule := ompSanitizationPreset(entry.Match, entry.Replacement, false)
+		if !rule.asciiOnly && rule.re == nil {
+			continue
 		}
-		byLower[lower] = ompSanitizationRule{
-			match:         entry.Match,
-			lowerMatch:    lower,
-			replacement:   entry.Replacement,
-			caseSensitive: false,
-			asciiOnly:     ascii,
-			re:            re,
-		}
+		byLower[rule.lowerMatch] = rule
 	}
 	rules := make([]ompSanitizationRule, 0, len(byLower))
 	for _, rule := range byLower {

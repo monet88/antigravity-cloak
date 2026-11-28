@@ -443,3 +443,51 @@ func TestRewriteOMPConversationProseNilCacheSanitizesRemindersOnly(t *testing.T)
 		t.Errorf("role:tool unexpectedly mutated with nil cache: %q", got)
 	}
 }
+
+// Issue #71 hardening: non-ASCII case-insensitive built-in presets must compile
+// a case-insensitive prefix regex just like operator entries so Unicode strings
+// (e.g. accented letters or em-dashes) match instead of silently failing.
+func TestOMPSanitizationPresetCompilesNonASCIICaseInsensitiveRegex(t *testing.T) {
+	ciRule := ompSanitizationPreset("Règle — OMP", "Neutral", false)
+	csRule := ompSanitizationPreset("Règle — Exact", "Exact", true)
+	rules := []ompSanitizationRule{csRule, ciRule}
+
+	for _, tc := range []struct {
+		name        string
+		in          string
+		want        string
+		wantChanged bool
+	}{
+		{
+			name:        "non-ascii case-insensitive lowercase match",
+			in:          "prefix règle — omp suffix",
+			want:        "prefix Neutral suffix",
+			wantChanged: true,
+		},
+		{
+			name:        "non-ascii case-insensitive uppercase match",
+			in:          "prefix RÈGLE — OMP suffix",
+			want:        "prefix Neutral suffix",
+			wantChanged: true,
+		},
+		{
+			name:        "non-ascii case-sensitive exact match",
+			in:          "prefix Règle — Exact suffix",
+			want:        "prefix Exact suffix",
+			wantChanged: true,
+		},
+		{
+			name:        "non-ascii case-sensitive wrong case untouched",
+			in:          "prefix règle — exact suffix",
+			want:        "prefix règle — exact suffix",
+			wantChanged: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, changed := sanitizeOMPPromptText(tc.in, rules)
+			if changed != tc.wantChanged || got != tc.want {
+				t.Fatalf("sanitizeOMPPromptText(%q) = (%q, %v), want (%q, %v)", tc.in, got, changed, tc.want, tc.wantChanged)
+			}
+		})
+	}
+}
