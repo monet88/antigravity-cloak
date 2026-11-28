@@ -11,7 +11,7 @@ Two-way, client-owned substitution that disguises a supported client's own ident
 _Avoid_: Prompt sanitization, keyword scrubbing, competitor masking
 
 **Inbound Sanitization**:
-One-way, request-only literal rewriting that removes or neutralizes upstream-rejected signatures and embedded third-party references on eligible Oh My Pi `agy/*` routes without reversing them on responses.
+One-way, request-only literal rewriting that removes or neutralizes upstream-rejected signatures and embedded third-party references on eligible Oh My Pi routes matching `model_prefixes` (or all models when empty) without reversing them on responses.
 _Avoid_: Brand rewriting, bidirectional cloaking
 
 **Tool Cloaking**:
@@ -25,11 +25,11 @@ _Avoid_: Brand prose, free text
 ### Routes & Authority
 
 **ProtectedAGY**:
-Fail-closed Oh My Pi route triggered by an explicit `X-Cloak-Client` OMP marker targeting an `agy/*` model, enforcing full tool cloaking, terminal brand rewriting, inbound sanitization, and request-scoped reversal, or rejecting with HTTP 503.
+Fail-closed Oh My Pi route triggered by an explicit `X-Cloak-Client` OMP marker targeting a model matching `model_prefixes` (or any model when empty), enforcing full tool cloaking, terminal brand rewriting, inbound sanitization, and request-scoped reversal, or rejecting with HTTP 503.
 _Avoid_: Legacy OMP route, generic model gate
 
 **ExplicitOMPNonAGYBypass**:
-Durable zero-mutation route triggered by an explicit `X-Cloak-Client` OMP marker targeting a non-`agy/*` model, consuming only the control header while leaving request, response, and stream bodies byte-for-byte unchanged.
+Durable zero-mutation route triggered by an explicit `X-Cloak-Client` OMP marker targeting a model outside `model_prefixes`, consuming only the control header while leaving request, response, and stream bodies byte-for-byte unchanged.
 _Avoid_: Fallback route, model-gate skip
 
 **Safe Mapping Set**:

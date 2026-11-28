@@ -337,15 +337,15 @@ func uncloakJSONNodeOpt(node any, uncloakTable map[string]string, sourceFormat s
 }
 
 // rewriteRequestBodyForClient rewrites brand text, optionally sanitizes inbound
-// Oh My Pi system/developer prompt text on agy/* routes, and cloaks tool names.
+// Oh My Pi system/developer prompt text on routes matching model_prefixes, and cloaks tool names.
 // When forcedClient is non-empty (a validated explicit X-Cloak-Client override
 // or verified User-Agent evidence), that client's mapping table is used
 // deterministically instead of body-based detection. Both brand rewriting and
 // tool cloaking only run when a supported client has been resolved; if no
 // supported client is resolved, the request body is returned unmutated.
 //
-// runOMPPromptSanitization (only the User-Agent-resolved Oh My Pi agy/* legacy
-// path; callers compute the gate because only they hold the request context)
+// runOMPPromptSanitization (only the User-Agent-resolved Oh My Pi legacy path
+// on routes matching model_prefixes; callers compute the gate because only they hold the request context)
 // splits the conversation pass around sanitizeOMPPrompt: brand prose first,
 // sanitization second, tool-alias prose last.
 func rewriteRequestBodyForClient(body []byte, sourceFormat string, forcedClient string, runOMPPromptSanitization bool) ([]byte, bool, string) {
@@ -857,7 +857,7 @@ func rewriteSystemBlockProse(value any, mappings []rewriteMapping) (any, bool) {
 }
 
 // rewriteOMPConversationProse is the Oh My Pi tool-alias prose pass over the
-// conversation, shared by the Protected OMP and User-Agent OMP agy/* routes. It
+// conversation, shared by the Protected OMP and User-Agent OMP routes matching model_prefixes. It
 // keeps the user-turn contract (only the client's own <system-reminder> spans
 // and tool_result payloads) and cloaks prose fields of the other roles, while
 // structural fields and tool arguments stay untouched.

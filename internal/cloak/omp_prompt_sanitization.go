@@ -1,7 +1,7 @@
 package cloak
 
 // Issue #59 (extending ADR 0003): inbound-only Oh My Pi system/developer prompt
-// sanitization for Google Cloud Code / Antigravity (`agy/*`) routes.
+// sanitization for routes matching `model_prefixes` (empty = all models).
 //
 // Rewrites exact `<system-conventions>` / `</system-conventions>` tags,
 // case-insensitive Oh My Pi RFC 2119 normative header signatures, and Oh My Pi's

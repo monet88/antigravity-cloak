@@ -266,10 +266,10 @@ and existing harnesses for cases the OMP UI cannot construct. The
 tool results and therefore cannot replace section 3. The root Go suite is an
 offline contract/lifecycle harness, not proof of a live upstream execution.
 
-- [ ] Explicit OMP on `agy/` activates ProtectedAGY even when generic model
-  prefixes exclude it. Verify marker consumption and request/stream cloaking.
-- [ ] Explicit OMP on a configured non-`agy/` route consumes the marker but
-  preserves tool names and brand content across request and response/stream.
+- [ ] Explicit OMP on a model matching configured `model_prefixes` (or any model
+  when empty) activates ProtectedAGY. Verify marker consumption and request/stream cloaking.
+- [ ] Explicit OMP on a model outside configured `model_prefixes` consumes the
+  marker but preserves tool names and brand content across request and response/stream.
 - [ ] Validate all accepted marker aliases: `oh_my_pi`, `omp`, `oh-my-pi`.
 - [ ] Invalid protected admission (including declaration final-base collisions)
   returns the specified exact 503 `omp_cloak_required` response with **zero
