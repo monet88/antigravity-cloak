@@ -417,8 +417,20 @@ func TestRewriteOMPConversationProseNilCacheSanitizesRemindersOnly(t *testing.T)
 	}
 
 	// Empty sanitizeRules with nil cache must be a pure no-op.
-	if changed := rewriteOMPConversationProse(makeRoot(), nil, nil); changed {
+	noOpRoot := makeRoot()
+	before, err := json.Marshal(noOpRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed := rewriteOMPConversationProse(noOpRoot, nil, nil); changed {
 		t.Fatal("expected changed=false when cached==nil and sanitizeRules==nil")
+	}
+	after, err := json.Marshal(noOpRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("expected no mutation when cached==nil and sanitizeRules==nil:\nbefore: %s\nafter:  %s", before, after)
 	}
 
 	rules := activeFilterConfig().ompSanitizationRules

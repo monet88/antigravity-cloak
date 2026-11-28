@@ -30,13 +30,13 @@ A subsequent audit of Oh My Pi `v19.2.1` prompts and tool declarations (Spec #68
 Issues #69, #70, #71) identified three additional gaps addressed in
 [ADR 0006](../adr/0006-omp-inbound-sanitization-surfaces-and-v19-presets.md):
 
-4. Nine additional third-party and harness-signature preset groups (12
-   case-insensitive literal rules, including the Tier 1 `omp://` harness-docs
-   bullet and ``, `CLAUDE.md`, `.cursorrules` `` list, plus security cloud/OAuth
-   labels, Ratchet attribution, Anthropic usage wrap-up prefix, agent-architect
-   `CLAUDE.md` phrases, and the `scan-coordinator` HTML derivation comment)
-   required one-way **Inbound Sanitization** without polluting OMP's two-way
-   **Brand Rewriting** table.
+4. Eight additional third-party and harness-signature preset groups (nine
+   v19.2.1 patterns, 12 case-insensitive literal rules, including the Tier 1
+   `omp://` harness-docs bullet and ``, `CLAUDE.md`, `.cursorrules` `` list,
+   plus security cloud/OAuth labels, Ratchet attribution, Anthropic usage
+   wrap-up prefix, agent-architect `CLAUDE.md` phrases, and the
+   `scan-coordinator` HTML derivation comment) required one-way **Inbound
+   Sanitization** without polluting OMP's two-way **Brand Rewriting** table.
 5. **Inbound Sanitization** previously visited only top-level `system` and
    `system`/`developer` messages, missing tool descriptions, JSON Schema
    `description`/`title` fields, and `<system-reminder>` spans in `user` turns.
@@ -193,8 +193,9 @@ live-reconfigurable flat `omp_prompt_sanitizations` setting
     Surfaces** (tools, JSON Schema, fused `<system-reminder>` pass), strict
     `brand -> sanitize -> tool-alias prose` ordering, conversation/literal
     exclusions, negative gates, and non-reversal.
-  - `issue71_omp_v19_presets_test.go`: all 9 OMP v19.2.1 built-in preset groups
-    across OpenAI & Anthropic (`ProtectedAGY` and `User-Agent: omp/...`,
+  - `issue71_omp_v19_presets_test.go`: all 8 OMP v19.2.1 built-in preset groups
+    (9 v19.2.1 patterns, 12 case-insensitive literal rules) across OpenAI &
+    Anthropic (`ProtectedAGY` and `User-Agent: omp/...`,
     configured and empty `model_prefixes`), CRLF/LF bullet stripping, post-brand
     & pre-brand `scan-coordinator` comments, case-insensitive non-cascading
     operator overrides, verbatim **Operational Identifiers**, and response/SSE
