@@ -41,8 +41,10 @@ Issues #69, #70, #71) identified three additional gaps addressed in
    `system`/`developer` messages, missing tool descriptions, JSON Schema
    `description`/`title` fields, and `<system-reminder>` spans in `user` turns.
 6. `ProtectedAGY` previously skipped **Brand Rewriting** on **Machine-Generated
-   Conversation Turns** (`role: "tool"`, `tool_result`, `<system-reminder>`, and
-   `assistant` `text`/`thinking`), diverging from `User-Agent: omp/...`.
+   Conversation Turns** (`role: "tool"`, `tool_result` text blocks, and
+   `assistant` `text`/`thinking` blocks) and `<system-reminder>`
+   **Harness-Authored Surface** spans inside `user` turns, diverging from
+   `User-Agent: omp/...`.
 
 To allow operators to adapt immediately without rebuilding the CGO binary or
 restarting the container if upstream signatures evolve, the plugin exposes a
@@ -78,21 +80,22 @@ live-reconfigurable flat `omp_prompt_sanitizations` setting
      Machine-Generated Conversation Turns (`rewriteProtectedBrand` on
      `ProtectedAGY`, or pre-sanitization brand passes in
      `rewriteRequestBodyForClient` on `User-Agent: omp/...`).
-  2. **`sanitizeOMPPrompt(rootMap, sourceFormat)`** sanitizes top-level `system`,
-     `system`/`developer` messages (`text`/`input_text` blocks), and tool
-     declarations via `rewriteToolProse` (visiting `description` and JSON Schema
-     `description`/`title` while skipping `schemaLiteralKeys` and still
-     descending `schemaDictionaryKeys` such as `properties`, `$defs`, and
-     `definitions`).
+  2. **`sanitizeOMPPrompt(rootMap, sourceFormat, sanitizationRules)`** sanitizes
+     top-level `system`, `system`/`developer` messages (`text`/`input_text`
+     blocks), and tool declarations via `rewriteToolsProse` -> `rewriteToolProse`
+     (visiting `description` and JSON Schema `description`/`title` while
+     skipping `schemaLiteralKeys` and still descending `schemaDictionaryKeys`
+     such as `properties`, `$defs`, and `definitions`), using one atomic
+     `ompSanitizationRules` snapshot captured per request (ADR 0001).
   3. **Tool-alias prose & fused `<system-reminder>` pass**: alias-only
      `rewriteToolDescriptions(rootMap, nil, cachedCloak, sourceFormat)` runs on
-     tool declarations, and `rewriteOMPConversationProse(rootMap, cachedCloak, sanitizeReminders)`
+     tool declarations, and `rewriteOMPConversationProse(rootMap, cachedCloak, sanitizationRules)`
      runs a **fused single-pass** `sanitize -> tool-alias` rewrite inside each
-     `user` `<system-reminder>` span (so sanitization rules that strip or rewrite
-     `<system-reminder>` tags cannot bypass tool-alias cloaking or bleed into
-     surrounding **User-Typed Turns**), while keeping `tool_result`, `assistant`,
-     `role: "tool"`, and already-sanitized `system`/`developer` messages
-     strictly alias-only.
+     `user` `<system-reminder>` span using that same per-request rule snapshot
+     (so sanitization rules that strip or rewrite `<system-reminder>` tags
+     cannot bypass tool-alias cloaking or bleed into surrounding **User-Typed
+     Turns**), while keeping `tool_result`, `assistant`, `role: "tool"`, and
+     already-sanitized `system`/`developer` messages strictly alias-only.
 - **Eligible routes**:
   1. `ProtectedAGY`: explicit OMP `X-Cloak-Client` marker plus a model matching
      `model_prefixes` (empty = all models).
@@ -184,7 +187,8 @@ live-reconfigurable flat `omp_prompt_sanitizations` setting
 
 - **ABI-seam regression suites** (`handlePluginCall`):
   - `issue69_protected_agy_brand_parity_test.go`: `ProtectedAGY` brand parity across
-    **Machine-Generated Conversation Turns** and response/stream round-trips.
+    **Machine-Generated Conversation Turns**, `<system-reminder>` spans, and
+    response/stream round-trips.
   - `issue70_inbound_sanitization_surfaces_test.go`: expanded **Harness-Authored
     Surfaces** (tools, JSON Schema, fused `<system-reminder>` pass), strict
     `brand -> sanitize -> tool-alias prose` ordering, conversation/literal

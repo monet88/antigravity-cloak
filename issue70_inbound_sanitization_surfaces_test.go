@@ -70,24 +70,6 @@ func TestIssue70_ToolAndSchemaSanitizationSurfaces(t *testing.T) {
 		}
 	}
 
-	makeTool := func(format string) map[string]any {
-		if format == "openai" {
-			return map[string]any{
-				"type": "function",
-				"function": map[string]any{
-					"name":        "read",
-					"description": rawCombined,
-					"parameters":  makeSchema(),
-				},
-			}
-		}
-		return map[string]any{
-			"name":         "read",
-			"description":  rawCombined,
-			"input_schema": makeSchema(),
-		}
-	}
-
 	for _, tc := range []struct {
 		name    string
 		format  string
@@ -163,7 +145,7 @@ omp_prompt_sanitizations:
 				"messages": []any{
 					map[string]any{"role": "developer", "content": rawCombined},
 				},
-				"tools": []any{makeTool(tc.format)},
+				"tools": []any{makeTool(tc.format, "read", rawCombined, makeSchema())},
 			}
 
 			res := callPluginABI[pluginapi.RequestInterceptRequest, pluginapi.RequestInterceptResponse](
@@ -631,8 +613,8 @@ omp_prompt_sanitizations:
 `
 	)
 
-	makeTool := func(format string) map[string]any {
-		schema := map[string]any{
+	makeSchema := func() map[string]any {
+		return map[string]any{
 			"type":        "object",
 			"title":       inputText,
 			"description": inputText,
@@ -644,21 +626,6 @@ omp_prompt_sanitizations:
 					"default":     inputText,
 				},
 			},
-		}
-		if format == "openai" {
-			return map[string]any{
-				"type": "function",
-				"function": map[string]any{
-					"name":        "bash",
-					"description": inputText,
-					"parameters":  schema,
-				},
-			}
-		}
-		return map[string]any{
-			"name":         "bash",
-			"description":  inputText,
-			"input_schema": schema,
 		}
 	}
 
@@ -696,7 +663,7 @@ omp_prompt_sanitizations:
 						map[string]any{"role": "assistant", "content": inputText},
 						map[string]any{"role": "tool", "name": "bash", "tool_call_id": "call_1", "content": inputText},
 					},
-					"tools": []any{makeTool(format)},
+					"tools": []any{makeTool(format, "bash", inputText, makeSchema())},
 				}
 
 				res := callPluginABI[pluginapi.RequestInterceptRequest, pluginapi.RequestInterceptResponse](
@@ -884,22 +851,7 @@ omp_prompt_sanitizations:
 					"p": map[string]any{"type": "string", "description": rawSig},
 				},
 			}
-			if format == "openai" || format == "openai-response" {
-				tools = append(tools, map[string]any{
-					"type": "function",
-					"function": map[string]any{
-						"name":        name,
-						"description": rawSig,
-						"parameters":  schema,
-					},
-				})
-			} else {
-				tools = append(tools, map[string]any{
-					"name":         name,
-					"description":  rawSig,
-					"input_schema": schema,
-				})
-			}
+			tools = append(tools, makeTool(format, name, rawSig, schema))
 		}
 		return map[string]any{
 			"system": rawSig,
@@ -1275,23 +1227,6 @@ omp_prompt_sanitizations:
 }
 
 func TestIssue70_SystemReminderFusedSanitizeAndAlias(t *testing.T) {
-	makeTool := func(format, name string) map[string]any {
-		schema := map[string]any{"type": "object"}
-		if format == "openai" || format == "openai-response" {
-			return map[string]any{
-				"type": "function",
-				"function": map[string]any{
-					"name":       name,
-					"parameters": schema,
-				},
-			}
-		}
-		return map[string]any{
-			"name":         name,
-			"input_schema": schema,
-		}
-	}
-
 	// Case 1: rewriting <system-reminder> / </system-reminder> via
 	// omp_prompt_sanitizations must STILL cloak declared tools inside the span
 	// on both OpenAI and Anthropic carriers and both ProtectedAGY and UA OMP routes.
@@ -1352,10 +1287,10 @@ omp_prompt_sanitizations:
 							map[string]any{"role": "tool", "name": "bash", "tool_call_id": "call_1", "content": machineRaw},
 						},
 						"tools": []any{
-							makeTool(format, "bash"),
-							makeTool(format, "hub"),
-							makeTool(format, "custom_alias_tool"),
-							makeTool(format, "custom_probe"),
+							makeTool(format, "bash", "", nil),
+							makeTool(format, "hub", "", nil),
+							makeTool(format, "custom_alias_tool", "", nil),
+							makeTool(format, "custom_probe", "", nil),
 						},
 					}
 
@@ -1458,7 +1393,7 @@ omp_prompt_sanitizations:
 								},
 							},
 						},
-						"tools": []any{makeTool(format, "bash")},
+						"tools": []any{makeTool(format, "bash", "", nil)},
 					}
 
 					res := callPluginABI[pluginapi.RequestInterceptRequest, pluginapi.RequestInterceptResponse](
@@ -1642,7 +1577,7 @@ omp_prompt_sanitizations:
 					"messages": []any{
 						map[string]any{"role": "user", "content": rawReminder},
 					},
-					"tools": []any{makeTool(tc.format, "bash")},
+					"tools": []any{makeTool(tc.format, "bash", "", nil)},
 				}
 				body := mustMarshalJSONBytes(t, root)
 				res := callPluginABI[pluginapi.RequestInterceptRequest, pluginapi.RequestInterceptResponse](

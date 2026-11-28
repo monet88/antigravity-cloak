@@ -401,11 +401,12 @@ func rewriteRequestBodyForClient(body []byte, sourceFormat string, forcedClient 
 			if rewriteSystemDeveloperMessages(rootMap, true, brandText) {
 				changed = true
 			}
-			if rewriteMachineConversationTurns(rootMap, brandText) {
+			if rewriteOMPConversationBrandTurns(rootMap, brandText) {
 				changed = true
 			}
 		}
-		if sanitizeOMPPrompt(rootMap, sourceFormat) {
+		sanitizationRules := cfg.ompSanitizationRules
+		if sanitizeOMPPrompt(rootMap, sourceFormat, sanitizationRules) {
 			changed = true
 		}
 		if cachedCloak != nil {
@@ -413,7 +414,7 @@ func rewriteRequestBodyForClient(body []byte, sourceFormat string, forcedClient 
 				changed = true
 			}
 		}
-		if rewriteOMPConversationProse(rootMap, cachedCloak, runOMPPromptSanitization) {
+		if rewriteOMPConversationProse(rootMap, cachedCloak, sanitizationRules) {
 			changed = true
 		}
 	} else {
@@ -584,27 +585,34 @@ func cloakToolNames(body map[string]any, cloakTable map[string]string, sourceFor
 }
 
 func rewriteToolDescriptions(root map[string]any, mappings []rewriteMapping, cached *cachedCloakPatterns, sourceFormat string) bool {
-	changed := false
-	toolsRaw, ok := root["tools"].([]any)
+	// The tool's own description is machine-generated prose too, and so is
+	// the parameter help inside the JSON Schema one or two levels below it.
+	// Claude Code ships tools whose parameter description names the client
+	// home directory (~/.claude/scheduled_tasks.json), so a top-level-only
+	// walk left that sitting in the payload. Both take this pass's text
+	// rule - the brand mappings plus the request-scoped tool aliases - and
+	// the schema is walked rather than re-serialized, so key order and
+	// nesting survive.
+	return rewriteToolsProse(root, sourceFormat, func(s string) (string, bool) {
+		return rewriteDescriptiveText(s, mappings, cached)
+	})
+}
+
+// rewriteToolsProse applies rewrite to the descriptive prose (top-level
+// description and JSON Schema description/title fields) of every tool
+// declaration in rootMap["tools"].
+func rewriteToolsProse(rootMap map[string]any, sourceFormat string, rewrite func(string) (string, bool)) bool {
+	toolsRaw, ok := rootMap["tools"].([]any)
 	if !ok {
 		return false
 	}
+	changed := false
 	for _, tRaw := range toolsRaw {
 		tMap, ok := tRaw.(map[string]any)
 		if !ok {
 			continue
 		}
-		// The tool's own description is machine-generated prose too, and so is
-		// the parameter help inside the JSON Schema one or two levels below it.
-		// Claude Code ships tools whose parameter description names the client
-		// home directory (~/.claude/scheduled_tasks.json), so a top-level-only
-		// walk left that sitting in the payload. Both take this pass's text
-		// rule - the brand mappings plus the request-scoped tool aliases - and
-		// the schema is walked rather than re-serialized, so key order and
-		// nesting survive.
-		if rewriteToolProse(tMap, sourceFormat, func(s string) (string, bool) {
-			return rewriteDescriptiveText(s, mappings, cached)
-		}) {
+		if rewriteToolProse(tMap, sourceFormat, rewrite) {
 			changed = true
 		}
 	}
@@ -848,12 +856,13 @@ func rewriteSystemBlockProse(value any, mappings []rewriteMapping) (any, bool) {
 	}
 }
 
-// rewriteMachineConversationTurns applies fn to every machine-generated
-// conversation turn carrier: <system-reminder> spans and tool_result text
-// blocks inside user turns, assistant text/thinking blocks, and OpenAI
-// role:"tool" text blocks. Structural fields, tool arguments, and User-Typed
-// Turns outside <system-reminder> stay byte-for-byte untouched.
-func rewriteMachineConversationTurns(root map[string]any, fn func(string) (string, bool)) bool {
+// rewriteOMPConversationBrandTurns applies fn to OMP's brand-rewritable
+// conversation carriers: Machine-Generated Conversation Turns (OpenAI
+// role:"tool" text blocks, Anthropic tool_result text blocks, and assistant
+// text/thinking blocks) plus <system-reminder> Harness-Authored Surface spans
+// inside user turns. Structural fields, tool arguments, and User-Typed Turns
+// outside <system-reminder> stay byte-for-byte untouched.
+func rewriteOMPConversationBrandTurns(root map[string]any, fn func(string) (string, bool)) bool {
 	msgsRaw, ok := root["messages"].([]any)
 	if !ok {
 		return false
@@ -894,19 +903,15 @@ func rewriteMachineConversationTurns(root map[string]any, fn func(string) (strin
 // model_prefixes. Both routes finish brand rewriting before calling this pass,
 // so sanitization replacement text is never re-branded.
 //
-// Inside user `<system-reminder>` spans, inbound sanitization (when
-// sanitizeReminders is true) and tool-alias cloaking (when cached != nil) are
-// fused into ONE span pass so sanitization rules that rewrite or strip the
-// `<system-reminder>` wrapper tags still cloak declared tools inside the span
-// and never leak into surrounding User-Typed Turns. Machine-Generated
-// Conversation Turns (`tool_result`, `assistant`, `role: "tool"`) and
-// already-sanitized `system`/`developer` messages remain strictly alias-only
-// (skipped when cached == nil).
-func rewriteOMPConversationProse(root map[string]any, cached *cachedCloakPatterns, sanitizeReminders bool) bool {
-	var sanitizeRules []ompSanitizationRule
-	if sanitizeReminders {
-		sanitizeRules = activeFilterConfig().ompSanitizationRules
-	}
+// Inside user `<system-reminder>` spans, inbound sanitization (using the
+// caller's request-scoped sanitizeRules snapshot when non-empty) and tool-alias
+// cloaking (when cached != nil) are fused into ONE span pass so sanitization
+// rules that rewrite or strip the `<system-reminder>` wrapper tags still cloak
+// declared tools inside the span and never leak into surrounding User-Typed
+// Turns. Machine-Generated Conversation Turns (`tool_result`, `assistant`,
+// `role: "tool"`) and already-sanitized `system`/`developer` messages remain
+// strictly alias-only (skipped when cached == nil).
+func rewriteOMPConversationProse(root map[string]any, cached *cachedCloakPatterns, sanitizeRules []ompSanitizationRule) bool {
 	if cached == nil && len(sanitizeRules) == 0 {
 		return false
 	}

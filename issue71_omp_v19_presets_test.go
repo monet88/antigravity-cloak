@@ -69,8 +69,8 @@ func TestIssue71_BuiltInV19PresetsApplyAcrossAllHarnessSurfaces(t *testing.T) {
 		"Architect: project-specific `AGENTS.md` and `AGENTS.md` coding.",
 	}, "\n")
 
-	makeTool := func(format, desc string) map[string]any {
-		schema := map[string]any{
+	makeSchema := func(desc string) map[string]any {
+		return map[string]any{
 			"type":        "object",
 			"title":       desc,
 			"description": desc,
@@ -85,21 +85,6 @@ func TestIssue71_BuiltInV19PresetsApplyAcrossAllHarnessSurfaces(t *testing.T) {
 					"default":     ", `CLAUDE.md`, `.cursorrules`",
 				},
 			},
-		}
-		if format == "openai" {
-			return map[string]any{
-				"type": "function",
-				"function": map[string]any{
-					"name":        "task",
-					"description": desc,
-					"parameters":  schema,
-				},
-			}
-		}
-		return map[string]any{
-			"name":         "task",
-			"description":  desc,
-			"input_schema": schema,
 		}
 	}
 
@@ -225,7 +210,7 @@ model_prefixes: []
 			root := map[string]any{
 				"system":   rawPayload,
 				"messages": messages,
-				"tools":    []any{makeTool(tc.format, rawPayload)},
+				"tools":    []any{makeTool(tc.format, "task", rawPayload, makeSchema(rawPayload))},
 			}
 
 			res := callPluginABI[pluginapi.RequestInterceptRequest, pluginapi.RequestInterceptResponse](
@@ -425,8 +410,8 @@ func TestIssue71_OperationalIdentifiersPreservedVerbatim(t *testing.T) {
 			"Global memory: ~/.gemini/AGENTS.md."
 	)
 
-	makeTool := func(format, name, desc string) map[string]any {
-		schema := map[string]any{
+	makeSchema := func(desc string) map[string]any {
+		return map[string]any{
 			"type":        "object",
 			"description": desc,
 			"properties": map[string]any{
@@ -436,21 +421,6 @@ func TestIssue71_OperationalIdentifiersPreservedVerbatim(t *testing.T) {
 					"description": desc,
 				},
 			},
-		}
-		if format == "openai" {
-			return map[string]any{
-				"type": "function",
-				"function": map[string]any{
-					"name":        name,
-					"description": desc,
-					"parameters":  schema,
-				},
-			}
-		}
-		return map[string]any{
-			"name":         name,
-			"description":  desc,
-			"input_schema": schema,
 		}
 	}
 
@@ -481,8 +451,8 @@ model_prefixes:
 					map[string]any{"role": "user", "content": "typed\n<system-reminder>" + combinedWithSignatures + "</system-reminder>"},
 				},
 				"tools": []any{
-					makeTool(tc.format, "find", combinedWithSignatures),
-					makeTool(tc.format, "glob", combinedWithSignatures),
+					makeTool(tc.format, "find", combinedWithSignatures, makeSchema(combinedWithSignatures)),
+					makeTool(tc.format, "glob", combinedWithSignatures, makeSchema(combinedWithSignatures)),
 				},
 			}
 

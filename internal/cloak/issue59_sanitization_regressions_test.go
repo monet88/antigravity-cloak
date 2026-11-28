@@ -385,9 +385,9 @@ func TestOMPSanitizationMidRuneTailIntact(t *testing.T) {
 }
 
 // Issue #70 review follow-up: when cachedCloak is nil, rewriteOMPConversationProse
-// must still sanitize <system-reminder> spans when sanitizeReminders is true,
-// skip tool_result/assistant/tool/developer turns without panicking, and return
-// false without mutation when sanitizeReminders is false.
+// must still sanitize <system-reminder> spans using the supplied sanitizeRules
+// snapshot, skip tool_result/assistant/tool/developer turns without panicking,
+// and return false without mutation when sanitizeRules is empty.
 func TestRewriteOMPConversationProseNilCacheSanitizesRemindersOnly(t *testing.T) {
 	isolateOMPMeasurement(t)
 	defer restoreDefaultFilterConfig(t)
@@ -416,14 +416,15 @@ func TestRewriteOMPConversationProseNilCacheSanitizesRemindersOnly(t *testing.T)
 		}
 	}
 
-	// sanitizeReminders == false with nil cache must be a pure no-op.
-	if changed := rewriteOMPConversationProse(makeRoot(), nil, false); changed {
-		t.Fatal("expected changed=false when cached==nil and sanitizeReminders==false")
+	// Empty sanitizeRules with nil cache must be a pure no-op.
+	if changed := rewriteOMPConversationProse(makeRoot(), nil, nil); changed {
+		t.Fatal("expected changed=false when cached==nil and sanitizeRules==nil")
 	}
 
+	rules := activeFilterConfig().ompSanitizationRules
 	root := makeRoot()
-	if changed := rewriteOMPConversationProse(root, nil, true); !changed {
-		t.Fatal("expected changed=true when cached==nil and sanitizeReminders==true")
+	if changed := rewriteOMPConversationProse(root, nil, rules); !changed {
+		t.Fatal("expected changed=true when cached==nil and sanitizeRules is non-empty")
 	}
 	msgs := root["messages"].([]any)
 	if got := msgs[0].(map[string]any)["content"]; got != "Typed <system-conventions>\n<note><conventions>x</conventions></note>" {
@@ -441,6 +442,65 @@ func TestRewriteOMPConversationProseNilCacheSanitizesRemindersOnly(t *testing.T)
 	}
 	if got := msgs[3].(map[string]any)["content"]; got != "<system-reminder><system-conventions>b</system-conventions></system-reminder>" {
 		t.Errorf("role:tool unexpectedly mutated with nil cache: %q", got)
+	}
+}
+
+// Issue #68 review remediation: sanitizeOMPPrompt and rewriteOMPConversationProse
+// must honor the request-scoped rule snapshot passed by the caller rather than
+// re-reading activeFilterConfig(), preventing split-snapshot sanitization under
+// concurrent plugin.reconfigure (ADR 0001).
+func TestOMPSanitizationUsesPassedSnapshotNotLiveConfig(t *testing.T) {
+	isolateOMPMeasurement(t)
+	defer restoreDefaultFilterConfig(t)
+
+	snapshotRules := buildOMPSanitizationRules([]ompSanitizationEntry{
+		{Match: "SNAPSHOT-TOKEN", Replacement: "SNAPSHOT-OUT"},
+	})
+
+	// Mutate live global config to a conflicting rule after snapshot capture.
+	liveCfg := defaultFilterConfig()
+	liveCfg.OMPPromptSanitizations = []ompSanitizationEntry{
+		{Match: "SNAPSHOT-TOKEN", Replacement: "LIVE-DRIFT"},
+	}
+	applyFilterConfig(liveCfg)
+
+	root := map[string]any{
+		"system": "SNAPSHOT-TOKEN",
+		"tools": []any{
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "read",
+					"description": "SNAPSHOT-TOKEN",
+					"parameters":  map[string]any{"type": "object", "title": "SNAPSHOT-TOKEN"},
+				},
+			},
+		},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "<system-reminder>SNAPSHOT-TOKEN</system-reminder>"},
+		},
+	}
+
+	if !sanitizeOMPPrompt(root, "openai", snapshotRules) {
+		t.Fatal("sanitizeOMPPrompt expected changed=true")
+	}
+	if !rewriteOMPConversationProse(root, nil, snapshotRules) {
+		t.Fatal("rewriteOMPConversationProse expected changed=true")
+	}
+
+	if got := root["system"]; got != "SNAPSHOT-OUT" {
+		t.Errorf("system = %q, want SNAPSHOT-OUT", got)
+	}
+	fn := root["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if got := fn["description"]; got != "SNAPSHOT-OUT" {
+		t.Errorf("tool description = %q, want SNAPSHOT-OUT", got)
+	}
+	if got := fn["parameters"].(map[string]any)["title"]; got != "SNAPSHOT-OUT" {
+		t.Errorf("tool schema title = %q, want SNAPSHOT-OUT", got)
+	}
+	reminder := root["messages"].([]any)[0].(map[string]any)["content"]
+	if reminder != "<system-reminder>SNAPSHOT-OUT</system-reminder>" {
+		t.Errorf("user reminder = %q, want <system-reminder>SNAPSHOT-OUT</system-reminder>", reminder)
 	}
 }
 

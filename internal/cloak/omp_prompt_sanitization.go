@@ -121,15 +121,15 @@ func parseOMPPromptSanitizations(value any) ([]ompSanitizationEntry, error) {
 	return entries, nil
 }
 
-// sanitizeOMPPrompt applies the precomputed OMP prompt sanitization rules to
-// top-level `system`, `system`/`developer` message text blocks, and tool
-// declarations (description + JSON Schema description/title, skipping
+// sanitizeOMPPrompt applies a request-scoped OMP prompt sanitization rule
+// snapshot to top-level `system`, `system`/`developer` message text blocks, and
+// tool declarations (description + JSON Schema description/title, skipping
 // literal-bearing subtrees). User `<system-reminder>` spans are sanitized in
-// the fused span pass inside rewriteOMPConversationProse so sanitization rules
-// that rewrite or strip the `<system-reminder>` tags cannot bypass tool-alias
-// cloaking or bleed into surrounding User-Typed Turns.
-func sanitizeOMPPrompt(rootMap map[string]any, sourceFormat string) bool {
-	rules := activeFilterConfig().ompSanitizationRules
+// the fused span pass inside rewriteOMPConversationProse using the same rule
+// snapshot so concurrent reconfiguration cannot split rule views mid-request
+// and rules that rewrite or strip `<system-reminder>` tags cannot bypass
+// tool-alias cloaking or bleed into surrounding User-Typed Turns.
+func sanitizeOMPPrompt(rootMap map[string]any, sourceFormat string, rules []ompSanitizationRule) bool {
 	if len(rules) == 0 {
 		return false
 	}
@@ -144,16 +144,8 @@ func sanitizeOMPPrompt(rootMap map[string]any, sourceFormat string) bool {
 	if rewriteSystemDeveloperMessages(rootMap, true, fn) {
 		changed = true
 	}
-	if toolsRaw, ok := rootMap["tools"].([]any); ok {
-		for _, tRaw := range toolsRaw {
-			tMap, ok := tRaw.(map[string]any)
-			if !ok {
-				continue
-			}
-			if rewriteToolProse(tMap, sourceFormat, fn) {
-				changed = true
-			}
-		}
+	if rewriteToolsProse(rootMap, sourceFormat, fn) {
+		changed = true
 	}
 	return changed
 }

@@ -106,24 +106,16 @@ func rewriteProtectedBrand(rootMap map[string]any, sourceFormat, client string) 
 		}
 	}
 	rewriteSystemDeveloperMessages(rootMap, true, brandText)
-	rewriteMachineConversationTurns(rootMap, brandText)
+	rewriteOMPConversationBrandTurns(rootMap, brandText)
 
-	if toolsRaw, ok := rootMap["tools"].([]any); ok {
-		for _, tRaw := range toolsRaw {
-			tMap, ok := tRaw.(map[string]any)
-			if !ok {
-				continue
-			}
-			// Parameter help is machine-generated tool prose one or two levels
-			// below the tool, so the same brand contract applies there as to the
-			// tool's own description: a nested description or title naming the
-			// client or its home directory must not reach the model literal,
-			// while structure and literal-bearing subtrees stay byte-for-byte.
-			// The request-scoped tool aliases reach these fields through the
-			// alias pass that runs after this one.
-			rewriteToolProse(tMap, sourceFormat, brandText)
-		}
-	}
+	// Parameter help is machine-generated tool prose one or two levels below
+	// the tool, so the same brand contract applies there as to the tool's own
+	// description: a nested description or title naming the client or its home
+	// directory must not reach the model literal, while structure and
+	// literal-bearing subtrees stay byte-for-byte. The request-scoped tool
+	// aliases reach these fields through the alias pass that runs after this
+	// one.
+	rewriteToolsProse(rootMap, sourceFormat, brandText)
 }
 
 // reverseAssistantBrandInJSON restores the resolved client's own reverse table

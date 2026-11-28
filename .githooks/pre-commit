@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-staged_all="$(git diff --cached --name-only --diff-filter=ACM)"
+staged_all="$(git diff --cached --no-renames --name-only --diff-filter=ACMD)"
 [ -n "$staged_all" ] || exit 0
 
 staged_go="$(git diff --cached --name-only --diff-filter=ACM -- '*.go')"
@@ -42,7 +42,7 @@ if [ -n "$staged_py" ]; then
   fi
 fi
 
-staged_md="$(git diff --cached --name-only --diff-filter=ACM -- '*.md')"
+staged_md="$(git diff --cached --no-renames --name-only --diff-filter=ACMD -- '*.md')"
 if [ -n "$staged_md" ] && [ -z "$staged_go" ]; then
-  go test -run TestArchitectureMarkdownLinksAndDocsLayout .
+  go test -count=1 -run TestArchitectureMarkdownLinksAndDocsLayout .
 fi

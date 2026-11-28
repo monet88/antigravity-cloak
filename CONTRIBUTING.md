@@ -34,13 +34,13 @@ docker run --rm -v ${PWD}:/src -w /src golang:1.26.0-bookworm sh -c \
 | Path | What's there |
 | :--- | :--- |
 | `main.go` | Thin root C-ABI entrypoint, method dispatcher, and registration metadata |
-| `plugin_test.go` | Root black-box dispatcher and `registry.json` parity tests |
+| `plugin_test.go`, `issue<N>_*_test.go`, `abi_test_helpers_test.go` | Root `package main` black-box ABI-seam suites, shared ABI helpers, dispatcher tests, and `registry.json` parity checks |
 | `internal/spec/` | Zero-dependency client specification types |
 | `internal/clients/` | Data-only client definitions (`omp`, `claudecode`, `codex`) |
 | `internal/cloak/` | Shared cloaking engine (domain-split `.go` files) and owning `*_test.go` suites |
 | `tests/` | Integration/e2e scripts (not run by `go test`) |
 | `.github/` | CI workflows and release packaging scripts |
-| `docs/` | Categorized specs, ADRs, checklists, guides, research, deployment, debugging |
+| `docs/` | Categorized specs, ADRs, checklists, guides, research, deployment, debugging, wiki |
 | `CONTEXT.md` | Canonical domain reference |
 | `AGENTS.md` | Agent-oriented operational guide |
 | `docs/guides/CODING_STANDARDS.md` | Code conventions and patterns |
@@ -142,6 +142,7 @@ Non-trivial design choices are recorded in `docs/adr/`. Current ADRs:
 | [0003](docs/adr/0003-sanitize-system-prompt-conventions-tag-for-google-upstream.md) | Sanitize system-prompt conventions tag for Google upstream |
 | [0004](docs/adr/0004-cloak-codex-tool-names-by-wire-position.md) | Cloak Codex tool names by wire position |
 | [0005](docs/adr/0005-client-modules-and-shared-cloak-engine.md) | Client modules with shared cloaking mechanics (accepted, implemented in #67) |
+| [0006](docs/adr/0006-omp-inbound-sanitization-surfaces-and-v19-presets.md) | OMP inbound sanitization surfaces, v19.2.1 presets, and ProtectedAGY brand parity |
 
 ## License
 
