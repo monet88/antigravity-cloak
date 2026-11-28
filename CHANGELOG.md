@@ -4,7 +4,7 @@ All notable changes to `antigravity-cloak` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Current releases use semantic version tags; the one-off `v.26.09.06` CalVer release is retained below as historical release metadata.
 
-## [Unreleased]
+## [0.7.8] - 2026-11-28
 
 ### Added
 - **OMP v19.2.1 built-in Inbound Sanitization presets (Spec #68, Issue #71, ADR 0006).** Added 8 built-in case-insensitive preset groups (9 v19.2.1 patterns, 12 literal rules) to `internal/clients/omp/spec.go` alongside the 5 core presets: `omp://` harness-docs CRLF/LF bullets + bare fallback, ``, `CLAUDE.md`, `.cursorrules` ``, `Codex Security cloud` -> `remote security cloud`, `ChatGPT OAuth account` -> `remote OAuth account`, Ratchet `claude-api` attribution, `Claude usage limit reached;` -> `Usage limit reached;`, ``project-specific `CLAUDE.md` `` / ``and `CLAUDE.md` coding`` -> `AGENTS.md` equivalents, and post-brand (`Antigravity`) + pre-brand (`OMP`) variants of the `scan-coordinator` HTML derivation comment, while preserving all Operational Identifiers verbatim.
