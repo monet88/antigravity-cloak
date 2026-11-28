@@ -106,6 +106,7 @@ func rewriteProtectedBrand(rootMap map[string]any, sourceFormat, client string) 
 		}
 	}
 	rewriteSystemDeveloperMessages(rootMap, true, brandText)
+	rewriteMachineConversationTurns(rootMap, brandText)
 
 	if toolsRaw, ok := rootMap["tools"].([]any); ok {
 		for _, tRaw := range toolsRaw {
