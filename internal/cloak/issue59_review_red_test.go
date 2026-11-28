@@ -133,14 +133,11 @@ use_default_keywords: true
 }
 
 // TestProtectedAGYCustomMappingsReachProse asserts the Protected OMP route
-// honours operator custom mappings in the prose surfaces its brand pass owns
-// (system, developer) and that the alias-prose pass still rewrites declared
-// tool names inside assistant/tool prose, while every structural field stays
-// byte-for-byte - the coverage gap the review flagged for Protected custom
-// mappings. The assistant/tool custom word stays verbatim on this route by
-// contract: rewriteProtectedBrand walks system/developer only, and the alias
-// pass keys on declared tool names, not brand words (verified identical on
-// main before this branch).
+// honours operator custom mappings across all brand-rewritten prose surfaces
+// (system, developer, assistant, tool_result) and that the alias-prose pass
+// rewrites declared tool names in the same prose surfaces, while structural
+// fields (cache_control, tool_use.input) and User-Typed Turns stay
+// byte-for-byte intact (ADR 0006 / Issue #69 parity).
 func TestProtectedAGYCustomMappingsReachProse(t *testing.T) {
 	isolateOMPMeasurement(t)
 	HandlePluginLifecycle(lifecycleRequestJSON(t, []byte(`
@@ -211,16 +208,16 @@ custom_mappings:
 		t.Fatalf("Protected tool_use.input was rewritten: %#v", devCall["input"])
 	}
 
-	if asst := msgs[1].(map[string]any)["content"]; asst != "use read_file for the next step, operator-call ran" {
-		t.Fatalf("Protected assistant prose alias contract wrong: %q", asst)
+	if asst := msgs[1].(map[string]any)["content"]; asst != "use read_file for the next step, operator-brand ran" {
+		t.Fatalf("Protected assistant prose brand/alias contract wrong: %q", asst)
 	}
 
 	user := msgs[2].(map[string]any)["content"].([]any)
 	if typed := user[0].(map[string]any)["text"]; typed != "typed operator-call" {
 		t.Fatalf("Protected typed user text was rewritten: %q", typed)
 	}
-	if resultBlock := user[1].(map[string]any)["content"]; resultBlock != "use read_file to verify, operator-call ran" {
-		t.Fatalf("Protected tool_result payload alias contract wrong: %q", resultBlock)
+	if resultBlock := user[1].(map[string]any)["content"]; resultBlock != "use read_file to verify, operator-brand ran" {
+		t.Fatalf("Protected tool_result payload brand/alias contract wrong: %q", resultBlock)
 	}
 }
 
