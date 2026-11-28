@@ -523,7 +523,8 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 
 	cloakProtectedToolNames(rootMap, extendedCloak, format)
 	rewriteProtectedBrand(rootMap, format, "oh_my_pi")
-	if !carriesOpenAIResponses(req.SourceFormat) {
+	sanitizeReminders := !carriesOpenAIResponses(req.SourceFormat)
+	if sanitizeReminders {
 		sanitizeOMPPrompt(rootMap, format)
 	}
 
@@ -541,7 +542,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		ambigRe:    buildCloakAmbiguousRe(extendedCloak),
 	}
 	rewriteToolDescriptions(rootMap, nil, proseCloak, format)
-	rewriteOMPConversationProse(rootMap, proseCloak)
+	rewriteOMPConversationProse(rootMap, proseCloak, sanitizeReminders)
 	if sysVal, ok := rootMap["system"]; ok {
 		if next, c := rewriteProseTextContent(sysVal, func(s string) (string, bool) {
 			return replaceToolNamesInText(s, proseCloak)

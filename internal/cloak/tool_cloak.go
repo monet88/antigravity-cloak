@@ -412,9 +412,9 @@ func rewriteRequestBodyForClient(body []byte, sourceFormat string, forcedClient 
 			if rewriteToolDescriptions(rootMap, nil, cachedCloak, sourceFormat) {
 				changed = true
 			}
-			if rewriteOMPConversationProse(rootMap, cachedCloak) {
-				changed = true
-			}
+		}
+		if rewriteOMPConversationProse(rootMap, cachedCloak, runOMPPromptSanitization) {
+			changed = true
 		}
 	} else {
 		if rewriteToolDescriptions(rootMap, mappings, cachedCloak, sourceFormat) {
@@ -889,21 +889,49 @@ func rewriteMachineConversationTurns(root map[string]any, fn func(string) (strin
 	return changed
 }
 
-// rewriteOMPConversationProse is the Oh My Pi tool-alias-only prose pass over
-// the conversation, shared by the Protected OMP and User-Agent OMP routes
-// matching model_prefixes. Both routes finish brand rewriting and inbound
-// sanitization before calling this pass, so sanitization replacement text is
-// never re-branded while declared tool names still cloak across all roles.
-func rewriteOMPConversationProse(root map[string]any, cached *cachedCloakPatterns) bool {
-	if cached == nil {
+// rewriteOMPConversationProse is the Oh My Pi post-brand conversation pass,
+// shared by the Protected OMP and User-Agent OMP routes matching
+// model_prefixes. Both routes finish brand rewriting before calling this pass,
+// so sanitization replacement text is never re-branded.
+//
+// Inside user `<system-reminder>` spans, inbound sanitization (when
+// sanitizeReminders is true) and tool-alias cloaking (when cached != nil) are
+// fused into ONE span pass so sanitization rules that rewrite or strip the
+// `<system-reminder>` wrapper tags still cloak declared tools inside the span
+// and never leak into surrounding User-Typed Turns. Machine-Generated
+// Conversation Turns (`tool_result`, `assistant`, `role: "tool"`) and
+// already-sanitized `system`/`developer` messages remain strictly alias-only
+// (skipped when cached == nil).
+func rewriteOMPConversationProse(root map[string]any, cached *cachedCloakPatterns, sanitizeReminders bool) bool {
+	var sanitizeRules []ompSanitizationRule
+	if sanitizeReminders {
+		sanitizeRules = activeFilterConfig().ompSanitizationRules
+	}
+	if cached == nil && len(sanitizeRules) == 0 {
 		return false
 	}
 	msgsRaw, ok := root["messages"].([]any)
 	if !ok {
 		return false
 	}
-	aliasFn := func(s string) (string, bool) {
-		return replaceToolNamesInText(s, cached)
+	var aliasFn func(string) (string, bool)
+	if cached != nil {
+		aliasFn = func(s string) (string, bool) {
+			return replaceToolNamesInText(s, cached)
+		}
+	}
+	reminderFn := aliasFn
+	if len(sanitizeRules) > 0 {
+		reminderFn = func(s string) (string, bool) {
+			out, changed := sanitizeOMPPromptText(s, sanitizeRules)
+			if aliasFn != nil {
+				if aliased, ac := aliasFn(out); ac {
+					out = aliased
+					changed = true
+				}
+			}
+			return out, changed
+		}
 	}
 	changed := false
 	for _, mRaw := range msgsRaw {
@@ -917,21 +945,25 @@ func rewriteOMPConversationProse(root map[string]any, cached *cachedCloakPattern
 		}
 		switch role, _ := msg["role"].(string); role {
 		case "user":
-			if next, c := rewriteUserTurnContent(content, aliasFn); c {
+			if next, c := rewriteUserTurnContentParts(content, reminderFn, aliasFn); c {
 				msg["content"] = next
 				changed = true
 			}
 			continue
 		case "assistant":
-			if next, c := rewriteAssistantProse(content, aliasFn); c {
-				msg["content"] = next
-				changed = true
+			if aliasFn != nil {
+				if next, c := rewriteAssistantProse(content, aliasFn); c {
+					msg["content"] = next
+					changed = true
+				}
 			}
 			continue
 		}
-		if next, c := rewriteProseTextContent(content, aliasFn); c {
-			msg["content"] = next
-			changed = true
+		if aliasFn != nil {
+			if next, c := rewriteProseTextContent(content, aliasFn); c {
+				msg["content"] = next
+				changed = true
+			}
 		}
 	}
 	return changed
@@ -1090,13 +1122,20 @@ func rewriteToolResultContentProse(value any, fn func(string) (string, bool)) (a
 // <system-reminder> and tool_result blocks costs nothing in correctness: that
 // text is machine-produced context, not the user's.
 func rewriteUserTurnContent(content any, fn func(string) (string, bool)) (any, bool) {
+	return rewriteUserTurnContentParts(content, fn, fn)
+}
+
+func rewriteUserTurnContentParts(content any, reminderFn, toolResultFn func(string) (string, bool)) (any, bool) {
 	changed := false
 	switch typed := content.(type) {
 	case string:
+		if reminderFn == nil {
+			return content, false
+		}
 		// A bare string turn: the typed message, possibly with the client's
 		// own <system-reminder> block spliced into it. Only the span is
 		// rewritten; the words the user typed around it are theirs.
-		next, c := rewriteSystemReminderSpans(typed, fn)
+		next, c := rewriteSystemReminderSpans(typed, reminderFn)
 		return next, c
 	case []any:
 		for _, blockRaw := range typed {
@@ -1106,21 +1145,27 @@ func rewriteUserTurnContent(content any, fn func(string) (string, bool)) (any, b
 			}
 			switch block["type"] {
 			case "tool_result":
+				if toolResultFn == nil {
+					continue
+				}
 				// A tool result is machine-generated output echoing the alias
 				// names the model was given, so it is rewritten only on its
 				// content, never on the block's identity fields.
-				if next, c := rewriteToolResultContentProse(block["content"], fn); c {
+				if next, c := rewriteToolResultContentProse(block["content"], toolResultFn); c {
 					block["content"] = next
 					changed = true
 				}
 			case "text":
+				if reminderFn == nil {
+					continue
+				}
 				txt, ok := block["text"].(string)
 				if !ok {
 					continue
 				}
 				// Same span-aware rule as the bare-string turn: ordinary text is
-				// untouched, <system-reminder> spans get rewritten via fn.
-				if next, c := rewriteSystemReminderSpans(txt, fn); c {
+				// untouched, <system-reminder> spans get rewritten via reminderFn.
+				if next, c := rewriteSystemReminderSpans(txt, reminderFn); c {
 					block["text"] = next
 					changed = true
 				}

@@ -1273,3 +1273,415 @@ omp_prompt_sanitizations:
 		}
 	})
 }
+
+func TestIssue70_SystemReminderFusedSanitizeAndAlias(t *testing.T) {
+	makeTool := func(format, name string) map[string]any {
+		schema := map[string]any{"type": "object"}
+		if format == "openai" || format == "openai-response" {
+			return map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":       name,
+					"parameters": schema,
+				},
+			}
+		}
+		return map[string]any{
+			"name":         name,
+			"input_schema": schema,
+		}
+	}
+
+	// Case 1: rewriting <system-reminder> / </system-reminder> via
+	// omp_prompt_sanitizations must STILL cloak declared tools inside the span
+	// on both OpenAI and Anthropic carriers and both ProtectedAGY and UA OMP routes.
+	t.Run("tag-rewrite-still-cloaks-tools", func(t *testing.T) {
+		const cfgYAML = `
+use_default_keywords: true
+model_prefixes:
+  - "agy/"
+tool_mappings:
+  oh_my_pi:
+    custom_alias_tool: wp_custom_alias
+omp_prompt_sanitizations:
+  "<system-reminder>": "<note>"
+  "</system-reminder>": "</note>"
+  "custom-harness-sig": "neutral-harness-sig"
+`
+		for _, format := range []string{"openai", "anthropic"} {
+			for _, route := range []struct {
+				name        string
+				headers     http.Header
+				isProtected bool
+			}{
+				{name: "protected-agy", headers: http.Header{"X-Cloak-Client": {"oh_my_pi"}}, isProtected: true},
+				{name: "ua-omp", headers: http.Header{"User-Agent": {"omp/19.2.1"}}, isProtected: false},
+			} {
+				t.Run(format+"/"+route.name, func(t *testing.T) {
+					defer restoreDefaultFilterConfig(t)
+					reconfigurePluginYAML(t, cfgYAML)
+
+					reqID := "issue70-fused-case1-" + format + "-" + route.name
+					defer completePluginRequest(t, reqID)
+
+					const spanBody = "Oh My Pi custom-harness-sig: use bash, use hub, custom_alias_tool, custom_probe"
+					const machineRaw = "<system-reminder>Oh My Pi custom-harness-sig: use bash</system-reminder>"
+					const machineWant = "<system-reminder>Antigravity custom-harness-sig: use run_command</system-reminder>"
+
+					root := map[string]any{
+						"messages": []any{
+							map[string]any{
+								"role":    "user",
+								"content": "User typed: use bash and use hub\n<system-reminder>" + spanBody + "</system-reminder>",
+							},
+							map[string]any{
+								"role": "user",
+								"content": []any{
+									map[string]any{
+										"type": "text",
+										"text": "Typed block: use bash and use hub\n<system-reminder>" + spanBody + "</system-reminder>",
+									},
+									map[string]any{
+										"type":        "tool_result",
+										"tool_use_id": "toolu_1",
+										"content":     machineRaw,
+									},
+								},
+							},
+							map[string]any{"role": "assistant", "content": machineRaw},
+							map[string]any{"role": "tool", "name": "bash", "tool_call_id": "call_1", "content": machineRaw},
+						},
+						"tools": []any{
+							makeTool(format, "bash"),
+							makeTool(format, "hub"),
+							makeTool(format, "custom_alias_tool"),
+							makeTool(format, "custom_probe"),
+						},
+					}
+
+					res := callPluginABI[pluginapi.RequestInterceptRequest, pluginapi.RequestInterceptResponse](
+						t,
+						pluginabi.MethodRequestInterceptBefore,
+						pluginapi.RequestInterceptRequest{
+							RequestID:      reqID,
+							SourceFormat:   format,
+							Model:          "agy/gemini-3.8-flash",
+							RequestedModel: "agy/gemini-3.8-flash",
+							Headers:        route.headers,
+							Body:           mustMarshalJSONBytes(t, root),
+						},
+					)
+					if res.Terminate || len(res.Body) == 0 {
+						t.Fatalf("unexpected result: terminate=%t len=%d resp=%s", res.Terminate, len(res.Body), res.ResponseBody)
+					}
+
+					var got map[string]any
+					mustUnmarshalJSON(t, res.Body, &got)
+
+					wantSpan := "<note>Antigravity neutral-harness-sig: use run_command, use hub, wp_custom_alias, custom_probe</note>"
+					if route.isProtected {
+						tools := got["tools"].([]any)
+						var probeAlias string
+						if format == "openai" {
+							probeAlias, _ = tools[3].(map[string]any)["function"].(map[string]any)["name"].(string)
+						} else {
+							probeAlias, _ = tools[3].(map[string]any)["name"].(string)
+						}
+						if !strings.HasPrefix(probeAlias, "wp_ext_") {
+							t.Fatalf("expected wp_ext_* fallback alias for custom_probe, got %q", probeAlias)
+						}
+						wantSpan = "<note>Antigravity neutral-harness-sig: use run_command, use wp_hub, wp_custom_alias, " + probeAlias + "</note>"
+					}
+
+					msgs := got["messages"].([]any)
+					wantUser0 := "User typed: use bash and use hub\n" + wantSpan
+					if gotUser0 := msgs[0].(map[string]any)["content"]; gotUser0 != wantUser0 {
+						t.Errorf("user[0] string mismatch:\ngot  %q\nwant %q", gotUser0, wantUser0)
+					}
+					user1 := msgs[1].(map[string]any)["content"].([]any)
+					wantUser1Text := "Typed block: use bash and use hub\n" + wantSpan
+					if gotUser1Text := user1[0].(map[string]any)["text"]; gotUser1Text != wantUser1Text {
+						t.Errorf("user[1] text block mismatch:\ngot  %q\nwant %q", gotUser1Text, wantUser1Text)
+					}
+					if gotTR := user1[1].(map[string]any)["content"]; gotTR != machineWant {
+						t.Errorf("tool_result must be alias+brand only (never sanitized):\ngot  %q\nwant %q", gotTR, machineWant)
+					}
+					if gotAsst := msgs[2].(map[string]any)["content"]; gotAsst != machineWant {
+						t.Errorf("assistant must be alias+brand only (never sanitized):\ngot  %q\nwant %q", gotAsst, machineWant)
+					}
+					if gotTool := msgs[3].(map[string]any)["content"]; gotTool != machineWant {
+						t.Errorf("role:tool must be alias+brand only (never sanitized):\ngot  %q\nwant %q", gotTool, machineWant)
+					}
+				})
+			}
+		}
+	})
+
+	// Case 2: stripping </system-reminder> via omp_prompt_sanitizations between
+	// two spans must leave "User typed bash" between them byte-for-byte intact
+	// while both spans sanitize and cloak declared tools.
+	t.Run("strip-close-tag-preserves-user-typed-turn", func(t *testing.T) {
+		const cfgYAML = `
+use_default_keywords: true
+model_prefixes:
+  - "agy/"
+omp_prompt_sanitizations:
+  "</system-reminder>": ""
+  "custom-harness-sig": "neutral-harness-sig"
+`
+		const (
+			rawInput  = "<system-reminder>A custom-harness-sig use bash</system-reminder>\nUser typed bash: use bash and `bash`\n<system-reminder>B custom-harness-sig use bash</system-reminder>"
+			wantInput = "<system-reminder>A neutral-harness-sig use run_command\nUser typed bash: use bash and `bash`\n<system-reminder>B neutral-harness-sig use run_command"
+		)
+		for _, format := range []string{"openai", "anthropic"} {
+			for _, route := range []struct {
+				name    string
+				headers http.Header
+			}{
+				{name: "protected-agy", headers: http.Header{"X-Cloak-Client": {"oh_my_pi"}}},
+				{name: "ua-omp", headers: http.Header{"User-Agent": {"omp/19.2.1"}}},
+			} {
+				t.Run(format+"/"+route.name, func(t *testing.T) {
+					defer restoreDefaultFilterConfig(t)
+					reconfigurePluginYAML(t, cfgYAML)
+
+					reqID := "issue70-fused-case2-" + format + "-" + route.name
+					defer completePluginRequest(t, reqID)
+
+					root := map[string]any{
+						"messages": []any{
+							map[string]any{"role": "user", "content": rawInput},
+							map[string]any{
+								"role": "user",
+								"content": []any{
+									map[string]any{"type": "text", "text": rawInput},
+								},
+							},
+						},
+						"tools": []any{makeTool(format, "bash")},
+					}
+
+					res := callPluginABI[pluginapi.RequestInterceptRequest, pluginapi.RequestInterceptResponse](
+						t,
+						pluginabi.MethodRequestInterceptBefore,
+						pluginapi.RequestInterceptRequest{
+							RequestID:      reqID,
+							SourceFormat:   format,
+							Model:          "agy/gemini-3.8-flash",
+							RequestedModel: "agy/gemini-3.8-flash",
+							Headers:        route.headers,
+							Body:           mustMarshalJSONBytes(t, root),
+						},
+					)
+					if res.Terminate || len(res.Body) == 0 {
+						t.Fatalf("unexpected result: terminate=%t len=%d resp=%s", res.Terminate, len(res.Body), res.ResponseBody)
+					}
+
+					var got map[string]any
+					mustUnmarshalJSON(t, res.Body, &got)
+					msgs := got["messages"].([]any)
+					if gotUser0 := msgs[0].(map[string]any)["content"]; gotUser0 != wantInput {
+						t.Errorf("user[0] string mismatch:\ngot  %q\nwant %q", gotUser0, wantInput)
+					}
+					gotUser1 := msgs[1].(map[string]any)["content"].([]any)[0].(map[string]any)["text"]
+					if gotUser1 != wantInput {
+						t.Errorf("user[1] text block mismatch:\ngot  %q\nwant %q", gotUser1, wantInput)
+					}
+				})
+			}
+		}
+	})
+
+	// Zero-tools edge case: requests with NO declared tools on eligible OMP
+	// routes must still undergo Inbound Sanitization on <system-reminder> spans
+	// while keeping User-Typed Turns, tool_result, and assistant untouched.
+	t.Run("zero-tools-still-sanitizes-reminders", func(t *testing.T) {
+		const cfgYAML = `
+use_default_keywords: false
+model_prefixes:
+  - "agy/"
+omp_prompt_sanitizations:
+  "<system-reminder>": "<note>"
+  "</system-reminder>": "</note>"
+  "custom-harness-sig": "neutral-harness-sig"
+`
+		for _, format := range []string{"openai", "anthropic"} {
+			for _, route := range []struct {
+				name    string
+				headers http.Header
+			}{
+				{name: "protected-agy", headers: http.Header{"X-Cloak-Client": {"oh_my_pi"}}},
+				{name: "ua-omp", headers: http.Header{"User-Agent": {"omp/19.2.1"}}},
+			} {
+				t.Run(format+"/"+route.name, func(t *testing.T) {
+					defer restoreDefaultFilterConfig(t)
+					reconfigurePluginYAML(t, cfgYAML)
+
+					reqID := "issue70-fused-notools-" + format + "-" + route.name
+					defer completePluginRequest(t, reqID)
+
+					const (
+						rawSpan   = "<system-reminder><system-conventions>R</system-conventions> custom-harness-sig</system-reminder>"
+						wantSpan  = "<note><conventions>R</conventions> neutral-harness-sig</note>"
+						rawUntch  = "<system-reminder>custom-harness-sig</system-reminder>"
+						rawUser0  = "User typed <system-conventions> custom-harness-sig\n" + rawSpan
+						wantUser0 = "User typed <system-conventions> custom-harness-sig\n" + wantSpan
+						rawUser1  = "Block typed custom-harness-sig\n" + rawSpan
+						wantUser1 = "Block typed custom-harness-sig\n" + wantSpan
+					)
+
+					root := map[string]any{
+						"messages": []any{
+							map[string]any{"role": "user", "content": rawUser0},
+							map[string]any{
+								"role": "user",
+								"content": []any{
+									map[string]any{"type": "text", "text": rawUser1},
+									map[string]any{"type": "tool_result", "tool_use_id": "toolu_1", "content": rawUntch},
+								},
+							},
+							map[string]any{"role": "assistant", "content": rawUntch},
+						},
+					}
+
+					res := callPluginABI[pluginapi.RequestInterceptRequest, pluginapi.RequestInterceptResponse](
+						t,
+						pluginabi.MethodRequestInterceptBefore,
+						pluginapi.RequestInterceptRequest{
+							RequestID:      reqID,
+							SourceFormat:   format,
+							Model:          "agy/gemini-3.8-flash",
+							RequestedModel: "agy/gemini-3.8-flash",
+							Headers:        route.headers,
+							Body:           mustMarshalJSONBytes(t, root),
+						},
+					)
+					if res.Terminate || len(res.Body) == 0 {
+						t.Fatalf("expected sanitized body without tools, got terminate=%t len=%d resp=%s", res.Terminate, len(res.Body), res.ResponseBody)
+					}
+
+					var got map[string]any
+					mustUnmarshalJSON(t, res.Body, &got)
+					msgs := got["messages"].([]any)
+					if gotUser0 := msgs[0].(map[string]any)["content"]; gotUser0 != wantUser0 {
+						t.Errorf("user[0] mismatch:\ngot  %q\nwant %q", gotUser0, wantUser0)
+					}
+					user1 := msgs[1].(map[string]any)["content"].([]any)
+					if gotUser1 := user1[0].(map[string]any)["text"]; gotUser1 != wantUser1 {
+						t.Errorf("user[1] text block mismatch:\ngot  %q\nwant %q", gotUser1, wantUser1)
+					}
+					if gotTR := user1[1].(map[string]any)["content"]; gotTR != rawUntch {
+						t.Errorf("tool_result unexpectedly sanitized:\ngot  %q\nwant %q", gotTR, rawUntch)
+					}
+					if gotAsst := msgs[2].(map[string]any)["content"]; gotAsst != rawUntch {
+						t.Errorf("assistant unexpectedly sanitized:\ngot  %q\nwant %q", gotAsst, rawUntch)
+					}
+				})
+			}
+		}
+	})
+
+	// Negative gates preserved: model_prefixes mismatch and /v1/responses
+	// (carriesOpenAIResponses == true) must NOT sanitize <system-reminder> spans.
+	t.Run("negative-gates-preserve-reminders", func(t *testing.T) {
+		const cfgYAML = `
+use_default_keywords: true
+model_prefixes:
+  - "agy/"
+omp_prompt_sanitizations:
+  "<system-reminder>": "<note>"
+  "</system-reminder>": "</note>"
+  "custom-harness-sig": "neutral-harness-sig"
+`
+		for _, tc := range []struct {
+			name           string
+			format         string
+			model          string
+			headers        http.Header
+			wantZeroMutate bool
+			wantClearHdr   bool
+		}{
+			{
+				name:           "protected-agy-model-prefix-mismatch",
+				format:         "openai",
+				model:          "openai/gpt-5",
+				headers:        http.Header{"X-Cloak-Client": {"oh_my_pi"}},
+				wantZeroMutate: true,
+				wantClearHdr:   true,
+			},
+			{
+				name:           "ua-omp-model-prefix-mismatch",
+				format:         "openai",
+				model:          "openai/gpt-5",
+				headers:        http.Header{"User-Agent": {"omp/19.2.1"}},
+				wantZeroMutate: true,
+			},
+			{
+				name:         "protected-agy-responses-carrier",
+				format:       "openai-response",
+				model:        "agy/gemini-3.8-flash",
+				headers:      http.Header{"X-Cloak-Client": {"oh_my_pi"}},
+				wantClearHdr: true,
+			},
+			{
+				name:    "ua-omp-responses-carrier",
+				format:  "openai-response",
+				model:   "agy/gemini-3.8-flash",
+				headers: http.Header{"User-Agent": {"omp/19.2.1"}},
+			},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				defer restoreDefaultFilterConfig(t)
+				reconfigurePluginYAML(t, cfgYAML)
+
+				reqID := "issue70-fused-neg-" + tc.name
+				defer completePluginRequest(t, reqID)
+
+				const rawReminder = "<system-reminder>custom-harness-sig use bash</system-reminder>"
+				root := map[string]any{
+					"messages": []any{
+						map[string]any{"role": "user", "content": rawReminder},
+					},
+					"tools": []any{makeTool(tc.format, "bash")},
+				}
+				body := mustMarshalJSONBytes(t, root)
+				res := callPluginABI[pluginapi.RequestInterceptRequest, pluginapi.RequestInterceptResponse](
+					t,
+					pluginabi.MethodRequestInterceptBefore,
+					pluginapi.RequestInterceptRequest{
+						RequestID:      reqID,
+						SourceFormat:   tc.format,
+						Model:          tc.model,
+						RequestedModel: tc.model,
+						Headers:        tc.headers,
+						Body:           body,
+					},
+				)
+				if res.Terminate {
+					t.Fatalf("unexpected terminate: %s", res.ResponseBody)
+				}
+				if tc.wantClearHdr && !reflect.DeepEqual(res.ClearHeaders, []string{"X-Cloak-Client"}) {
+					t.Fatalf("ClearHeaders = %v, want [X-Cloak-Client]", res.ClearHeaders)
+				}
+				if tc.wantZeroMutate {
+					if len(res.Body) != 0 && !bytes.Equal(res.Body, body) {
+						t.Fatalf("expected zero body mutation, got %s", res.Body)
+					}
+					return
+				}
+				if bytes.Contains(res.Body, []byte("<note>")) ||
+					bytes.Contains(res.Body, []byte("</note>")) ||
+					bytes.Contains(res.Body, []byte("neutral-harness-sig")) {
+					t.Fatalf("negative route unexpectedly sanitized <system-reminder>: %s", res.Body)
+				}
+				var got map[string]any
+				mustUnmarshalJSON(t, res.Body, &got)
+				gotUser := got["messages"].([]any)[0].(map[string]any)["content"]
+				wantUser := "<system-reminder>custom-harness-sig use run_command</system-reminder>"
+				if gotUser != wantUser {
+					t.Errorf("responses carrier reminder mismatch:\ngot  %q\nwant %q", gotUser, wantUser)
+				}
+			})
+		}
+	})
+}

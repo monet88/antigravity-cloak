@@ -124,10 +124,12 @@ func parseOMPPromptSanitizations(value any) ([]ompSanitizationEntry, error) {
 }
 
 // sanitizeOMPPrompt applies the precomputed OMP prompt sanitization rules to
-// all Harness-Authored Surfaces: top-level `system`, `system`/`developer`
-// message text blocks, tool declarations (description + JSON Schema
-// description/title, skipping literal-bearing subtrees), and `<system-reminder>`
-// spans inside `user` turns.
+// top-level `system`, `system`/`developer` message text blocks, and tool
+// declarations (description + JSON Schema description/title, skipping
+// literal-bearing subtrees). User `<system-reminder>` spans are sanitized in
+// the fused span pass inside rewriteOMPConversationProse so sanitization rules
+// that rewrite or strip the `<system-reminder>` tags cannot bypass tool-alias
+// cloaking or bleed into surrounding User-Typed Turns.
 func sanitizeOMPPrompt(rootMap map[string]any, sourceFormat string) bool {
 	rules := activeFilterConfig().ompSanitizationRules
 	if len(rules) == 0 {
@@ -152,52 +154,6 @@ func sanitizeOMPPrompt(rootMap map[string]any, sourceFormat string) bool {
 			}
 			if rewriteToolProse(tMap, sourceFormat, fn) {
 				changed = true
-			}
-		}
-	}
-	if rewriteUserSystemReminderMessages(rootMap, fn) {
-		changed = true
-	}
-	return changed
-}
-
-// rewriteUserSystemReminderMessages applies fn strictly inside
-// `<system-reminder>` spans of `role: "user"` messages (`string` content or
-// `[]any` `type: "text"` blocks only). User-Typed Turns outside spans,
-// `tool_result`, `role: "tool"`, `assistant`, and non-text blocks stay untouched.
-func rewriteUserSystemReminderMessages(rootMap map[string]any, fn func(string) (string, bool)) bool {
-	messages, ok := rootMap["messages"].([]any)
-	if !ok {
-		return false
-	}
-	changed := false
-	for _, raw := range messages {
-		msg, ok := raw.(map[string]any)
-		if !ok || msg["role"] != "user" {
-			continue
-		}
-		content, exists := msg["content"]
-		if !exists {
-			continue
-		}
-		switch typed := content.(type) {
-		case string:
-			if next, one := rewriteSystemReminderSpans(typed, fn); one {
-				msg["content"] = next
-				changed = true
-			}
-		case []any:
-			for _, blockRaw := range typed {
-				block, ok := blockRaw.(map[string]any)
-				if !ok || block["type"] != "text" {
-					continue
-				}
-				if text, ok := block["text"].(string); ok {
-					if next, one := rewriteSystemReminderSpans(text, fn); one {
-						block["text"] = next
-						changed = true
-					}
-				}
 			}
 		}
 	}

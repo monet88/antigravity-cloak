@@ -383,3 +383,63 @@ func TestOMPSanitizationMidRuneTailIntact(t *testing.T) {
 		t.Fatalf("output is not valid UTF-8: %q", out)
 	}
 }
+
+// Issue #70 review follow-up: when cachedCloak is nil, rewriteOMPConversationProse
+// must still sanitize <system-reminder> spans when sanitizeReminders is true,
+// skip tool_result/assistant/tool/developer turns without panicking, and return
+// false without mutation when sanitizeReminders is false.
+func TestRewriteOMPConversationProseNilCacheSanitizesRemindersOnly(t *testing.T) {
+	isolateOMPMeasurement(t)
+	defer restoreDefaultFilterConfig(t)
+
+	cfg := defaultFilterConfig()
+	cfg.OMPPromptSanitizations = []ompSanitizationEntry{
+		{Match: "<system-reminder>", Replacement: "<note>"},
+		{Match: "</system-reminder>", Replacement: "</note>"},
+	}
+	applyFilterConfig(cfg)
+
+	makeRoot := func() map[string]any {
+		return map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "Typed <system-conventions>\n<system-reminder><system-conventions>x</system-conventions></system-reminder>"},
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "<system-reminder><system-conventions>y</system-conventions></system-reminder>"},
+						map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": "<system-reminder><system-conventions>z</system-conventions></system-reminder>"},
+					},
+				},
+				map[string]any{"role": "assistant", "content": "<system-reminder><system-conventions>a</system-conventions></system-reminder>"},
+				map[string]any{"role": "tool", "content": "<system-reminder><system-conventions>b</system-conventions></system-reminder>"},
+			},
+		}
+	}
+
+	// sanitizeReminders == false with nil cache must be a pure no-op.
+	if changed := rewriteOMPConversationProse(makeRoot(), nil, false); changed {
+		t.Fatal("expected changed=false when cached==nil and sanitizeReminders==false")
+	}
+
+	root := makeRoot()
+	if changed := rewriteOMPConversationProse(root, nil, true); !changed {
+		t.Fatal("expected changed=true when cached==nil and sanitizeReminders==true")
+	}
+	msgs := root["messages"].([]any)
+	if got := msgs[0].(map[string]any)["content"]; got != "Typed <system-conventions>\n<note><conventions>x</conventions></note>" {
+		t.Errorf("user[0] mismatch: %q", got)
+	}
+	user1 := msgs[1].(map[string]any)["content"].([]any)
+	if got := user1[0].(map[string]any)["text"]; got != "<note><conventions>y</conventions></note>" {
+		t.Errorf("user[1] text mismatch: %q", got)
+	}
+	if got := user1[1].(map[string]any)["content"]; got != "<system-reminder><system-conventions>z</system-conventions></system-reminder>" {
+		t.Errorf("tool_result unexpectedly mutated with nil cache: %q", got)
+	}
+	if got := msgs[2].(map[string]any)["content"]; got != "<system-reminder><system-conventions>a</system-conventions></system-reminder>" {
+		t.Errorf("assistant unexpectedly mutated with nil cache: %q", got)
+	}
+	if got := msgs[3].(map[string]any)["content"]; got != "<system-reminder><system-conventions>b</system-conventions></system-reminder>" {
+		t.Errorf("role:tool unexpectedly mutated with nil cache: %q", got)
+	}
+}
