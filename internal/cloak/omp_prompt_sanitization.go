@@ -1,13 +1,17 @@
 package cloak
 
-// Issue #59 (extending ADR 0003): inbound-only Oh My Pi system/developer prompt
-// sanitization for Google Cloud Code / Antigravity (`agy/*`) routes.
+// Issue #59 / #70 (ADR 0003 & ADR 0006): inbound-only Oh My Pi prompt
+// sanitization across Harness-Authored Surfaces (system, system/developer
+// messages, tool descriptions + JSON Schema description/title, and user
+// <system-reminder> spans) for routes matching `model_prefixes` (empty = all
+// models).
 //
 // Rewrites exact `<system-conventions>` / `</system-conventions>` tags,
-// case-insensitive Oh My Pi RFC 2119 normative header signatures, and Oh My Pi's
-// injected Claude Code OAuth system instruction, merged with
-// live-reconfigurable `omp_prompt_sanitizations` entries precomputed on the
-// atomic `filterConfig` snapshot.
+// case-insensitive Oh My Pi RFC 2119 normative header signatures, Oh My Pi's
+// injected Claude Code OAuth system instruction, and the OMP v19.2.1 built-in
+// preset groups declared in `internal/clients/omp/spec.go` (Issue #71), merged
+// with live-reconfigurable `omp_prompt_sanitizations` entries precomputed on
+// the atomic `filterConfig` snapshot.
 
 import (
 	"fmt"
@@ -33,18 +37,28 @@ type ompSanitizationRule struct {
 	re            *regexp.Regexp
 }
 
-// ompSanitizationPreset builds a built-in preset, deriving lowerMatch and the
-// ASCII fast-scan flag from the match text instead of restating them by hand.
-// lowerMatch doubles as the case-insensitive override key in
-// buildOMPSanitizationRules even for case-sensitive presets.
+// ompSanitizationPreset builds a sanitization rule, deriving lowerMatch, the
+// ASCII fast-scan flag, and (for non-ASCII case-insensitive rules) the anchored
+// prefix regex from match instead of restating them by hand. lowerMatch doubles
+// as the case-insensitive override key in buildOMPSanitizationRules even for
+// case-sensitive presets.
 func ompSanitizationPreset(match, replacement string, caseSensitive bool) ompSanitizationRule {
 	lower := strings.ToLower(match)
+	ascii := isASCIIString(match) && isASCIIString(lower) && len(lower) == len(match)
+	var re *regexp.Regexp
+	if !caseSensitive && !ascii {
+		compiled, err := regexp.Compile("(?i)^" + regexp.QuoteMeta(match))
+		if err == nil {
+			re = compiled
+		}
+	}
 	return ompSanitizationRule{
 		match:         match,
 		lowerMatch:    lower,
 		replacement:   replacement,
 		caseSensitive: caseSensitive,
-		asciiOnly:     isASCIIString(match) && isASCIIString(lower) && len(lower) == len(match),
+		asciiOnly:     ascii,
+		re:            re,
 	}
 }
 
@@ -67,24 +81,11 @@ func buildOMPSanitizationRules(entries []ompSanitizationEntry) []ompSanitization
 		if strings.TrimSpace(entry.Match) == "" {
 			continue
 		}
-		lower := strings.ToLower(entry.Match)
-		ascii := isASCIIString(entry.Match) && isASCIIString(lower) && len(lower) == len(entry.Match)
-		var re *regexp.Regexp
-		if !ascii {
-			compiled, err := regexp.Compile("(?i)^" + regexp.QuoteMeta(entry.Match))
-			if err != nil {
-				continue
-			}
-			re = compiled
+		rule := ompSanitizationPreset(entry.Match, entry.Replacement, false)
+		if !rule.asciiOnly && rule.re == nil {
+			continue
 		}
-		byLower[lower] = ompSanitizationRule{
-			match:         entry.Match,
-			lowerMatch:    lower,
-			replacement:   entry.Replacement,
-			caseSensitive: false,
-			asciiOnly:     ascii,
-			re:            re,
-		}
+		byLower[rule.lowerMatch] = rule
 	}
 	rules := make([]ompSanitizationRule, 0, len(byLower))
 	for _, rule := range byLower {
@@ -120,10 +121,18 @@ func parseOMPPromptSanitizations(value any) ([]ompSanitizationEntry, error) {
 	return entries, nil
 }
 
-// sanitizeOMPPrompt applies the precomputed OMP prompt sanitization rules to
-// top-level `system` and `system`/`developer` message text blocks.
-func sanitizeOMPPrompt(rootMap map[string]any) bool {
-	rules := activeFilterConfig().ompSanitizationRules
+// sanitizeOMPPrompt applies a request-scoped OMP prompt sanitization rule
+// snapshot to top-level `system`, `system`/`developer` message text blocks, and
+// tool declarations (description + JSON Schema description/title, skipping
+// literal-bearing subtrees). User `<system-reminder>` spans are sanitized in
+// the fused span pass inside rewriteOMPConversationProse using the same rule
+// snapshot so concurrent reconfiguration cannot split rule views mid-request
+// and rules that rewrite or strip `<system-reminder>` tags cannot bypass
+// tool-alias cloaking or bleed into surrounding User-Typed Turns.
+func sanitizeOMPPrompt(rootMap map[string]any, sourceFormat string, rules []ompSanitizationRule) bool {
+	if len(rules) == 0 {
+		return false
+	}
 	fn := func(s string) (string, bool) { return sanitizeOMPPromptText(s, rules) }
 	changed := false
 	if system, ok := rootMap["system"]; ok {
@@ -133,6 +142,9 @@ func sanitizeOMPPrompt(rootMap map[string]any) bool {
 		}
 	}
 	if rewriteSystemDeveloperMessages(rootMap, true, fn) {
+		changed = true
+	}
+	if rewriteToolsProse(rootMap, sourceFormat, fn) {
 		changed = true
 	}
 	return changed

@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$unfmt = gofmt -l (git ls-files '*.go')
+$unfmt = gofmt -l (git ls-files --cached --others --exclude-standard '*.go')
 if ($unfmt) {
     Write-Error "Unformatted Go files:`n$($unfmt -join "`n")"
     exit 1

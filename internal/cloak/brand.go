@@ -16,7 +16,35 @@ func isOMPAlias(match string) bool {
 	return false
 }
 
-func rewriteProtectedBrandText(text string, cfg *filterConfig, client string) (string, bool) {
+// protectedNonOMPMappings derives the normalized, client-scoped non-OMP brand
+// mappings for protected brand rewriting once per request.
+func protectedNonOMPMappings(cfg *filterConfig, client string) []rewriteMapping {
+	if cfg == nil {
+		return nil
+	}
+	// Client scoping is applied here too: this walker predates applicableMappings
+	// and used to ignore rewriteMapping.Client, which would let a claude_code or
+	// codex rule fire on a protected Oh My Pi request.
+	inScope := func(m rewriteMapping) bool {
+		return (m.Client == "" || m.Client == client) && !isOMPAlias(m.Match)
+	}
+	var nonOMPMappings []rewriteMapping
+	if cfg.UseDefaultKeywords {
+		for _, m := range brandMappingsFor(client) {
+			if inScope(m) {
+				nonOMPMappings = append(nonOMPMappings, m)
+			}
+		}
+	}
+	for _, m := range cfg.CustomMappings {
+		if inScope(m) {
+			nonOMPMappings = append(nonOMPMappings, m)
+		}
+	}
+	return normalizeMappings(nonOMPMappings)
+}
+
+func rewriteProtectedBrandText(text string, nonOMPMappings []rewriteMapping, client string) (string, bool) {
 	if text == "" {
 		return text, false
 	}
@@ -53,27 +81,7 @@ func rewriteProtectedBrandText(text string, cfg *filterConfig, client string) (s
 		}
 	}
 
-	// Client scoping is applied here too: this walker predates applicableMappings
-	// and used to ignore rewriteMapping.Client, which would let a claude_code or
-	// codex rule fire on a protected Oh My Pi request.
-	inScope := func(m rewriteMapping) bool {
-		return (m.Client == "" || m.Client == client) && !isOMPAlias(m.Match)
-	}
-	var nonOMPMappings []rewriteMapping
-	if cfg.UseDefaultKeywords {
-		for _, m := range brandMappingsFor(client) {
-			if inScope(m) {
-				nonOMPMappings = append(nonOMPMappings, m)
-			}
-		}
-	}
-	for _, m := range cfg.CustomMappings {
-		if inScope(m) {
-			nonOMPMappings = append(nonOMPMappings, m)
-		}
-	}
-	normalized := normalizeMappings(nonOMPMappings)
-	for _, m := range normalized {
+	for _, m := range nonOMPMappings {
 		if !strings.Contains(lowerCurrent, m.Match) {
 			continue
 		}
@@ -91,10 +99,13 @@ func rewriteProtectedBrandText(text string, cfg *filterConfig, client string) (s
 	return current, changed
 }
 
-func rewriteProtectedBrand(rootMap map[string]any, sourceFormat, client string) {
-	cfg := activeFilterConfig()
+func rewriteProtectedBrand(rootMap map[string]any, sourceFormat, client string, cfg *filterConfig) {
+	if cfg == nil {
+		cfg = activeFilterConfig()
+	}
+	nonOMPMappings := protectedNonOMPMappings(cfg, client)
 	brandText := func(s string) (string, bool) {
-		return rewriteProtectedBrandText(s, cfg, client)
+		return rewriteProtectedBrandText(s, nonOMPMappings, client)
 	}
 
 	// Only prose text is in scope: a block's structural fields carry data the
@@ -106,23 +117,16 @@ func rewriteProtectedBrand(rootMap map[string]any, sourceFormat, client string) 
 		}
 	}
 	rewriteSystemDeveloperMessages(rootMap, true, brandText)
+	rewriteOMPConversationBrandTurns(rootMap, brandText)
 
-	if toolsRaw, ok := rootMap["tools"].([]any); ok {
-		for _, tRaw := range toolsRaw {
-			tMap, ok := tRaw.(map[string]any)
-			if !ok {
-				continue
-			}
-			// Parameter help is machine-generated tool prose one or two levels
-			// below the tool, so the same brand contract applies there as to the
-			// tool's own description: a nested description or title naming the
-			// client or its home directory must not reach the model literal,
-			// while structure and literal-bearing subtrees stay byte-for-byte.
-			// The request-scoped tool aliases reach these fields through the
-			// alias pass that runs after this one.
-			rewriteToolProse(tMap, sourceFormat, brandText)
-		}
-	}
+	// Parameter help is machine-generated tool prose one or two levels below
+	// the tool, so the same brand contract applies there as to the tool's own
+	// description: a nested description or title naming the client or its home
+	// directory must not reach the model literal, while structure and
+	// literal-bearing subtrees stay byte-for-byte. The request-scoped tool
+	// aliases reach these fields through the alias pass that runs after this
+	// one.
+	rewriteToolsProse(rootMap, sourceFormat, brandText)
 }
 
 // reverseAssistantBrandInJSON restores the resolved client's own reverse table

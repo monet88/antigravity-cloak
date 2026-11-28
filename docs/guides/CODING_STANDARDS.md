@@ -17,13 +17,13 @@ patterns in the existing code, not from aspirational rules.
 | Path | Purpose |
 | :--- | :--- |
 | `main.go` | Thin root entrypoint (`package main`): C-ABI exports, method dispatcher, registration metadata, config fields, and `init()` wiring `cloak.Initialize(...)`. |
-| `plugin_test.go` | Root black-box dispatcher, registration, metadata, and `registry.json` version-parity tests. |
+| `plugin_test.go`, `issue<N>_*_test.go`, `abi_test_helpers_test.go` | Root `package main` black-box ABI-seam suites, shared ABI test helpers, dispatcher/metadata checks, and `registry.json` version-parity tests. |
 | `internal/spec/` | Pure declarative client data types, `PathRules`, and shared constants (no internal repo imports). |
 | `internal/clients/{omp,claudecode,codex}/` | Data-only client specs, brand/tool/alias tables, and static presets (zero runtime hooks). |
 | `internal/cloak/` | Shared cloaking engine split by domain (`registry.go`, `config.go`, `detect.go`, `handlers.go`, `brand.go`, `tool_cloak.go`, `alias_plan.go`, `stream.go`, `envelope.go`, `omp_prompt_sanitization.go`, `issue55_agent_tier.go`) + owning `*_test.go` suites. |
 | `tests/` | Integration/e2e scripts (`.py`, `.sh`). Never invoked by `go test`. |
 | `.github/scripts/` | CI helper Go scripts with their own tests (`package-release_test.go`). |
-| `docs/` | Categorized documentation (`adr/`, `agents/`, `benchmarks/`, `debugging/`, `deployment/`, `guides/`, `research/`, `specs/`, `verification/`). |
+| `docs/` | Categorized documentation (`adr/`, `agents/`, `benchmarks/`, `debugging/`, `deployment/`, `guides/`, `research/`, `specs/`, `verification/`, `wiki/`). |
 | `.ref/` | Gitignored upstream reference clones. Not part of the module. |
 
 ### When to add a new `.go` file
@@ -38,9 +38,9 @@ Add or extend a domain file inside `internal/cloak/` when a subsystem has a cohe
 - **Domain-scoped tests**: `<domain>_test.go` (e.g. `reverse_brand_test.go`,
   `plugin_integration_test.go`). For cross-cutting concerns not tied to a
   single issue.
+- **Root black-box ABI-seam suites**: `plugin_test.go` plus root `issue<N>_*_test.go` (e.g. `issue69_protected_agy_brand_parity_test.go`, `issue70_inbound_sanitization_surfaces_test.go`, `issue71_omp_v19_presets_test.go`) driving `handlePluginCall` end to end through the C-ABI seam.
 - **Filter/plugin lifecycle**: `filter_test.go`, `plugin_test.go`.
-- **Shared test helpers**: `json_test_helpers_test.go`. Test-only utilities
-  live in `_test.go` files, never in production source.
+- **Shared test helpers**: root `abi_test_helpers_test.go` for black-box ABI suites and `internal/cloak/json_test_helpers_test.go` for package unit suites. Test-only utilities live in `_test.go` files, never in production source.
 
 ## Naming Conventions
 
@@ -138,6 +138,25 @@ When adding or modifying a tool mapping:
    in a request are active in the reverse map. A natively declared AGY target
    is never reverse-cloaked.
 
+## Inbound Sanitization Rules
+
+When adding or modifying one-way OMP inbound sanitization logic:
+
+1. **Keep sanitization strictly one-way and separate from Brand Rewriting.**
+   Sanitization runs request-only on eligible OMP routes and is never reversed
+   on responses or streams; third-party and harness-signature rules belong here
+   rather than in reversible client brand tables.
+2. **Reuse one atomic rule snapshot per request.** Capture
+   `activeFilterConfig().ompSanitizationRules` once per request and pass that
+   same slice into every sanitization pass (`sanitizeOMPPrompt` and
+   `rewriteOMPConversationProse`) so concurrent `plugin.reconfigure` cannot split
+   rule views mid-request (ADR 0001).
+3. **Fuse multi-pass walkers over delimited spans.** When a delimited carrier
+   (such as `<system-reminder>` spans inside `user` turns) runs both
+   sanitization and tool-alias cloaking, execute both in one span pass so
+   arbitrary rules that rewrite or strip delimiter tags cannot hide the span
+   from downstream cloaking or bleed into surrounding **User-Typed Turns**.
+
 ## Documentation
 
 - **CONTEXT.md**: Canonical domain reference. Update when adding clients,
@@ -149,6 +168,8 @@ When adding or modifying a tool mapping:
 - **docs/adr/**: Architecture Decision Records for non-trivial design
   choices. Status: `proposed` → `accepted`.
 - **docs/specs/**: Technical specifications for complex subsystems.
+- **docs/wiki/**: Dated historical engineering memory (decisions, subsystem
+  invariants, environment guardrails).
 - **docs/debugging/NOTE-DEBUGS.md**: Diagnosed, fixed, and verified bugs. Record root
   cause, not symptoms.
 

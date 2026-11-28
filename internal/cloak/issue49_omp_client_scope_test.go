@@ -157,7 +157,7 @@ func TestIssue49_OMPIdentityLineRewrittenWhole(t *testing.T) {
 	const in = "You are omp's trusted coding assistant."
 	cfg := activeFilterConfig()
 
-	got, changed := rewriteProtectedBrandText(in, cfg, "oh_my_pi")
+	got, changed := rewriteProtectedBrandText(in, protectedNonOMPMappings(cfg, "oh_my_pi"), "oh_my_pi")
 	if !changed || got != antigravityIdentity {
 		t.Fatalf("protected route: changed=%v out=%q", changed, got)
 	}
@@ -180,7 +180,7 @@ func TestIssue49_OMPIdentityLineLeavesProseAlone(t *testing.T) {
 		"Run the omp binary to start.",
 		"you are OMP's trusted coding assistant.",
 	} {
-		got, _ := rewriteProtectedBrandText(in, activeFilterConfig(), "oh_my_pi")
+		got, _ := rewriteProtectedBrandText(in, protectedNonOMPMappings(activeFilterConfig(), "oh_my_pi"), "oh_my_pi")
 		if got == antigravityIdentity && in != "you are OMP's trusted coding assistant." {
 			t.Errorf("%q unexpectedly became the identity line", in)
 		}

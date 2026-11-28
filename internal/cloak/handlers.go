@@ -445,7 +445,8 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		expectedChoiceCount = n
 	}
 
-	effective := activeFilterConfig().ToolMappings["oh_my_pi"]
+	cfg := activeFilterConfig()
+	effective := cfg.ToolMappings["oh_my_pi"]
 	if len(effective) < len(canonicalOMPSafeMappingSet) {
 		debugLog("handleProtectedAGY: effective mapping count below canonical minimum: %d < %d", len(effective), len(canonicalOMPSafeMappingSet))
 		return protected503Response(resp)
@@ -522,9 +523,12 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 	}
 
 	cloakProtectedToolNames(rootMap, extendedCloak, format)
-	rewriteProtectedBrand(rootMap, format, "oh_my_pi")
-	if !carriesOpenAIResponses(req.SourceFormat) {
-		sanitizeOMPPrompt(rootMap)
+	rewriteProtectedBrand(rootMap, format, "oh_my_pi", cfg)
+	runOMPSanitization := !carriesOpenAIResponses(req.SourceFormat)
+	var sanitizationRules []ompSanitizationRule
+	if runOMPSanitization {
+		sanitizationRules = cfg.ompSanitizationRules
+		sanitizeOMPPrompt(rootMap, format, sanitizationRules)
 	}
 
 	// Machine-generated prose has to name the request-scoped aliases, not the
@@ -541,7 +545,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		ambigRe:    buildCloakAmbiguousRe(extendedCloak),
 	}
 	rewriteToolDescriptions(rootMap, nil, proseCloak, format)
-	rewriteOMPConversationProse(rootMap, nil, proseCloak)
+	rewriteOMPConversationProse(rootMap, proseCloak, sanitizationRules)
 	if sysVal, ok := rootMap["system"]; ok {
 		if next, c := rewriteProseTextContent(sysVal, func(s string) (string, bool) {
 			return replaceToolNamesInText(s, proseCloak)

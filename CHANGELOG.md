@@ -4,6 +4,16 @@ All notable changes to `antigravity-cloak` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Current releases use semantic version tags; the one-off `v.26.09.06` CalVer release is retained below as historical release metadata.
 
+## [Unreleased]
+
+### Added
+- **OMP v19.2.1 built-in Inbound Sanitization presets (Spec #68, Issue #71, ADR 0006).** Added 8 built-in case-insensitive preset groups (9 v19.2.1 patterns, 12 literal rules) to `internal/clients/omp/spec.go` alongside the 5 core presets: `omp://` harness-docs CRLF/LF bullets + bare fallback, ``, `CLAUDE.md`, `.cursorrules` ``, `Codex Security cloud` -> `remote security cloud`, `ChatGPT OAuth account` -> `remote OAuth account`, Ratchet `claude-api` attribution, `Claude usage limit reached;` -> `Usage limit reached;`, ``project-specific `CLAUDE.md` `` / ``and `CLAUDE.md` coding`` -> `AGENTS.md` equivalents, and post-brand (`Antigravity`) + pre-brand (`OMP`) variants of the `scan-coordinator` HTML derivation comment, while preserving all Operational Identifiers verbatim.
+- **Expanded Inbound Sanitization to all OMP Harness-Authored Surfaces (Spec #68, Issue #70, ADR 0006).** Extended one-way Inbound Sanitization on eligible `ProtectedAGY` and `User-Agent: omp/...` routes matching `model_prefixes` to cover tool `description`, JSON Schema `description`/`title` (skipping literal-bearing subtrees), and `<system-reminder>` spans inside `user` turns with strict `brand -> sanitize -> tool-alias prose` ordering (and fused `<system-reminder>` `sanitize -> tool-alias` span processing), while excluding Machine-Generated Conversation Turns and User-Typed Turns.
+
+### Changed
+- **Aligned `ProtectedAGY` Brand Rewriting parity across Machine-Generated Conversation Turns and `<system-reminder>` spans (Spec #68, Issue #69, ADR 0006).** Extended `rewriteProtectedBrand` via `rewriteOMPConversationBrandTurns` so **Machine-Generated Conversation Turns** (`role: "tool"`, Anthropic `tool_result` text blocks, and `assistant` `text`/`thinking` blocks) and `<system-reminder>` **Harness-Authored Surface** spans inside `user` turns receive two-way Brand Rewriting on `ProtectedAGY` matching `User-Agent: omp/...`.
+- **Synchronized domain documentation and hardened non-ASCII preset compilation (Issue #71).** Aligned `CONTEXT.md`, `docs/specs/system-conventions-sanitization.md`, and `omp_prompt_sanitizations` field metadata with `GLOSSARY.md` and `ADR 0006`, and unified `ompSanitizationPreset` / `buildOMPSanitizationRules` so non-ASCII case-insensitive built-in presets compile anchored `(?i)^` prefix regexes.
+
 ## [0.7.7] - 2026-11-27
 
 ### Changed

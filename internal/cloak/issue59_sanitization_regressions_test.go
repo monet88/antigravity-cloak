@@ -383,3 +383,250 @@ func TestOMPSanitizationMidRuneTailIntact(t *testing.T) {
 		t.Fatalf("output is not valid UTF-8: %q", out)
 	}
 }
+
+// Issue #70 review follow-up: when cachedCloak is nil, rewriteOMPConversationProse
+// must still sanitize <system-reminder> spans using the supplied sanitizeRules
+// snapshot, skip tool_result/assistant/tool/developer turns without panicking,
+// and return false without mutation when sanitizeRules is empty.
+func TestRewriteOMPConversationProseNilCacheSanitizesRemindersOnly(t *testing.T) {
+	isolateOMPMeasurement(t)
+	defer restoreDefaultFilterConfig(t)
+
+	cfg := defaultFilterConfig()
+	cfg.OMPPromptSanitizations = []ompSanitizationEntry{
+		{Match: "<system-reminder>", Replacement: "<note>"},
+		{Match: "</system-reminder>", Replacement: "</note>"},
+	}
+	applyFilterConfig(cfg)
+
+	makeRoot := func() map[string]any {
+		return map[string]any{
+			"messages": []any{
+				map[string]any{"role": "user", "content": "Typed <system-conventions>\n<system-reminder><system-conventions>x</system-conventions></system-reminder>"},
+				map[string]any{
+					"role": "user",
+					"content": []any{
+						map[string]any{"type": "text", "text": "<system-reminder><system-conventions>y</system-conventions></system-reminder>"},
+						map[string]any{"type": "tool_result", "tool_use_id": "t1", "content": "<system-reminder><system-conventions>z</system-conventions></system-reminder>"},
+					},
+				},
+				map[string]any{"role": "assistant", "content": "<system-reminder><system-conventions>a</system-conventions></system-reminder>"},
+				map[string]any{"role": "tool", "content": "<system-reminder><system-conventions>b</system-conventions></system-reminder>"},
+			},
+		}
+	}
+
+	// Empty sanitizeRules with nil cache must be a pure no-op.
+	noOpRoot := makeRoot()
+	before, err := json.Marshal(noOpRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed := rewriteOMPConversationProse(noOpRoot, nil, nil); changed {
+		t.Fatal("expected changed=false when cached==nil and sanitizeRules==nil")
+	}
+	after, err := json.Marshal(noOpRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("expected no mutation when cached==nil and sanitizeRules==nil:\nbefore: %s\nafter:  %s", before, after)
+	}
+
+	rules := activeFilterConfig().ompSanitizationRules
+	root := makeRoot()
+	if changed := rewriteOMPConversationProse(root, nil, rules); !changed {
+		t.Fatal("expected changed=true when cached==nil and sanitizeRules is non-empty")
+	}
+	msgs := root["messages"].([]any)
+	if got := msgs[0].(map[string]any)["content"]; got != "Typed <system-conventions>\n<note><conventions>x</conventions></note>" {
+		t.Errorf("user[0] mismatch: %q", got)
+	}
+	user1 := msgs[1].(map[string]any)["content"].([]any)
+	if got := user1[0].(map[string]any)["text"]; got != "<note><conventions>y</conventions></note>" {
+		t.Errorf("user[1] text mismatch: %q", got)
+	}
+	if got := user1[1].(map[string]any)["content"]; got != "<system-reminder><system-conventions>z</system-conventions></system-reminder>" {
+		t.Errorf("tool_result unexpectedly mutated with nil cache: %q", got)
+	}
+	if got := msgs[2].(map[string]any)["content"]; got != "<system-reminder><system-conventions>a</system-conventions></system-reminder>" {
+		t.Errorf("assistant unexpectedly mutated with nil cache: %q", got)
+	}
+	if got := msgs[3].(map[string]any)["content"]; got != "<system-reminder><system-conventions>b</system-conventions></system-reminder>" {
+		t.Errorf("role:tool unexpectedly mutated with nil cache: %q", got)
+	}
+}
+
+// Issue #68 review remediation: sanitizeOMPPrompt and rewriteOMPConversationProse
+// must honor the request-scoped rule snapshot passed by the caller rather than
+// re-reading activeFilterConfig(), preventing split-snapshot sanitization under
+// concurrent plugin.reconfigure (ADR 0001).
+func TestOMPSanitizationUsesPassedSnapshotNotLiveConfig(t *testing.T) {
+	isolateOMPMeasurement(t)
+	defer restoreDefaultFilterConfig(t)
+
+	snapshotRules := buildOMPSanitizationRules([]ompSanitizationEntry{
+		{Match: "SNAPSHOT-TOKEN", Replacement: "SNAPSHOT-OUT"},
+	})
+
+	// Mutate live global config to a conflicting rule after snapshot capture.
+	liveCfg := defaultFilterConfig()
+	liveCfg.OMPPromptSanitizations = []ompSanitizationEntry{
+		{Match: "SNAPSHOT-TOKEN", Replacement: "LIVE-DRIFT"},
+	}
+	applyFilterConfig(liveCfg)
+
+	root := map[string]any{
+		"system": "SNAPSHOT-TOKEN",
+		"tools": []any{
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "read",
+					"description": "SNAPSHOT-TOKEN",
+					"parameters":  map[string]any{"type": "object", "title": "SNAPSHOT-TOKEN"},
+				},
+			},
+		},
+		"messages": []any{
+			map[string]any{"role": "user", "content": "<system-reminder>SNAPSHOT-TOKEN</system-reminder>"},
+		},
+	}
+
+	if !sanitizeOMPPrompt(root, "openai", snapshotRules) {
+		t.Fatal("sanitizeOMPPrompt expected changed=true")
+	}
+	if !rewriteOMPConversationProse(root, nil, snapshotRules) {
+		t.Fatal("rewriteOMPConversationProse expected changed=true")
+	}
+
+	if got := root["system"]; got != "SNAPSHOT-OUT" {
+		t.Errorf("system = %q, want SNAPSHOT-OUT", got)
+	}
+	fn := root["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if got := fn["description"]; got != "SNAPSHOT-OUT" {
+		t.Errorf("tool description = %q, want SNAPSHOT-OUT", got)
+	}
+	if got := fn["parameters"].(map[string]any)["title"]; got != "SNAPSHOT-OUT" {
+		t.Errorf("tool schema title = %q, want SNAPSHOT-OUT", got)
+	}
+	reminder := root["messages"].([]any)[0].(map[string]any)["content"]
+	if reminder != "<system-reminder>SNAPSHOT-OUT</system-reminder>" {
+		t.Errorf("user reminder = %q, want <system-reminder>SNAPSHOT-OUT</system-reminder>", reminder)
+	}
+}
+
+// Issue #71 hardening: non-ASCII case-insensitive built-in presets must compile
+// a case-insensitive prefix regex just like operator entries so Unicode strings
+// (e.g. accented letters or em-dashes) match instead of silently failing.
+func TestOMPSanitizationPresetCompilesNonASCIICaseInsensitiveRegex(t *testing.T) {
+	ciRule := ompSanitizationPreset("Règle — OMP", "Neutral", false)
+	csRule := ompSanitizationPreset("Règle — Exact", "Exact", true)
+	rules := []ompSanitizationRule{csRule, ciRule}
+
+	for _, tc := range []struct {
+		name        string
+		in          string
+		want        string
+		wantChanged bool
+	}{
+		{
+			name:        "non-ascii case-insensitive lowercase match",
+			in:          "prefix règle — omp suffix",
+			want:        "prefix Neutral suffix",
+			wantChanged: true,
+		},
+		{
+			name:        "non-ascii case-insensitive uppercase match",
+			in:          "prefix RÈGLE — OMP suffix",
+			want:        "prefix Neutral suffix",
+			wantChanged: true,
+		},
+		{
+			name:        "non-ascii case-sensitive exact match",
+			in:          "prefix Règle — Exact suffix",
+			want:        "prefix Exact suffix",
+			wantChanged: true,
+		},
+		{
+			name:        "non-ascii case-sensitive wrong case untouched",
+			in:          "prefix règle — exact suffix",
+			want:        "prefix règle — exact suffix",
+			wantChanged: false,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, changed := sanitizeOMPPromptText(tc.in, rules)
+			if changed != tc.wantChanged || got != tc.want {
+				t.Fatalf("sanitizeOMPPromptText(%q) = (%q, %v), want (%q, %v)", tc.in, got, changed, tc.want, tc.wantChanged)
+			}
+		})
+	}
+}
+
+// PR #72 review remediation: rewriteProtectedBrand must honor the passed
+// request-scoped filterConfig snapshot rather than re-reading
+// activeFilterConfig(), keeping brand rewriting atomic with tool cloaking and
+// inbound sanitization under concurrent plugin.reconfigure (ADR 0001).
+func TestRewriteProtectedBrandUsesPassedSnapshotNotLiveConfig(t *testing.T) {
+	isolateOMPMeasurement(t)
+	defer restoreDefaultFilterConfig(t)
+
+	snapshotCfg := defaultFilterConfig()
+	snapshotCfg.CustomMappings = []rewriteMapping{
+		{Match: "custom-snap", Replacement: "snap-brand"},
+	}
+
+	// Mutate live global config with a conflicting mapping after snapshot capture.
+	liveCfg := defaultFilterConfig()
+	liveCfg.CustomMappings = []rewriteMapping{
+		{Match: "custom-snap", Replacement: "live-drift"},
+	}
+	applyFilterConfig(liveCfg)
+
+	root := map[string]any{
+		"system": "custom-snap",
+		"tools": []any{
+			map[string]any{
+				"type": "function",
+				"function": map[string]any{
+					"name":        "read",
+					"description": "custom-snap",
+					"parameters": map[string]any{
+						"type":  "object",
+						"title": "custom-snap",
+					},
+				},
+			},
+		},
+		"messages": []any{
+			map[string]any{"role": "developer", "content": "custom-snap"},
+			map[string]any{"role": "assistant", "content": "custom-snap"},
+			map[string]any{"role": "tool", "content": "custom-snap"},
+			map[string]any{"role": "user", "content": "User typed custom-snap\n<system-reminder>custom-snap</system-reminder>"},
+		},
+	}
+
+	rewriteProtectedBrand(root, "openai", "oh_my_pi", &snapshotCfg)
+
+	if got := root["system"]; got != "snap-brand" {
+		t.Errorf("system = %q, want snap-brand", got)
+	}
+	fn := root["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+	if got := fn["description"]; got != "snap-brand" {
+		t.Errorf("tool description = %q, want snap-brand", got)
+	}
+	if got := fn["parameters"].(map[string]any)["title"]; got != "snap-brand" {
+		t.Errorf("tool schema title = %q, want snap-brand", got)
+	}
+	msgs := root["messages"].([]any)
+	for i, role := range []string{"developer", "assistant", "tool"} {
+		if got := msgs[i].(map[string]any)["content"]; got != "snap-brand" {
+			t.Errorf("%s content = %q, want snap-brand", role, got)
+		}
+	}
+	wantUser := "User typed custom-snap\n<system-reminder>snap-brand</system-reminder>"
+	if got := msgs[3].(map[string]any)["content"]; got != wantUser {
+		t.Errorf("user content = %q, want %q", got, wantUser)
+	}
+}

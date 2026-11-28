@@ -5,7 +5,7 @@ CLIProxyAPI v7 dynamic Go C-shared plugin (`buildmode=c-shared`, Go 1.26.0, ABI 
 - **Primary active focus:** **Oh My Pi (`oh_my_pi` / `omp`)** over **`openai-completions`** (OpenAI Chat Completions).
 - **Maintenance-only / non-expanding:** `claude_code`, `codex`, Anthropic Messages, and deferred OpenAI Responses stay documented to match existing code, but should not be expanded unless requested.
 - **Source layout:**
-  - Root (`package main`): `main.go` (thin CGO/C-ABI exports, `handlePluginCall`, registration/config metadata, `init()` calling `cloak.Initialize(...)`) and `plugin_test.go` (dispatcher/metadata/`registry.json` tests).
+  - Root (`package main`): `main.go` (thin CGO/C-ABI exports, `handlePluginCall`, registration/config metadata, `init()` calling `cloak.Initialize(...)`), `plugin_test.go`, and root black-box ABI-seam suites (`issue<N>_*_test.go` + `abi_test_helpers_test.go`).
   - `internal/spec/`: pure declarative client spec types, `PathRules`, and `AntigravityIdentity` (no internal imports).
   - `internal/clients/{omp,claudecode,codex}/`: data-only client definitions and presets (zero runtime hooks).
   - `internal/cloak/`: shared cloaking engine split by domain (`registry.go`, `config.go`, `detect.go`, `handlers.go`, `brand.go`, `tool_cloak.go`, `alias_plan.go`, `stream.go`, `envelope.go`, `omp_prompt_sanitization.go`, `issue55_agent_tier.go`) plus unit/integration tests (`*_test.go`).
@@ -14,10 +14,12 @@ CLIProxyAPI v7 dynamic Go C-shared plugin (`buildmode=c-shared`, Go 1.26.0, ABI 
 ## Navigation pointers
 
 - **Brand tables, tool mappings, activation gates, OMP ProtectedAGY/bypass lifecycle, alias plans, or Issue #55:** read **[CONTEXT.md](CONTEXT.md)** (canonical contract; `internal/clients/*` specs are source of truth for behaviour).
-- **Code style, new `.go` / `*_test.go` placement, concurrency/error rules, commit format:** read **[docs/guides/CODING_STANDARDS.md](docs/guides/CODING_STANDARDS.md)**.
+- **Domain terminology (`Brand Rewriting`, `Inbound Sanitization`, `ProtectedAGY`, three-tier request surfaces):** read **[GLOSSARY.md](GLOSSARY.md)**.
+- **Code style, new `.go` / `*_test.go` placement, concurrency/error/sanitization rules, commit format:** read **[docs/guides/CODING_STANDARDS.md](docs/guides/CODING_STANDARDS.md)**.
+- **Dated engineering history, `#68` decisions, OMP pipeline invariants, and agent environment guardrails:** read **[docs/wiki/index.md](docs/wiki/index.md)**.
 - **Clean Linux/amd64 `.so` build, local Docker Compose deploy, controlled debug, or OMP live acceptance:** read **[docs/verification/verification-checklist.md](docs/verification/verification-checklist.md)** (and **[docs/verification/verification-checklist-omp.md](docs/verification/verification-checklist-omp.md)** for the 9-tool OMP matrix; archived runs live in **[docs/verification/history.md](docs/verification/history.md)**).
 - **Remote VPS deploy or in-place `.so` upgrade:** read **[docs/deployment/vps.md](docs/deployment/vps.md)**.
-- **Extending OMP Google Cloud Code 429 prompt sanitization:** read **[the sanitization spec](docs/specs/system-conventions-sanitization.md)**.
+- **Extending OMP Google Cloud Code 429 & v19.2.1 inbound sanitization:** read **[the sanitization spec](docs/specs/system-conventions-sanitization.md)**.
 - **Historical root causes & client surface audits:** **[docs/debugging/NOTE-DEBUGS.md](docs/debugging/NOTE-DEBUGS.md)**, **[Codex surface reference](docs/research/codex-tool-surface-2026-09-12.md)**, **[Claude Code gap analysis](docs/research/claude-code-cloak-gap-analysis-2026-09-23.md)**.
 
 ## Operational invariants & traps
@@ -28,7 +30,7 @@ CLIProxyAPI v7 dynamic Go C-shared plugin (`buildmode=c-shared`, Go 1.26.0, ABI 
 - **`normalizeSourceFormat`:** All three handlers normalize `claude`/`antigravity` -> `anthropic` and `codex`/`openai-response` -> `openai` before walking bodies; missing normalization yields empty `extractToolNames`.
 - **`isUnambiguousToolName`:** Single-word PascalCase names (`Bash`, `Read`, `Edit`) stay ambiguous (replaced only in tool-reference context), never bare in prose.
 - **OMP virtual-device MCP (`xd://mcp__*`):** Invoked via `read`/`write` (`read_file`/`write_file`). Never convert `xd://` calls into `call_mcp_tool`.
-- **Google Cloud Code 429 (`omp_prompt_sanitization.go`):** On `ProtectedAGY` and `User-Agent: omp/...` routes matching `model_prefixes` (empty = all models), `sanitizeOMPPrompt` runs after brand rewrite and before prose alias cloaking, rewriting `<system-conventions>`, both RFC 2119 headers, `omp/18.20.0+`'s injected Claude Code OAuth block (to `antigravityIdentity`, never `""`, preserving `cache_control`), and live `omp_prompt_sanitizations`.
+- **OMP Inbound Sanitization (`omp_prompt_sanitization.go`, ADR 0003 & ADR 0006):** On `ProtectedAGY` and `User-Agent: omp/...` routes matching `model_prefixes` (empty = all models), capture one atomic `ompSanitizationRules` snapshot per request and run `brand -> sanitize -> tool-alias prose` across all **Harness-Authored Surfaces** (top-level `system`, `system`/`developer` messages, tool/schema `description`/`title`, and fused `<system-reminder>` spans in `user` turns), applying the 17 built-in presets (5 core including `omp/18.20.0+`'s OAuth block to `antigravityIdentity` preserving `cache_control` + 12 OMP v19.2.1 rules) and live `omp_prompt_sanitizations` while excluding **Machine-Generated Conversation Turns** and **User-Typed Turns**.
 
 ### Debug logging (`CPA_FILTER_DEBUG`)
 - Decided once via `sync.Once` on first `debugLog` call; changing it requires a container recreate. Keep OFF in production (dumping large Claude Code bodies to Windows bind-mounted `logs/` wedged WSL2/Docker).
@@ -43,7 +45,7 @@ CLIProxyAPI v7 dynamic Go C-shared plugin (`buildmode=c-shared`, Go 1.26.0, ABI 
 
 ## Local checks & post-merge docs
 
-- Validation: `./scripts/check.ps1` (runs `gofmt` on tracked Go files only, `go vet`, `go test -race` including `architecture_test.go`, `.github/scripts` tests, and `compileall` on `tests`). Enable versioned hooks once per clone: `git config core.hooksPath .githooks`.
+- Validation: `./scripts/check.ps1` (runs `gofmt` on tracked and untracked non-ignored Go files, `go vet`, `go test -race` including `architecture_test.go`, `.github/scripts` tests, and `compileall` on `tests`). Enable versioned hooks once per clone: `git config core.hooksPath .githooks`.
 - After merging client, mapping, activation, or deploy changes, update `CONTEXT.md`, `docs/guides/CODING_STANDARDS.md`, and `CONTRIBUTING.md` as needed.
 
 <!-- gitnexus:start -->

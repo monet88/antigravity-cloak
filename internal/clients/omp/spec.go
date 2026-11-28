@@ -152,6 +152,19 @@ func Spec() spec.ClientSpec {
 			{Match: "RFC 2119 keywords: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.", Replacement: RFC2119KeywordsReplacement, CaseSensitive: false},
 			{Match: "RFC 2119: MUST, REQUIRED, SHOULD, RECOMMENDED, MAY, OPTIONAL.", Replacement: RFC2119KeywordsReplacement, CaseSensitive: false},
 			{Match: ClaudeCodeOAuthInstruction, Replacement: spec.AntigravityIdentity, CaseSensitive: false},
+			// OMP v19.2.1 built-in Inbound Sanitization presets (ADR 0006, Issue #71).
+			{Match: "- omp://: harness docs, AVOID unless asked.\r\n", Replacement: "", CaseSensitive: false},
+			{Match: "- omp://: harness docs, AVOID unless asked.\n", Replacement: "", CaseSensitive: false},
+			{Match: "omp://: harness docs, AVOID unless asked.", Replacement: "", CaseSensitive: false},
+			{Match: ", `CLAUDE.md`, `.cursorrules`", Replacement: "", CaseSensitive: false},
+			{Match: "Codex Security cloud", Replacement: "remote security cloud", CaseSensitive: false},
+			{Match: "ChatGPT OAuth account", Replacement: "remote OAuth account", CaseSensitive: false},
+			{Match: "Adapted from the claude-api skill's build-eval, eval-audit, and hillclimb guides (Apache-2.0, github.com/anthropics/skills).", Replacement: "", CaseSensitive: false},
+			{Match: "Claude usage limit reached;", Replacement: "Usage limit reached;", CaseSensitive: false},
+			{Match: "project-specific `CLAUDE.md`", Replacement: "project-specific `AGENTS.md`", CaseSensitive: false},
+			{Match: "and `CLAUDE.md` coding", Replacement: "and `AGENTS.md` coding", CaseSensitive: false},
+			{Match: "<!-- Derived from openai/codex-security f22d4a36f26d16287bcdfd707b369116e02a08c3: sdk/typescript/_bundled_plugin/skills/security-scan/SKILL.md and finding-discovery/SKILL.md. Ported to Antigravity AgentSession/task semantics; Codex workspace, plugin, app-server, and CODEX_HOME instructions intentionally omitted. -->", Replacement: "", CaseSensitive: false},
+			{Match: "<!-- Derived from openai/codex-security f22d4a36f26d16287bcdfd707b369116e02a08c3: sdk/typescript/_bundled_plugin/skills/security-scan/SKILL.md and finding-discovery/SKILL.md. Ported to OMP AgentSession/task semantics; Codex workspace, plugin, app-server, and CODEX_HOME instructions intentionally omitted. -->", Replacement: "", CaseSensitive: false},
 		},
 	}
 }

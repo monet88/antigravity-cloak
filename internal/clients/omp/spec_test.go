@@ -1,6 +1,9 @@
 package omp
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSpecInvariants(t *testing.T) {
 	s := Spec()
@@ -24,7 +27,18 @@ func TestSpecInvariants(t *testing.T) {
 	if len(s.ProtectedReverseBrand) != 7 {
 		t.Fatalf("len(ProtectedReverseBrand) = %d, want 7", len(s.ProtectedReverseBrand))
 	}
-	if len(s.PromptSanitizations) != 5 {
-		t.Fatalf("len(PromptSanitizations) = %d, want 5", len(s.PromptSanitizations))
+	if len(s.PromptSanitizations) != 17 {
+		t.Fatalf("len(PromptSanitizations) = %d, want 17", len(s.PromptSanitizations))
+	}
+	seenSanitizations := make(map[string]bool, len(s.PromptSanitizations))
+	for i, p := range s.PromptSanitizations {
+		if strings.TrimSpace(p.Match) == "" {
+			t.Errorf("PromptSanitizations[%d] has empty Match", i)
+		}
+		key := strings.ToLower(p.Match)
+		if seenSanitizations[key] {
+			t.Errorf("PromptSanitizations[%d] duplicates case-insensitive Match %q", i, p.Match)
+		}
+		seenSanitizations[key] = true
 	}
 }

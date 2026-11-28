@@ -549,6 +549,41 @@ func TestIntegration_ExplicitClient_CustomModelPrefixGatesProtectedRoute(t *test
 			if out4, _, _ := decodeEnvelopeRequestIntercept(t, raw4); len(out4) != 0 {
 				t.Fatalf("agy/* UA outside model_prefixes must skip, got: %s", out4)
 			}
+
+			// 5. SSE stream on monet/* restores read_file -> read and Antigravity -> omp
+			streamChunk := []byte("data: {\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Hello Antigravity\",\"tool_calls\":[{\"index\":0,\"id\":\"c1\",\"type\":\"function\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n")
+			streamOut := decodeEnvelopeBody(t, HandleStreamChunkIntercept(makeIntegrationStreamChunkPayload(t, reqID1, "openai", "monet/gemini-4-hydrogen", 0, streamChunk, nil)))
+			if !strings.Contains(string(streamOut), `"name":"read"`) || !strings.Contains(string(streamOut), "Hello omp") {
+				t.Fatalf("monet/* SSE stream not restored: %s", streamOut)
+			}
+
+			// 6. Conflicting marker containing OMP: 503 on monet/* (inside model_prefixes), bypass on agy/* (outside model_prefixes)
+			hConflict := http.Header{}
+			hConflict.Set(explicitClientHeader, "oh_my_pi, claude_code")
+			rawConflictIn := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, "custom-prefix-conflict-in-"+prefix, "openai", "monet/gemini-4-hydrogen", body1, hConflict))
+			var envConflictIn struct {
+				Result pluginapi.RequestInterceptResponse `json:"result"`
+			}
+			mustUnmarshalJSON(t, rawConflictIn, &envConflictIn)
+			if !envConflictIn.Result.Terminate || envConflictIn.Result.StatusCode != 503 || !strings.Contains(string(envConflictIn.Result.ResponseBody), "omp_cloak_required") {
+				t.Fatalf("monet/* conflicting marker must fail closed 503, got: %+v", envConflictIn.Result)
+			}
+			if !containsStr(envConflictIn.Result.ClearHeaders, explicitClientHeader) {
+				t.Fatalf("monet/* conflicting 503 must clear %s, got %v", explicitClientHeader, envConflictIn.Result.ClearHeaders)
+			}
+
+			reqIDConflictOut := "custom-prefix-conflict-out-" + prefix
+			rawConflictOut := HandleRequestInterceptBefore(makeIntegrationRequestInterceptPayloadWithHeaders(t, reqIDConflictOut, "openai", "agy/gemini-4-hydrogen", body3, hConflict))
+			outConflictOut, _, clearConflictOut := decodeEnvelopeRequestIntercept(t, rawConflictOut)
+			if len(outConflictOut) != 0 {
+				t.Fatalf("agy/* conflicting marker outside model_prefixes must bypass with zero mutation, got: %s", outConflictOut)
+			}
+			if !containsStr(clearConflictOut, explicitClientHeader) {
+				t.Fatalf("agy/* conflicting bypass must clear %s, got %v", explicitClientHeader, clearConflictOut)
+			}
+			if revConflictOut := decodeEnvelopeBody(t, HandleResponseIntercept(makeIntegrationResponseInterceptPayload(t, reqIDConflictOut, "openai", "agy/gemini-4-hydrogen", resp3))); len(revConflictOut) != 0 {
+				t.Fatalf("agy/* conflicting bypass response must not mutate, got: %s", revConflictOut)
+			}
 		})
 	}
 }
