@@ -1,7 +1,10 @@
 package cloak
 
-// Issue #59 (extending ADR 0003): inbound-only Oh My Pi system/developer prompt
-// sanitization for routes matching `model_prefixes` (empty = all models).
+// Issue #59 / #70 (ADR 0003 & ADR 0006): inbound-only Oh My Pi prompt
+// sanitization across Harness-Authored Surfaces (system, system/developer
+// messages, tool descriptions + JSON Schema description/title, and user
+// <system-reminder> spans) for routes matching `model_prefixes` (empty = all
+// models).
 //
 // Rewrites exact `<system-conventions>` / `</system-conventions>` tags,
 // case-insensitive Oh My Pi RFC 2119 normative header signatures, and Oh My Pi's
@@ -121,9 +124,15 @@ func parseOMPPromptSanitizations(value any) ([]ompSanitizationEntry, error) {
 }
 
 // sanitizeOMPPrompt applies the precomputed OMP prompt sanitization rules to
-// top-level `system` and `system`/`developer` message text blocks.
-func sanitizeOMPPrompt(rootMap map[string]any) bool {
+// all Harness-Authored Surfaces: top-level `system`, `system`/`developer`
+// message text blocks, tool declarations (description + JSON Schema
+// description/title, skipping literal-bearing subtrees), and `<system-reminder>`
+// spans inside `user` turns.
+func sanitizeOMPPrompt(rootMap map[string]any, sourceFormat string) bool {
 	rules := activeFilterConfig().ompSanitizationRules
+	if len(rules) == 0 {
+		return false
+	}
 	fn := func(s string) (string, bool) { return sanitizeOMPPromptText(s, rules) }
 	changed := false
 	if system, ok := rootMap["system"]; ok {
@@ -134,6 +143,63 @@ func sanitizeOMPPrompt(rootMap map[string]any) bool {
 	}
 	if rewriteSystemDeveloperMessages(rootMap, true, fn) {
 		changed = true
+	}
+	if toolsRaw, ok := rootMap["tools"].([]any); ok {
+		for _, tRaw := range toolsRaw {
+			tMap, ok := tRaw.(map[string]any)
+			if !ok {
+				continue
+			}
+			if rewriteToolProse(tMap, sourceFormat, fn) {
+				changed = true
+			}
+		}
+	}
+	if rewriteUserSystemReminderMessages(rootMap, fn) {
+		changed = true
+	}
+	return changed
+}
+
+// rewriteUserSystemReminderMessages applies fn strictly inside
+// `<system-reminder>` spans of `role: "user"` messages (`string` content or
+// `[]any` `type: "text"` blocks only). User-Typed Turns outside spans,
+// `tool_result`, `role: "tool"`, `assistant`, and non-text blocks stay untouched.
+func rewriteUserSystemReminderMessages(rootMap map[string]any, fn func(string) (string, bool)) bool {
+	messages, ok := rootMap["messages"].([]any)
+	if !ok {
+		return false
+	}
+	changed := false
+	for _, raw := range messages {
+		msg, ok := raw.(map[string]any)
+		if !ok || msg["role"] != "user" {
+			continue
+		}
+		content, exists := msg["content"]
+		if !exists {
+			continue
+		}
+		switch typed := content.(type) {
+		case string:
+			if next, one := rewriteSystemReminderSpans(typed, fn); one {
+				msg["content"] = next
+				changed = true
+			}
+		case []any:
+			for _, blockRaw := range typed {
+				block, ok := blockRaw.(map[string]any)
+				if !ok || block["type"] != "text" {
+					continue
+				}
+				if text, ok := block["text"].(string); ok {
+					if next, one := rewriteSystemReminderSpans(text, fn); one {
+						block["text"] = next
+						changed = true
+					}
+				}
+			}
+		}
 	}
 	return changed
 }

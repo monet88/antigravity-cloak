@@ -524,7 +524,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 	cloakProtectedToolNames(rootMap, extendedCloak, format)
 	rewriteProtectedBrand(rootMap, format, "oh_my_pi")
 	if !carriesOpenAIResponses(req.SourceFormat) {
-		sanitizeOMPPrompt(rootMap)
+		sanitizeOMPPrompt(rootMap, format)
 	}
 
 	// Machine-generated prose has to name the request-scoped aliases, not the
@@ -541,7 +541,7 @@ func handleProtectedAGY(req *pluginapi.RequestInterceptRequest, resp pluginapi.R
 		ambigRe:    buildCloakAmbiguousRe(extendedCloak),
 	}
 	rewriteToolDescriptions(rootMap, nil, proseCloak, format)
-	rewriteOMPConversationProse(rootMap, nil, proseCloak)
+	rewriteOMPConversationProse(rootMap, proseCloak)
 	if sysVal, ok := rootMap["system"]; ok {
 		if next, c := rewriteProseTextContent(sysVal, func(s string) (string, bool) {
 			return replaceToolNamesInText(s, proseCloak)

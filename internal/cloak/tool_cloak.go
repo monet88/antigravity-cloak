@@ -382,52 +382,44 @@ func rewriteRequestBodyForClient(body []byte, sourceFormat string, forcedClient 
 	}
 
 	mappings := effectiveMappings(cfg, client)
-	descChanged := rewriteToolDescriptions(rootMap, mappings, cachedCloak, sourceFormat)
-	changed = changed || descChanged
-
 	if runOMPPromptSanitization {
-		if sysVal, ok := rootMap["system"]; ok {
-			if next, one := rewriteSystemBlockProse(sysVal, mappings); one {
-				rootMap["system"] = next
+		if len(mappings) > 0 {
+			brandText := func(s string) (string, bool) {
+				next, c := rewriteSystemValue(s, mappings)
+				out, _ := next.(string)
+				return out, c
+			}
+			if rewriteToolDescriptions(rootMap, mappings, nil, sourceFormat) {
+				changed = true
+			}
+			if sysVal, ok := rootMap["system"]; ok {
+				if next, one := rewriteSystemBlockProse(sysVal, mappings); one {
+					rootMap["system"] = next
+					changed = true
+				}
+			}
+			if rewriteSystemDeveloperMessages(rootMap, true, brandText) {
+				changed = true
+			}
+			if rewriteMachineConversationTurns(rootMap, brandText) {
 				changed = true
 			}
 		}
-		if rewriteSystemDeveloperMessages(rootMap, true, func(s string) (string, bool) {
-			next, c := rewriteSystemBlockProse(s, mappings)
-			out, _ := next.(string)
-			return out, c
-		}) {
+		if sanitizeOMPPrompt(rootMap, sourceFormat) {
 			changed = true
 		}
-		// The OpenAI tool-role result is machine-generated prose too: brand it
-		// in the same pre-sanitization pass the system/developer messages get,
-		// so a brand word reaching the model through a result body is cloaked
-		// and the sanitization output written afterward is never rebranded.
-		if msgsRaw, ok := rootMap["messages"].([]any); ok {
-			for _, mRaw := range msgsRaw {
-				msg, ok := mRaw.(map[string]any)
-				if !ok || msg["role"] != "tool" {
-					continue
-				}
-				if content, exists := msg["content"]; exists {
-					if next, one := rewriteProseTextContent(content, func(s string) (string, bool) {
-						next, c := rewriteSystemValue(s, mappings)
-						out, _ := next.(string)
-						return out, c
-					}); one {
-						msg["content"] = next
-						changed = true
-					}
-				}
+		if cachedCloak != nil {
+			if rewriteToolDescriptions(rootMap, nil, cachedCloak, sourceFormat) {
+				changed = true
+			}
+			if rewriteOMPConversationProse(rootMap, cachedCloak) {
+				changed = true
 			}
 		}
-		if sanitizeOMPPrompt(rootMap) {
-			changed = true
-		}
-		if cachedCloak != nil && rewriteOMPConversationProse(rootMap, mappings, cachedCloak) {
-			changed = true
-		}
 	} else {
+		if rewriteToolDescriptions(rootMap, mappings, cachedCloak, sourceFormat) {
+			changed = true
+		}
 		// The top-level system field is branded here in both lanes: the
 		// conversation walker only reaches system/developer-role messages,
 		// never root["system"]. The block-prose helper keeps structural
@@ -897,18 +889,21 @@ func rewriteMachineConversationTurns(root map[string]any, fn func(string) (strin
 	return changed
 }
 
-// rewriteOMPConversationProse is the Oh My Pi tool-alias prose pass over the
-// conversation, shared by the Protected OMP and User-Agent OMP routes matching model_prefixes. It
-// keeps the user-turn contract (only the client's own <system-reminder> spans
-// and tool_result payloads) and cloaks prose fields of the other roles, while
-// structural fields and tool arguments stay untouched.
-func rewriteOMPConversationProse(root map[string]any, mappings []rewriteMapping, cached *cachedCloakPatterns) bool {
+// rewriteOMPConversationProse is the Oh My Pi tool-alias-only prose pass over
+// the conversation, shared by the Protected OMP and User-Agent OMP routes
+// matching model_prefixes. Both routes finish brand rewriting and inbound
+// sanitization before calling this pass, so sanitization replacement text is
+// never re-branded while declared tool names still cloak across all roles.
+func rewriteOMPConversationProse(root map[string]any, cached *cachedCloakPatterns) bool {
+	if cached == nil {
+		return false
+	}
 	msgsRaw, ok := root["messages"].([]any)
 	if !ok {
 		return false
 	}
-	machineFn := func(s string) (string, bool) {
-		return rewriteMachineSpan(s, mappings, cached)
+	aliasFn := func(s string) (string, bool) {
+		return replaceToolNamesInText(s, cached)
 	}
 	changed := false
 	for _, mRaw := range msgsRaw {
@@ -922,27 +917,19 @@ func rewriteOMPConversationProse(root map[string]any, mappings []rewriteMapping,
 		}
 		switch role, _ := msg["role"].(string); role {
 		case "user":
-			if next, c := rewriteUserTurnContent(content, machineFn); c {
+			if next, c := rewriteUserTurnContent(content, aliasFn); c {
 				msg["content"] = next
 				changed = true
 			}
 			continue
 		case "assistant":
-			if next, c := rewriteAssistantProse(content, machineFn); c {
+			if next, c := rewriteAssistantProse(content, aliasFn); c {
 				msg["content"] = next
 				changed = true
 			}
 			continue
 		}
-		// The sanitize lane already brand-rewrote the non-user, non-assistant
-		// roles (system/developer messages and the OpenAI tool role) before
-		// sanitizeOMPPrompt ran, so this post-sanitize catch-all applies the
-		// request-scoped tool aliases only: re-running the brand table here would
-		// rewrite the client's own brand words that the fresh sanitization
-		// replacement text carries as literal content.
-		if next, c := rewriteProseTextContent(content, func(s string) (string, bool) {
-			return replaceToolNamesInText(s, cached)
-		}); c {
+		if next, c := rewriteProseTextContent(content, aliasFn); c {
 			msg["content"] = next
 			changed = true
 		}
@@ -1154,6 +1141,9 @@ func rewriteUserTurnContent(content any, fn func(string) (string, bool)) (any, b
 // create a file whose name the user never asked for.
 func rewriteSystemReminderSpans(text string, fn func(string) (string, bool)) (string, bool) {
 	const openTag, closeTag = "<system-reminder>", "</system-reminder>"
+	if !strings.Contains(text, openTag) {
+		return text, false
+	}
 	var b strings.Builder
 	rest := text
 	changed := false

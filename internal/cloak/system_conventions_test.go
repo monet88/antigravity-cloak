@@ -85,9 +85,14 @@ func (f *fiveRoleCarrierFixture) applyExpectedSanitization(sanitized string) {
 	f.root["messages"].([]any)[1].(map[string]any)["content"] = sanitized
 	if f.tool != nil {
 		if f.format == "openai" {
-			f.tool["function"].(map[string]any)["name"] = "read_file"
+			fn := f.tool["function"].(map[string]any)
+			fn["name"] = "read_file"
+			fn["description"] = sanitized
+			fn["parameters"].(map[string]any)["description"] = sanitized
 		} else {
 			f.tool["name"] = "read_file"
+			f.tool["description"] = sanitized
+			f.tool["input_schema"].(map[string]any)["description"] = sanitized
 		}
 	}
 }
